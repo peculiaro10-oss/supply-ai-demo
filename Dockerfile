@@ -19,7 +19,7 @@ RUN mkdir -p /data/uploads && useradd --create-home --uid 10001 appuser && chown
 USER appuser
 
 EXPOSE 8000
-VOLUME ["/data"]
+# VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3)"
 
 # Schema migrations are an explicit release step (documented in DEPLOYMENT.md),
