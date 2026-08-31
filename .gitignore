@@ -1,0 +1,16 @@
+# Secrets and persistent production data
+.env
+.env.*
+!.env.production.example
+*.db
+*.db-*
+uploads/
+
+# Local tooling
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Capacitor web root — a generated copy of frontend/ (see MOBILE_PACKAGING.md)
+www/

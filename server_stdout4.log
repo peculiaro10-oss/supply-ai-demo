@@ -1,0 +1,52 @@
+INFO:     127.0.0.1:63167 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65427 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52900 - "GET /assets/vendor/tailwindcss-3.4.17.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65427 - "GET /assets/vendor/fontawesome/css/all.min.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52900 - "GET /assets/vendor/html5-qrcode-2.3.8.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65427 - "GET /assets/cauldra-logo.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65427 - "GET /assets/vendor/fontawesome/webfonts/fa-solid-900.woff2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54886 - "GET /assets/favicon-16.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51004 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56113 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60408 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52800 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52800 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:64242 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:51261 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59033 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63438 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57782 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55366 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52354 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52354 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:52354 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:50515 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50515 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:52046 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52046 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:52046 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:49941 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49941 - "GET /assets/vendor/tailwindcss-3.4.17.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49941 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:52174 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59243 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59243 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:59243 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:49498 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:51894 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:51894 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51894 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:51894 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:51894 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:51894 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:51894 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51894 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:51894 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:51894 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:51439 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:56117 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:56117 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56117 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:56117 - "GET /alerts HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58439 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58439 - "POST /auth/refresh HTTP/1.1" 204 No Content

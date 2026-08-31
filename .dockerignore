@@ -1,0 +1,8 @@
+.env
+*.db
+*.db-*
+uploads/
+venv/
+__pycache__/
+*.py[cod]
+.git/

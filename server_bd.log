@@ -1,0 +1,12 @@
+INFO:     127.0.0.1:63501 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52846 - "GET /sales/current-day HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52848 - "GET /sales/current-day HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52861 - "POST /sales/start-business-day HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52863 - "GET /sales/current-day HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50095 - "POST /sales/start-business-day HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50097 - "POST /sales/end-business-day HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50099 - "POST /sales/end-business-day HTTP/1.1" 409 Conflict
+INFO:     127.0.0.1:50108 - "POST /business-days/10/direct-reopen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50110 - "POST /sales/end-business-day HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50112 - "GET /business-days/10/timeline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52648 - "GET /health HTTP/1.1" 200 OK

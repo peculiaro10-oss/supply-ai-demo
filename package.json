@@ -1,0 +1,21 @@
+{
+  "name": "cauldra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cauldra — Inventory & Procurement Management. Native Android/iOS packaging via Capacitor around the existing FastAPI-served web frontend.",
+  "scripts": {
+    "cap:sync": "npx cap sync",
+    "cap:open:android": "npx cap open android",
+    "cap:open:ios": "npx cap open ios",
+    "cap:add:android": "npx cap add android",
+    "cap:add:ios": "npx cap add ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "latest"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "latest",
+    "@capacitor/android": "latest",
+    "@capacitor/ios": "latest"
+  }
+}

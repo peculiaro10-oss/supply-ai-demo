@@ -1,0 +1,15 @@
+.inventory-status-summary { min-height:44px !important; }
+.inventory-status-summary button, .inventory-status-summary .status-filter, #inventory-status-summary button { min-height:40px !important; padding-top:7px !important; padding-bottom:7px !important; }
+.inventory-controls, .inventory-header-controls, #inventory-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+@media (min-width:640px) { .inventory-status-summary { margin-bottom:10px !important; } }
+@media (max-width:639px) { .inventory-controls, .inventory-header-controls, #inventory-controls { width:100%; } }
+/* Keep dashboard cards and modal controls aligned on narrow phones. */
+.usage-meter { min-width:0; }
+.country-flag { width:20px; height:15px; object-fit:cover; border-radius:2px; box-shadow:0 0 0 1px rgba(255,255,255,.16); flex:none; }
+@media (max-width:639px) {
+  #default-dashboard-section { padding-left:14px!important; padding-right:14px!important; }
+  #dynamic-welcome-banner { align-items:flex-start!important; gap:10px!important; padding:16px!important; }
+  #dynamic-welcome-banner .welcome-copy-row { flex-wrap:wrap!important; }
+  #subscription-resources { grid-template-columns:repeat(2,minmax(0,1fr))!important; }
+  .fixed.inset-0 > .max-w-lg, .fixed.inset-0 > .max-w-md, .fixed.inset-0 > .max-w-sm { margin:0!important; width:calc(100vw - 1.5rem)!important; max-height:calc(100vh - 1.5rem)!important; }
+}

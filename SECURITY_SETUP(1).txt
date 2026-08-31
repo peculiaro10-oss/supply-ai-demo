@@ -1,0 +1,13 @@
+CAULDRA SECURITY SETUP
+
+1. Create a private .env file beside main.py.
+2. Generate the server secret in Command Prompt:
+   python -c "import secrets; print(secrets.token_hex(32))"
+3. Put the generated value in:
+   SUPPLY_AI_SECRET_KEY=...
+4. Add OPENAI_API_KEY only for invoice OCR.
+5. Add GEMINI_API_KEY for Cauldra chat, reasoning, insights and pricing advice.
+6. Add RESEND_API_KEY for email recovery.
+7. Add Termii/Twilio credentials for SMS recovery.
+8. Never upload .env to chat, GitHub, or the frontend.
+9. For production HTTPS, set SUPPLY_AI_REFRESH_COOKIE_SECURE=true.

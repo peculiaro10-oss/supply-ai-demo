@@ -1,0 +1,29 @@
+INFO:     127.0.0.1:58947 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58963 - "GET /audit-logs?limit=100 HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58965 - "GET /audit-logs?date_to=2026-08-19T23:56:00.000Z HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58967 - "GET /audit-logs?date_to=2026-08-19 HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58997 - "GET /audit-logs?limit=100 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58999 - "GET /audit-logs?date_to=2026-08-19T23:56:00.000Z HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59002 - "GET /audit-logs?date_to=2026-08-19 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54826 - "GET /audit-logs?date_to=2026-08-19T23:00:00.000Z HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54828 - "GET /audit-logs?date_to=2026-08-18 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54831 - "GET /audit-logs?date_to=2026-08-19T23:55:02.129015Z HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54834 - "GET /audit-logs?date_to=2026-08-19T23:55:02.130000Z HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58803 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58803 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:58803 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:54653 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62321 - "GET /assets/vendor/tailwindcss-3.4.17.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62321 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:62321 - "GET /assets/favicon-16.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57596 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58557 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58557 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:58557 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:52115 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52115 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:63533 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63533 - "GET /assets/vendor/tailwindcss-3.4.17.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63533 - "POST /auth/refresh HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:50163 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50163 - "POST /auth/refresh HTTP/1.1" 204 No Content
