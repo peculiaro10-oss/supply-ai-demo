@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en" class="dark cauldra-auth-booting">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -51,8 +51,91 @@
 
     <link rel="stylesheet" href="/css/base.css">
     <link rel="stylesheet" href="/css/dashboard-fixes.css">
+    <!-- Prevent the static Guest/Get Started state from flashing before
+         /js/app.js restores an existing refresh-cookie session. -->
+    <style id="cauldra-auth-boot-cloak">
+        html.cauldra-auth-booting { background: #070B14; }
+        html.cauldra-auth-booting body > *:not(#cauldra-auth-boot-screen) {
+            visibility: hidden !important;
+        }
+        #cauldra-auth-boot-screen { display: none; }
+        html.cauldra-auth-booting #cauldra-auth-boot-screen {
+            display: flex;
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+            background: #070B14;
+            color: #7C8BA1;
+            font: 600 12px/1.4 Inter, system-ui, -apple-system, sans-serif;
+        }
+        html.cauldra-auth-booting #cauldra-auth-boot-screen::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            margin-right: 10px;
+            border-radius: 999px;
+            background: #436BEE;
+            animation: cauldraAuthBootPulse 1s ease-in-out infinite alternate;
+        }
+        @keyframes cauldraAuthBootPulse {
+            from { opacity: .35; transform: scale(.8); }
+            to { opacity: 1; transform: scale(1); }
+        }
+    </style>
+    <script>
+        // Keep this fix self-contained in this uploaded HTML.
+        // Watch the startup refresh request made by app.js and reveal the
+        // interface only after its auth state has had time to render.
+        (() => {
+            const originalFetch = window.fetch.bind(window);
+            let refreshStarted = false;
+            let bootFinished = false;
+
+            const finishAuthBoot = () => {
+                if (bootFinished) return;
+                bootFinished = true;
+                setTimeout(() => {
+                    requestAnimationFrame(() => requestAnimationFrame(() => {
+                        document.documentElement.classList.remove('cauldra-auth-booting');
+                    }));
+                }, 0);
+            };
+
+            window.fetch = (...args) => {
+                const request = args[0];
+                const url = typeof request === 'string'
+                    ? request
+                    : (request && typeof request.url === 'string' ? request.url : '');
+                const isInitialRefresh = /(?:^|\/)auth\/refresh(?:[?#]|$)/.test(url);
+
+                if (isInitialRefresh && !bootFinished) refreshStarted = true;
+
+                const pending = originalFetch(...args);
+                if (!isInitialRefresh || bootFinished) return pending;
+
+                return pending.then(
+                    response => {
+                        finishAuthBoot();
+                        return response;
+                    },
+                    error => {
+                        finishAuthBoot();
+                        throw error;
+                    }
+                );
+            };
+
+            window.addEventListener('load', () => {
+                if (!refreshStarted) finishAuthBoot();
+            }, { once: true });
+        })();
+    </script>
 </head>
 <body class="bg-bgMain text-textMain font-sans antialiased min-h-screen flex selection:bg-primary/35 selection:text-primary" onclick="closeAllActionDropdowns(event)">
+
+    <div id="cauldra-auth-boot-screen" aria-live="polite" aria-label="Restoring session">Restoring your Cauldra session…</div>
 
     <div id="toast-container" class="fixed top-20 right-6 z-[100] flex flex-col gap-2.5 pointer-events-none max-w-sm w-[calc(100%-2rem)] sm:w-full"></div>
     <div id="row-action-menu" class="hidden fixed z-[140] bg-cardBg border border-borderCol rounded-xl shadow-2xl py-1 text-xs min-w-[180px]"></div>
