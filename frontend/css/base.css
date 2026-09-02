@@ -77,6 +77,13 @@
             background: rgba(148, 163, 184, 0.55);
         }
 
+        /* Authentication state must win over every responsive display rule. */
+        #inventory-guest-preview[hidden],
+        #inventory-guest-preview.hidden {
+            display: none !important;
+            pointer-events: none !important;
+        }
+
         @media (max-width:639px){
             #main-layout-container{min-height:100vh;}
             #mobile-nav-drawer{width:min(86vw,330px);}
@@ -138,7 +145,7 @@
             #inventory-status-chip button{line-height:1;opacity:.75;}
             .inventory-filter-row{gap:clamp(.4rem,2vw,.6rem)!important;}
             .inventory-filter-row select,.inventory-filter-row button{height:clamp(38px,10vw,42px)!important;font-size:clamp(.62rem,2.7vw,.72rem)!important;}
-            #inventory-guest-preview{display:block;}
+            #inventory-guest-preview:not([hidden]):not(.hidden){display:flex;}
             .guest-inventory-preview-row{filter:blur(3px);opacity:.7;user-select:none;}
             #header-global-search{font-size:clamp(.64rem,2.8vw,.75rem)!important;height:clamp(38px,10vw,42px)!important;}
             #header-global-search-wrap{max-width:none;flex:1;min-width:0;}

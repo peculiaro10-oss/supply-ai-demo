@@ -40,6 +40,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
+from storage import build_storage_provider
 
 try:
     from dotenv import load_dotenv
@@ -81,13 +82,11 @@ def resolve_app_path(value: str, default: Path) -> Path:
 # -----------------------------------------------------------------------------
 # DATABASE_URL — mandatory, PostgreSQL-only, source of truth for both the app
 # and Alembic (see alembic/env.py, which reads this exact same variable).
-# Cauldra used to fall back to a local SQLite file when this was unset; that
-# fallback is gone entirely — a database engine chosen silently by "was an
-# env var present or not" is exactly the kind of environment drift this
-# removes. Every environment (development, staging, production, tests) must
-# supply a real PostgreSQL DATABASE_URL of its own; see DATABASE_MIGRATION.md
-# and .env.example for the recommended per-environment database names
-# (cauldra_dev / cauldra_test / cauldra_prod).
+# There is no fallback engine: if DATABASE_URL is missing or is not a
+# PostgreSQL URL the process refuses to start. Every environment
+# (development, staging, production, tests) must supply its own real
+# PostgreSQL DATABASE_URL; see .env.example for the recommended per-environment
+# database names (cauldra_dev / cauldra_test / cauldra_prod).
 # -----------------------------------------------------------------------------
 def _normalize_database_url(raw: str) -> str:
     """Normalizes provider-supplied URL forms into what this app's pinned
@@ -1392,7 +1391,24 @@ class NotificationPreference(Base):
     category = Column(String, nullable=False)
     enabled = Column(Boolean, nullable=False, default=True)
 
-UPLOAD_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_STORAGE = build_storage_provider(UPLOAD_STORAGE_DIR)
+
+
+@event.listens_for(Session, "after_commit")
+def _forget_committed_uploads(session: Session) -> None:
+    """A committed metadata row now owns each uploaded object."""
+    session.info.pop("pending_upload_storage_keys", None)
+
+
+@event.listens_for(Session, "after_rollback")
+def _remove_rolled_back_uploads(session: Session) -> None:
+    """Best-effort cleanup when object upload succeeds but DB work rolls back."""
+    keys = session.info.pop("pending_upload_storage_keys", [])
+    for key in keys:
+        try:
+            UPLOAD_STORAGE.delete(key)
+        except Exception as exc:
+            print(f"[upload-cleanup-failed] provider={UPLOAD_STORAGE.name} exception_type={type(exc).__name__}")
 
 # Schema creation, ad-hoc ALTER/CREATE INDEX statements, and one-time legacy
 # data backfills used to live here, gated behind AUTO_CREATE_SCHEMA. All of
@@ -1403,9 +1419,10 @@ UPLOAD_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 # every one-time data backfill (Business Day status/business_day_id,
 # card_verified grandfathering, subscription-anchor backfill, legacy role
 # rename, warehouse registry seed) is now migration 0012_legacy_data_backfill.
-# Ordinary application startup performs schema verification (see
-# verify_database_connectivity() above) and nothing else — run
-# `alembic upgrade head` to apply schema changes.
+# Ordinary application startup performs connectivity verification (see
+# verify_database_connectivity() above) and nothing else. Supabase projects
+# installed through SCHEMA_INSTALLATION.md remain human-managed in the SQL
+# Editor; Alembic is only for environments explicitly managed by Alembic.
 
 # Central subscription and AI-cost policy.  None represents an intentionally
 # unlimited Enterprise people/location resource, not a large hidden cap.
@@ -2141,18 +2158,12 @@ def persist_upload(db: Session, user: User, kind: str, original_name: str, conte
     )
     db.add(row)
     db.flush()
-    key = f"{user.business_id}/{row.id}-{secrets.token_urlsafe(18)}{suffix}"
-    target = (UPLOAD_STORAGE_DIR / key).resolve()
-    if UPLOAD_STORAGE_DIR not in target.parents:
-        raise HTTPException(status_code=500, detail="The upload storage location is invalid.")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
+    key = f"businesses/{user.business_id}/uploads/{row.id}-{secrets.token_urlsafe(18)}{suffix}"
     try:
-        temporary.write_bytes(raw)
-        os.replace(temporary, target)
-    except OSError as exc:
-        temporary.unlink(missing_ok=True)
+        UPLOAD_STORAGE.put_bytes(key, raw, content_type)
+    except Exception as exc:
         raise HTTPException(status_code=503, detail="The server could not securely store the uploaded file.") from exc
+    db.info.setdefault("pending_upload_storage_keys", []).append(key)
     row.storage_key = key
     return row
 
@@ -2549,8 +2560,7 @@ def checkout_key_expr():
     a real client_ref that happened to be all digits.
 
     cast(...) + literal string concat compiles to `'S' || CAST(id AS VARCHAR)`
-    on both SQLite and PostgreSQL — verified against both dialects; no
-    dialect-specific branching needed."""
+    on PostgreSQL; no dialect-specific branching needed."""
     return func.coalesce(SaleModel.client_ref, literal("S") + cast(SaleModel.id, String))
 
 def compute_financial_summary(db: Session, business_id: int, start_utc: Optional[datetime], end_utc: Optional[datetime]) -> Dict[str, Any]:
@@ -4685,10 +4695,10 @@ def delete_business_profile(response: Response, user: User = Depends(get_current
     established convention for every table in this app) to be correctly
     swept up here with no code change.
 
-    The ONE thing a database cascade cannot do is delete files on disk —
-    StoredUpload rows disappear with everything else, but the physical
-    files under UPLOAD_STORAGE_DIR do not, so those paths are captured
-    before deletion and removed after commit succeeds."""
+    The ONE thing a database cascade cannot do is delete objects from the
+    configured private storage provider. StoredUpload rows disappear with
+    everything else, so their opaque keys are captured before deletion and
+    removed only after the database commit succeeds."""
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Only the business Admin can delete the business profile.")
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
@@ -4697,7 +4707,7 @@ def delete_business_profile(response: Response, user: User = Depends(get_current
 
     business_id, business_code = biz.id, biz.business_code
     upload_rows = db.query(StoredUpload).filter(StoredUpload.business_id == business_id).all()
-    upload_paths = [(UPLOAD_STORAGE_DIR / row.storage_key).resolve() for row in upload_rows]
+    upload_keys = [row.storage_key for row in upload_rows]
 
     # No audit_logs entry is written for this action: audit_logs.business_id
     # is itself part of the cascade (by design — the whole business's audit
@@ -4715,9 +4725,14 @@ def delete_business_profile(response: Response, user: User = Depends(get_current
         db.rollback()
         raise HTTPException(status_code=500, detail="The business could not be deleted. Please try again.")
 
-    for path in upload_paths:
-        if UPLOAD_STORAGE_DIR in path.parents:
-            path.unlink(missing_ok=True)
+    for key in upload_keys:
+        try:
+            UPLOAD_STORAGE.delete(key)
+        except Exception as exc:
+            print(
+                f"[business-upload-cleanup-failed] business_id={business_id} "
+                f"provider={UPLOAD_STORAGE.name} exception_type={type(exc).__name__}"
+            )
     clear_refresh_cookie(response)
     return {"message": "Business profile deleted successfully."}
 
@@ -9528,12 +9543,24 @@ def download_upload(upload_id: int, user: User = Depends(get_current_user), db: 
     row = db.query(StoredUpload).filter(StoredUpload.id == upload_id, StoredUpload.business_id == user.business_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Uploaded file is unavailable.")
-    path = (UPLOAD_STORAGE_DIR / row.storage_key).resolve()
-    if UPLOAD_STORAGE_DIR not in path.parents or not path.is_file():
+    path = UPLOAD_STORAGE.get_path(row.storage_key)
+    content = None
+    if path is None:
+        try:
+            content = UPLOAD_STORAGE.read_bytes(row.storage_key)
+        except Exception:
+            raise HTTPException(status_code=404, detail="Uploaded file is unavailable.")
+    elif not path.is_file():
         raise HTTPException(status_code=404, detail="Uploaded file is unavailable.")
     add_audit(db, user, "UPLOADED_FILE_DOWNLOADED", f"Downloaded retained {row.kind} file {row.original_name}.")
     db.commit()
-    return FileResponse(str(path), media_type=row.content_type, filename=row.original_name, content_disposition_type="attachment")
+    if path is not None:
+        return FileResponse(str(path), media_type=row.content_type, filename=row.original_name, content_disposition_type="attachment")
+    return Response(
+        content=content,
+        media_type=row.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{row.original_name}"'},
+    )
 
 @app.get("/ai/insights")
 def ai_insights(user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
@@ -9575,6 +9602,15 @@ def health():
 
 @app.get("/")
 def serve_index():
+    return FileResponse(str(INDEX_PATH))
+
+# Explicit entry points for the Hub/onboarding surface. The same app shell is
+# served so the frontend can restore the HttpOnly refresh session first, then
+# apply its canonical auth + business guard: guests/users without a business
+# see onboarding, while users with an active business are returned to `/`.
+@app.get("/hub", include_in_schema=False)
+@app.get("/onboarding", include_in_schema=False)
+def serve_hub_onboarding():
     return FileResponse(str(INDEX_PATH))
 
 # Served from the root path (not /assets/) so its default scope covers the

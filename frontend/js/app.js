@@ -16042,6 +16042,45 @@
             return businessProfile && businessProfile.company_name && businessProfile.company_name.trim() !== "";
         }
 
+        // One canonical client-side rule for the state that may use the
+        // authenticated application instead of the Hub/onboarding flow.
+        // Keep auth, user identity, and business membership together so
+        // navigation and feature gates cannot drift into subtly different
+        // interpretations of "signed in with a business".
+        function hasAuthenticatedBusinessContext() {
+            return !!(authToken && currentUserProfile && hasActiveBusinessProfile());
+        }
+
+        const HUB_ONBOARDING_PATHS = new Set(['/hub', '/onboarding']);
+
+        function isHubOnboardingRoute() {
+            const path = `/${String(window.location.pathname || '/')
+                .replace(/^\/+|\/+$/g, '')}`.toLowerCase();
+            return HUB_ONBOARDING_PATHS.has(path);
+        }
+
+        function redirectAuthenticatedBusinessToDashboard() {
+            if (!hasAuthenticatedBusinessContext()) return false;
+
+            closeBusinessAuthModal();
+            closeMobileNav();
+            if (isHubOnboardingRoute()) {
+                window.history.replaceState({}, document.title, '/');
+            }
+            window.requestAnimationFrame(() => {
+                document.getElementById('dynamic-dashboard-container')
+                    ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+            return true;
+        }
+
+        function handleHubOnboardingRoute() {
+            if (!isHubOnboardingRoute()) return false;
+            if (redirectAuthenticatedBusinessToDashboard()) return true;
+            openBusinessAuthModal();
+            return true;
+        }
+
         const ROLE_FEATURES = {
             admin: new Set([
                 'inventory', 'add product', 'new sale', 'generate po', 'purchase orders', 'suppliers',
@@ -16473,7 +16512,7 @@
             return key ? t(key) : featureName;
         }
         function checkFeatureAccess(featureName, callback) {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInToUseFeature", {feature: featureDisplayName(featureName)}), 'info');
                 openBusinessAuthModal();
                 return;
@@ -16541,7 +16580,12 @@
             if (teamManagementGroup) teamManagementGroup.classList.toggle('hidden', !teamManagementVisible);
 
             const systemSection = document.getElementById('sidebar-system-section');
-            if (systemSection) systemSection.classList.toggle('hidden', !hasFeaturePermission('business profile'));
+            // Settings remains permission-gated, but Refresh retains the old
+            // header action's availability for every authenticated role.
+            if (systemSection) systemSection.classList.toggle(
+                'hidden',
+                !hasFeaturePermission('business profile') && !hasAuthenticatedBusinessContext()
+            );
 
             // Business Profile is Admin-editable only. Managers can use the employee directory,
             // but cannot see or edit the business profile/data-storage controls. Staff see neither.
@@ -16635,7 +16679,7 @@
             // signed-in business) is shown as a separate, visually secondary
             // line underneath it, both in the desktop sidebar and the mobile
             // nav header.
-            const businessName = (authToken && hasActiveBusinessProfile()) ? businessProfile.company_name : "";
+            const businessName = hasAuthenticatedBusinessContext() ? businessProfile.company_name : "";
 
             const brandTitleEl = document.getElementById("app-brand-title");
             if (brandTitleEl) brandTitleEl.innerText = "Cauldra";
@@ -16670,7 +16714,7 @@
             const copyLinkBtn = document.getElementById("banner-copy-link-btn");
 
             const bannerEl = document.getElementById("dynamic-welcome-banner");
-            if (authToken && currentUserProfile && hasActiveBusinessProfile()) {
+            if (hasAuthenticatedBusinessContext()) {
                 if (bannerEl) bannerEl.classList.add("signed-in");
                 const userNameUpper = (currentUserProfile.username || "").toUpperCase();
                 const positionText = currentUserProfile.position || "";
@@ -16718,13 +16762,65 @@
             }
         }
 
-        function copyBusinessDetailsLink() {
+        function writePlainTextToClipboard(value) {
+            const plainText = typeof value === "string" ? value : String(value ?? "");
+
+            const copyWithTextArea = () => new Promise((resolve, reject) => {
+                const textArea = document.createElement("textarea");
+                textArea.value = plainText;
+                textArea.setAttribute("readonly", "");
+                textArea.setAttribute("aria-hidden", "true");
+                textArea.style.position = "fixed";
+                textArea.style.top = "0";
+                textArea.style.left = "-9999px";
+                textArea.style.opacity = "0";
+                document.body.appendChild(textArea);
+
+                try {
+                    textArea.focus({ preventScroll: true });
+                    textArea.select();
+                    textArea.setSelectionRange(0, plainText.length);
+                    if (!document.execCommand("copy")) throw new Error("Plain-text clipboard fallback failed");
+                    resolve();
+                } catch (error) {
+                    reject(error);
+                } finally {
+                    textArea.remove();
+                }
+            });
+
+            const copyWithClipboardItem = () => {
+                if (!navigator.clipboard || typeof navigator.clipboard.write !== "function" || typeof ClipboardItem !== "function") {
+                    return copyWithTextArea();
+                }
+                const textItem = new ClipboardItem({
+                    "text/plain": new Blob([plainText], { type: "text/plain" })
+                });
+                return navigator.clipboard.write([textItem]).catch(copyWithTextArea);
+            };
+
+            if (window.isSecureContext && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                return navigator.clipboard.writeText(plainText).catch(copyWithClipboardItem);
+            }
+            if (window.isSecureContext) return copyWithClipboardItem();
+            return copyWithTextArea();
+        }
+
+        function copyBusinessIdFromWelcomeCard() {
             if (!businessProfile) return;
-            const textToCopy = `Business: ${businessProfile.company_name} | Code: ${businessProfile.business_code}`;
-            navigator.clipboard.writeText(textToCopy).then(() => {
-                showToast(t("settings.detailsCopied"), "success");
+            const businessId = typeof businessProfile.business_code === "string"
+                ? businessProfile.business_code
+                : String(businessProfile.business_code ?? "");
+
+            if (!businessId) {
+                showToast(t("settings.idCopyFailed"), "error");
+                return;
+            }
+
+            writePlainTextToClipboard(businessId).then(() => {
+                showToast(t("settings.idCopied"), "success");
             }).catch(() => {
-                showToast(t("settings.detailsCopyFailed"), "error");
+                showToast(t("settings.idCopyFailed"), "error");
             });
         }
 
@@ -16732,7 +16828,7 @@
             const container = document.getElementById("sidebar-auth-container");
             if (!container) return;
 
-            if (authToken && currentUserProfile && hasActiveBusinessProfile()) {
+            if (hasAuthenticatedBusinessContext()) {
                 const userNameUpper = (currentUserProfile.username || "").toUpperCase();
                 const positionText = currentUserProfile.position || "";
                 const displayName = positionText ? `${userNameUpper} (${positionText})` : userNameUpper;
@@ -16764,18 +16860,30 @@
             }
         }
 
-function updateGuestHeaderState() {
-            const signedIn = !!(authToken && currentUserProfile && hasActiveBusinessProfile());
+        function syncInventoryGuestPreview(signedIn = hasAuthenticatedBusinessContext()) {
+            const guestPreview = document.getElementById('inventory-guest-preview');
+            if (!guestPreview) return;
+
+            guestPreview.classList.toggle('hidden', signedIn);
+            guestPreview.hidden = signedIn;
+            guestPreview.toggleAttribute('inert', signedIn);
+            guestPreview.setAttribute('aria-hidden', signedIn ? 'true' : 'false');
+        }
+
+ function updateGuestHeaderState() {
+            const signedIn = hasAuthenticatedBusinessContext();
             const notify = document.getElementById('header-notification-btn');
-            const refresh = document.getElementById('header-refresh-btn');
+            const refreshButtons = document.querySelectorAll('[data-refresh-action]');
             const newSale = document.getElementById('nav-btn-new-sale');
             const guest = document.getElementById('guest-get-started-btn');
             if (notify) { notify.classList.toggle('hidden', !signedIn); notify.classList.toggle('flex', signedIn); }
-            if (refresh) refresh.classList.toggle('hidden', !signedIn);
+            refreshButtons.forEach(refresh => {
+                refresh.classList.toggle('hidden', !signedIn);
+                refresh.classList.toggle('flex', signedIn);
+            });
             if (newSale) newSale.classList.toggle('hidden', !signedIn);
             if (guest) guest.classList.toggle('hidden', signedIn);
-            const guestPreview = document.getElementById('inventory-guest-preview');
-            if (guestPreview) guestPreview.classList.toggle('hidden', signedIn);
+            syncInventoryGuestPreview(signedIn);
             updateInventoryStatusUI();
             if (signedIn) startNotificationPolling(); else stopNotificationPolling();
         }
@@ -16784,11 +16892,12 @@ function updateGuestHeaderState() {
             const nav = document.getElementById('mobile-nav-content');
             const auth = document.getElementById('mobile-auth-container');
             const source = document.querySelector('aside nav');
-            const signedIn = !!(authToken && currentUserProfile && hasActiveBusinessProfile());
+            const signedIn = hasAuthenticatedBusinessContext();
 
             if (nav && source) {
                 const clone = source.cloneNode(true);
                 clone.className = 'space-y-1';
+                clone.querySelector('#sidebar-refresh-btn')?.removeAttribute('id');
                 clone.querySelectorAll('button, a').forEach(btn => {
                     btn.classList.add('py-3');
                     if (!signedIn) {
@@ -16828,9 +16937,6 @@ function updateGuestHeaderState() {
                             <button type="button" onclick="openAlertsModal(); closeMobileNav();" class="w-full text-left flex items-center gap-2.5 px-2.5 py-3 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer">
                                 <i class="fa-solid fa-bell w-4 text-warning"></i> ${t('navigation.notifications')} <span id="mobile-notification-badge" class="ml-auto bg-danger text-white text-[9px] px-1.5 py-0.5 rounded-full font-bold">0</span>
                             </button>
-                            <button type="button" onclick="handleManualRefreshClick(); closeMobileNav();" class="w-full text-left flex items-center gap-2.5 px-2.5 py-3 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer">
-                                <i class="fa-solid fa-rotate w-4"></i> ${t('navigation.refreshData')}
-                            </button>
                         </div>`;
                     nav.appendChild(utility);
                     const desktopBadge = document.getElementById('notification-badge');
@@ -16869,22 +16975,25 @@ function updateGuestHeaderState() {
 
             const hub = document.getElementById('mobile-hub-btn');
             if (hub) {
-                hub.disabled = false;
+                hub.classList.toggle('hidden', signedIn);
+                hub.setAttribute('aria-hidden', signedIn ? 'true' : 'false');
+                hub.disabled = signedIn;
                 hub.classList.remove('guest-preview-disabled');
                 if (!signedIn) {
                     hub.classList.remove('guest-preview-disabled');
                     hub.disabled = false;
                     hub.setAttribute('aria-label', t('navigation.signInToUseHub'));
                     hub.setAttribute('onclick', 'openBusinessAuthModal(); closeMobileNav();');
+                } else {
+                    hub.removeAttribute('onclick');
                 }
             }
         }
 
         function scrollToDashboardFromMobile() {
-            const hub = document.getElementById('mobile-hub-btn');
-            if (!(authToken && currentUserProfile && hasActiveBusinessProfile())) return;
+            if (redirectAuthenticatedBusinessToDashboard()) return;
             closeMobileNav();
-            document.getElementById('dynamic-dashboard-container')?.scrollIntoView({behavior:'smooth', block:'start'});
+            openBusinessAuthModal();
         }
 
         function openMobileNav() {
@@ -17160,9 +17269,13 @@ function updateGuestHeaderState() {
         }
 
         function openBusinessAuthModal() {
+            // This guard protects every Hub/onboarding entry point, including
+            // direct route navigation and stale/manual calls to this function.
+            if (redirectAuthenticatedBusinessToDashboard()) return false;
             ensureCountrySelectorReady();
             switchBizAuthView('landing');
             document.getElementById("business-auth-modal").classList.remove("hidden");
+            return true;
         }
 
         function ensureCountrySelectorReady() {
@@ -17562,6 +17675,7 @@ function updateGuestHeaderState() {
 
                     verifiedOnboardingReference = null; // consumed server-side; never reusable
                     closeBusinessAuthModal();
+                    redirectAuthenticatedBusinessToDashboard();
                     updateCompanyHeaderDisplay();
                     updateWelcomeBanner();
                     renderAuthButton();
@@ -17805,6 +17919,7 @@ function updateGuestHeaderState() {
 
 
                 closeBusinessAuthModal();
+                redirectAuthenticatedBusinessToDashboard();
                 updateCompanyHeaderDisplay();
                 updateFormCurrencyLabels();
                 syncLanguageFromProfile(businessProfile);
@@ -17938,7 +18053,7 @@ function updateGuestHeaderState() {
         }
 
         async function openSettingsModal() {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -17971,7 +18086,7 @@ function updateGuestHeaderState() {
         }
 
         async function openBillingModal() {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -17992,7 +18107,7 @@ function updateGuestHeaderState() {
         }
 
         async function openActivityHistoryModal() {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -18017,7 +18132,7 @@ function updateGuestHeaderState() {
         // separate destination and modal from Account Action Requests below —
         // they must never redirect into one another.
         async function openTeamManagementModal() {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -18041,7 +18156,7 @@ function updateGuestHeaderState() {
         // requests for Staff account actions. Its own dedicated modal — never
         // the Employees interface.
         async function openAccountActionRequestsModal() {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -18507,6 +18622,11 @@ function updateGuestHeaderState() {
                 pendingOnboardingRef === reference;
 
             if (isOnboardingReturn) {
+                if (redirectAuthenticatedBusinessToDashboard()) {
+                    sessionStorage.removeItem('cauldra_pending_onboarding_reference');
+                    window.history.replaceState({}, document.title, '/');
+                    return;
+                }
                 openBusinessAuthModal();
                 switchBizAuthView('payment-verifying');
 
@@ -19739,7 +19859,7 @@ function updateGuestHeaderState() {
         }
 
         function openAddProductModal() {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -19754,7 +19874,7 @@ function updateGuestHeaderState() {
         }
 
         function openAICenterModal() {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -19846,7 +19966,7 @@ function updateGuestHeaderState() {
         }
 
         function openSaleModal() {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -20369,7 +20489,7 @@ function updateGuestHeaderState() {
             const actionBtn = document.getElementById('business-day-header-action-btn');
             let d = { open: false, status: "NOT_STARTED", business_day: null };
             try {
-                if (authToken && hasActiveBusinessProfile()) {
+                if (hasAuthenticatedBusinessContext()) {
                     const res = await fetch(`${API_URL}/sales/current-day`, { headers: { "Authorization": `Bearer ${authToken}` } });
                     if (res.ok) d = await res.json();
                 }
@@ -20390,7 +20510,7 @@ function updateGuestHeaderState() {
             if (typeof loadProfitDashboardCards === 'function') loadProfitDashboardCards();
 
             if (!wrap || !dot || !label || !actionBtn) return d;
-            if (!authToken || !hasActiveBusinessProfile()) { wrap.classList.add('hidden'); wrap.classList.remove('flex'); return d; }
+            if (!hasAuthenticatedBusinessContext()) { wrap.classList.add('hidden'); wrap.classList.remove('flex'); return d; }
             wrap.classList.remove('hidden'); wrap.classList.add('flex');
 
             // Backend-authorized roles only (see /sales/start-business-day and
@@ -21324,7 +21444,7 @@ function updateGuestHeaderState() {
         function exportTeamPresenceExcel(button) { runExcelExport(button, buildTeamPresenceExportSpec, "No team presence data available to export."); }
 
         function openPOModal() { 
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -21335,7 +21455,7 @@ function updateGuestHeaderState() {
         function closePOModal() { document.getElementById("po-modal").classList.add("hidden"); }
         
         function openSupplierModal() { 
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -21346,7 +21466,7 @@ function updateGuestHeaderState() {
         function closeSupplierModal() { document.getElementById("supplier-modal").classList.add("hidden"); }
         
         function openWarehouseModal() { 
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -21367,7 +21487,7 @@ function updateGuestHeaderState() {
         const EXPENSE_HISTORY_PAGE_SIZE = 20;
 
         function openExpensesModal() {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -21768,7 +21888,7 @@ function updateGuestHeaderState() {
         }
 
         function openPredictiveModal(initialTab) {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -21782,7 +21902,7 @@ function updateGuestHeaderState() {
         function closeAlertsModal() { document.getElementById("alerts-modal").classList.add("hidden"); }
         
         function openPriceMonitorModal() { 
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -21793,7 +21913,7 @@ function updateGuestHeaderState() {
         function closePriceMonitorModal() { document.getElementById("price-monitor-modal").classList.add("hidden"); }
 
         function updateDashboardMetrics() {
-            const hasBusinessContext = !!(authToken && currentUserProfile && hasActiveBusinessProfile());
+            const hasBusinessContext = hasAuthenticatedBusinessContext();
 
             // Guest state deliberately shows the same four cards, but with zero values.
             // Once authenticated, all figures continue to come from the existing business-scoped data.
@@ -22216,7 +22336,7 @@ function updateGuestHeaderState() {
         let dashboardSubscriptionWarning = null;
         async function checkSubscriptionWarningForDashboard() {
             dashboardSubscriptionWarning = null;
-            if (!authToken || !hasActiveBusinessProfile() || !['admin', 'manager'].includes(getCurrentRole())) { renderNeedsAttention(); return; }
+            if (!hasAuthenticatedBusinessContext() || !['admin', 'manager'].includes(getCurrentRole())) { renderNeedsAttention(); return; }
             try {
                 const res = await fetch(`${API_URL}/subscription/usage`, { credentials: 'include', headers: { 'Authorization': `Bearer ${authToken}`, 'Accept': 'application/json' } });
                 if (res.ok) {
@@ -22240,7 +22360,7 @@ function updateGuestHeaderState() {
         let lastFinancialIntelData = null;
         async function loadFinancialHealthCards() {
             lastFinancialIntelData = null;
-            if (!authToken || !hasActiveBusinessProfile()) { renderBusinessInsights(); return; }
+            if (!hasAuthenticatedBusinessContext()) { renderBusinessInsights(); return; }
             try {
                 const res = await fetch(`${API_URL}/products/financial-intelligence`, { credentials: 'include', headers: { 'Authorization': `Bearer ${authToken}`, 'Accept': 'application/json' } });
                 if (!res.ok) {
@@ -22294,7 +22414,7 @@ function updateGuestHeaderState() {
         async function loadProfitDashboardCards() {
             dashboardTodayProfit = null;
             dashboardSalesToday = null;
-            if (!authToken || !hasActiveBusinessProfile() || !hasFeaturePermission('profit')) { renderBusinessInsights(); return; }
+            if (!hasAuthenticatedBusinessContext() || !hasFeaturePermission('profit')) { renderBusinessInsights(); return; }
             try {
                 const res = await fetch(`${API_URL}/business-days/current-summary`, { headers: { "Authorization": `Bearer ${authToken}` } });
                 // `open: false` (no active session right now — e.g. between
@@ -22310,7 +22430,7 @@ function updateGuestHeaderState() {
 
         let profitActivePeriod = "month";
         function openProfitModal(period) {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -22574,7 +22694,7 @@ function updateGuestHeaderState() {
             dashboardBrainAttention = [];
             dashboardBrainLearningMessage = null;
             dashboardBrainForbiddenMessage = null;
-            if (!authToken || !hasActiveBusinessProfile()) { renderBusinessInsights(); return; }
+            if (!hasAuthenticatedBusinessContext()) { renderBusinessInsights(); return; }
             try {
                 const data = await fetchBusinessBrain();
                 dashboardBrainAttention = data.attention || [];
@@ -22708,7 +22828,7 @@ function updateGuestHeaderState() {
         let dashboardPendingReopenCount = 0;
         async function checkPendingReopenCountForDashboard() {
             dashboardPendingReopenCount = 0;
-            if (authToken && hasActiveBusinessProfile() && ['admin', 'manager'].includes(getCurrentRole())) {
+            if (hasAuthenticatedBusinessContext() && ['admin', 'manager'].includes(getCurrentRole())) {
                 try { dashboardPendingReopenCount = (await fetchPendingReopenRequests()).length; } catch (_) {}
             }
             renderNeedsAttention();
@@ -22750,8 +22870,8 @@ function updateGuestHeaderState() {
         }
 
         // loadData() is called from many places besides page load (after
-        // creating/editing a product, after a sale, the header/mobile-nav
-        // refresh buttons, etc.) — see the many call sites throughout this
+        // creating/editing a product, after a sale, the sidebar Refresh
+        // action, etc.) — see the many call sites throughout this
         // file. The loadDataInFlight guard below ensures two overlapping
         // calls (e.g. the initial page-load call and a mutation's post-save
         // refresh firing around the same time) share one in-flight run
@@ -22767,7 +22887,7 @@ function updateGuestHeaderState() {
             }
         }
 
-        // The top-right Refresh button: a genuine full authenticated data
+        // The sidebar Refresh action: a genuine full authenticated data
         // refresh (the same concurrent core+readiness pipeline a browser
         // reload runs), not a page reload and not a single-card refresh. It
         // deliberately reuses loadData() as-is rather than reimplementing
@@ -22783,25 +22903,23 @@ function updateGuestHeaderState() {
         //     forceShowLoadingBanner so an explicit user-requested refresh is
         //     never silently invisible.
         async function handleManualRefreshClick() {
-            const btn = document.getElementById('header-refresh-btn');
-            if (btn) btn.disabled = true;
+            document.querySelectorAll('[data-refresh-action]').forEach(btn => { btn.disabled = true; });
             try {
                 await loadData({ forceShowLoadingBanner: true });
             } finally {
-                if (btn) btn.disabled = false;
+                document.querySelectorAll('[data-refresh-action]').forEach(btn => { btn.disabled = false; });
             }
         }
 
         async function runLoadData(options) {
             const forceShowLoadingBanner = !!(options && options.forceShowLoadingBanner);
-            const refreshIcon = document.querySelector("#header-refresh-btn i");
-            if (refreshIcon) refreshIcon.classList.add("fa-spin");
+            document.querySelectorAll('[data-refresh-action] i').forEach(icon => icon.classList.add('fa-spin'));
             // The reassuring "Loading your Cauldra data…" banner is shown for
             // this session's genuine first load (a real page reload, or the
             // first sign-in) — a later, purely automatic background refresh
             // (the 10-minute heartbeat, a visibilitychange-triggered check)
             // must not flash it again over data the user is already looking
-            // at. An explicit user-triggered refresh (the top-right Refresh
+            // at. An explicit user-triggered refresh (the sidebar Refresh
             // button, via forceShowLoadingBanner) is the deliberate exception:
             // the user asked for a full data refresh and must see it happen,
             // not be left wondering whether anything occurred.
@@ -22987,7 +23105,9 @@ function updateGuestHeaderState() {
                 // right back out a moment after showStartupConnectionIssue()
                 // put them up.
                 if (!keepLoadingUIForReconnect) loadingBanner?.classList.add("hidden");
-                setTimeout(() => { if (refreshIcon) refreshIcon.classList.remove("fa-spin"); }, 500);
+                setTimeout(() => {
+                    document.querySelectorAll('[data-refresh-action] i').forEach(icon => icon.classList.remove('fa-spin'));
+                }, 500);
             }
         }
 
@@ -23055,7 +23175,7 @@ function updateGuestHeaderState() {
             renderNeedsAttention();
 
             if (!productsToRender || !productsToRender.length) {
-                if (!authToken || !hasActiveBusinessProfile()) {
+                if (!hasAuthenticatedBusinessContext()) {
                     tbody.innerHTML = `<tr><td colspan="6" class="text-center py-16">
                         <div class="flex flex-col items-center gap-2.5">
                             <i class="fa-solid fa-boxes-stacked text-3xl text-textSec/40"></i>
@@ -23679,7 +23799,7 @@ function updateGuestHeaderState() {
         }
 
         async function generatePOs() {
-            if (!authToken || !hasActiveBusinessProfile()) {
+            if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
@@ -24358,7 +24478,7 @@ function updateGuestHeaderState() {
             // no-op here — clearInterval() cannot cancel a callback already
             // scheduled on the event loop.
             if (businessDeletionInProgress) return;
-            if (!authToken || !currentUserProfile || !hasActiveBusinessProfile()) return;
+            if (!hasAuthenticatedBusinessContext()) return;
             if (notificationPollInFlight) return; // a previous poll hasn't finished yet — never overlap
             notificationPollInFlight = true;
             notificationPollAbortController = new AbortController();
@@ -24628,7 +24748,7 @@ function updateGuestHeaderState() {
             if (!pushNotificationsSupported()) return;
             if (typeof Notification === "undefined" || Notification.permission !== "default") return; // already decided — never re-prompt with our own UI on top of the browser's
             if (localStorage.getItem("cauldra_push_prompt_dismissed") === "true") return;
-            if (!authToken || !hasActiveBusinessProfile()) return;
+            if (!hasAuthenticatedBusinessContext()) return;
             showCustomConfirm(t("alerts.enablePushBody"), t("alerts.enablePushTitle"), t("alerts.enablePushConfirm"), t("alerts.enablePushDismiss")).then((confirmed) => {
                 localStorage.setItem("cauldra_push_prompt_dismissed", "true"); // asked once — never nag again regardless of the answer
                 if (confirmed) subscribeToPushNotifications();
@@ -24843,5 +24963,14 @@ function updateGuestHeaderState() {
 
         window.addEventListener('resize', () => updateInventoryStatusUI());
 
-        // Initial Data Fetch on Page Load
-        loadData().then(() => handlePaystackReturn());
+        // Initial Data Fetch on Page Load. Authentication restoration must
+        // finish before deciding whether a direct Hub/onboarding URL may open.
+        loadData().then(async () => {
+            const params = new URLSearchParams(window.location.search);
+            const hasPaymentReturn = !!(params.get('reference') || params.get('trxref'));
+            if (hasPaymentReturn) {
+                await handlePaystackReturn();
+                return;
+            }
+            handleHubOnboardingRoute();
+        });
