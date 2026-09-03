@@ -19948,10 +19948,13 @@
         // this long while the camera is clearly running, quietly switch to
         // ZXing (covers WebKit/WebView builds where BarcodeDetector exists but
         // never actually resolves a 1D barcode and never throws).
-        const NATIVE_NO_DECODE_FALLBACK_MS = 9000;
+        const NATIVE_NO_DECODE_FALLBACK_MS = 5000;   // native selected but nothing decoded -> try ZXing
+        const CAMERA_DETECT_TIMEOUT_MS = 2500;       // a single detect() that never settles must not deadlock the loop
         let _nativeSelectedAt = 0;
         let _anyCameraDecode = false;
         let _decoderSwitching = false;
+        let _camAttempts = 0;       // decode attempts this session (visible on screen so "nothing happening" is diagnosable)
+        let _camLastResult = "";
 
         let cameraScannerStarting = false;
         let _camStream = null;
@@ -20035,11 +20038,14 @@
             video.muted = true; video.autoplay = true; video.playsInline = true;
             video.style.cssText = "width:100%;max-height:190px;object-fit:cover;display:block;background:#000;border-radius:8px";
             const bar = document.createElement("div");
-            bar.style.cssText = "display:flex;justify-content:space-between;gap:8px;font-size:10px;line-height:1.5;color:#a5b4fc;padding:4px 2px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace";
-            bar.innerHTML = '<span data-scanner-status>Starting camera\u2026</span><span data-scanner-meta>' + SCANNER_BUILD + '</span>';
+            bar.style.cssText = "font-size:11px;line-height:1.55;color:#c7d2fe;padding:5px 2px 1px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all";
+            bar.innerHTML = '<div data-scanner-status style="font-weight:700;color:#e0e7ff">Starting camera\u2026</div>' +
+                            '<div data-scanner-meta style="opacity:.85">' + SCANNER_BUILD + '</div>';
             host.appendChild(video);
             host.appendChild(bar);
             _camVideo = video;
+            _camAttempts = 0;
+            _camLastResult = "";
         }
 
         function _setScannerStatus(mode, state, code) {
@@ -20048,16 +20054,19 @@
             if (!el) return;
             el.textContent = ({
                 starting: "Starting camera\u2026",
-                looking: "Looking for barcode\u2026",
-                decoded: "Barcode decoded: " + (code || ""),
+                looking: "Point the barcode at the camera\u2026",
+                scanning: "Scanning\u2026 " + _camAttempts + " frames" + (_camLastResult ? "  (last read: " + _camLastResult + ")" : ""),
+                decoded: "\u2713 DECODED: " + (code || ""),
                 submitting: "Submitting\u2026",
-                resolved: "Product resolved",
+                resolved: "\u2713 Product resolved",
             })[state] || String(state);
         }
 
         function _updateScannerDecoderLabel() {
+            const v = _camVideo;
+            const dims = (v && v.videoWidth) ? (v.videoWidth + "\u00d7" + v.videoHeight) : "no video signal";
             document.querySelectorAll("[data-scanner-meta]").forEach(el => {
-                el.textContent = SCANNER_BUILD + " \u00b7 Decoder: " + (_camDecoderName || "\u2026");
+                el.textContent = SCANNER_BUILD + " \u00b7 " + (_camDecoderName || "\u2026") + " \u00b7 " + dims;
             });
         }
         // Big, visible, phone-readable failure state inside the scanner box —
@@ -20090,6 +20099,7 @@
             }
 
             _anyCameraDecode = true;
+            _camLastResult = code;
             console.log("[barcode] CAMERA DECODE SUCCESS:", code);
             _setScannerStatus(mode, "decoded", code);
             _setScannerStatus(mode, "submitting");
@@ -20104,60 +20114,99 @@
             setTimeout(() => { if (_camRunning && activeCameraMode === "pos") _setScannerStatus("pos", "looking"); }, 1200);
         }
 
+        // Grab the current frame onto our OWN canvas, then hand that to ZXing.
+        // More reliable across ZXing/browser builds than letting ZXing pull the
+        // frame off the <video> itself (verified: decoded every retry vs the
+        // video path occasionally missing).
+        let _zxFrameCanvas = null;
+        function _zxingDecodeFrame(v) {
+            try {
+                const w = v.videoWidth, h = v.videoHeight;
+                if (!w || !h) return "";
+                if (!_zxFrameCanvas) _zxFrameCanvas = document.createElement("canvas");
+                _zxFrameCanvas.width = w; _zxFrameCanvas.height = h;
+                _zxFrameCanvas.getContext("2d", { willReadFrequently: true }).drawImage(v, 0, 0, w, h);
+                const res = _zxingReader.decodeBitmap(_zxingReader.createBinaryBitmap(_zxFrameCanvas));
+                return (res && res.getText && res.getText()) || "";
+            } catch (_) { return ""; }   // NotFound / frame not ready — normal, silent
+        }
+
+        async function _switchToZXing(reason) {
+            if (_decoderSwitching) return;
+            _decoderSwitching = true;
+            console.warn("[barcode] switching to ZXing decoder (" + reason + ")");
+            try {
+                _zxingReader = await _buildZXingReader();
+                _nativeDetector = null;
+                _camDecoderName = "ZXing (auto)";
+                _updateScannerDecoderLabel();
+            } catch (e) {
+                console.error("[barcode] ZXing fallback failed:", (e && e.message) || e);
+                _showScannerFatal(activeCameraMode, "No barcode decoder available on this browser \u2014 check /assets/vendor/zxing.umd.js");
+                showToast("Barcode decoder unavailable. Re-check zxing.umd.js on the server.", "error");
+                stopCameraScanner();
+            } finally {
+                _decoderSwitching = false;
+            }
+        }
+
         function _camDetectLoop(ts) {
             if (!_camRunning) return;
             _camRAF = requestAnimationFrame(_camDetectLoop);
             if (_camDetectInFlight) return;
             if (ts - _camLastAttempt < CAMERA_DECODE_INTERVAL_MS) return;
+
             const v = _camVideo;
-            if (!v || v.readyState < 2 || !v.videoWidth) return;   // 2 = HAVE_CURRENT_DATA
-            // Native detector selected, camera running, frames flowing, but
-            // NOTHING has decoded for a long time -> quietly bring up ZXing.
+            if (!v || v.readyState < 2 || !v.videoWidth) {
+                _setScannerStatus(activeCameraMode, "starting");
+                return;   // waiting for the camera to actually produce frames
+            }
+
+            // Native selected but producing nothing for too long -> ZXing.
             if (_nativeDetector && !_anyCameraDecode && !_decoderSwitching &&
                 _nativeSelectedAt && (Date.now() - _nativeSelectedAt > NATIVE_NO_DECODE_FALLBACK_MS)) {
-                _decoderSwitching = true;
-                console.warn("[barcode] native BarcodeDetector: no decode in " + NATIVE_NO_DECODE_FALLBACK_MS + "ms — switching to ZXing");
-                _buildZXingReader()
-                    .then(r => { _zxingReader = r; _nativeDetector = null; _camDecoderName = "ZXing (auto)"; _updateScannerDecoderLabel(); })
-                    .catch(e => console.error("[barcode] ZXing auto-switch failed:", (e && e.message) || e))
-                    .finally(() => { _decoderSwitching = false; });
+                _switchToZXing("no decode in " + NATIVE_NO_DECODE_FALLBACK_MS + "ms");
             }
 
             _camLastAttempt = ts;
             _camDetectInFlight = true;
+            _camAttempts++;
+            if (_camAttempts === 1 || _camAttempts % 4 === 0) {
+                _updateScannerDecoderLabel();
+                _setScannerStatus(activeCameraMode, "scanning");
+            }
 
-            const attempt = _nativeDetector
-                ? _nativeDetector.detect(v).then(list => (list && list[0] && list[0].rawValue) || "")
-                : new Promise(resolve => {
-                      let text = "";
-                      try {
-                          const bmp = _zxingReader.createBinaryBitmap(v);
-                          const res = _zxingReader.decodeBitmap(bmp);
-                          text = (res && res.getText && res.getText()) || "";
-                      } catch (_) { /* NotFound / frame not ready — no barcode this frame */ }
-                      resolve(text);
-                  });
+            // A detect() call must be able to: throw synchronously, reject, or
+            // hang — and never leave the loop stuck. Promise.race + a hard
+            // finally covers all three.
+            let call;
+            try {
+                call = _nativeDetector
+                    ? _nativeDetector.detect(v).then(list => (list && list[0] && list[0].rawValue) || "")
+                    : Promise.resolve(_zxingDecodeFrame(v));
+            } catch (syncErr) {
+                _camDetectInFlight = false;
+                _nativeErrorStreak++;
+                console.warn("[barcode] detect() threw synchronously:", (syncErr && syncErr.name) || syncErr);
+                if (_nativeDetector && _nativeErrorStreak >= 3) _switchToZXing("native detect() throwing");
+                return;
+            }
 
-            attempt.then(text => {
+            let _tid;
+            const timeout = new Promise((_, rej) => { _tid = setTimeout(() => rej(new Error("detect-timeout")), CAMERA_DETECT_TIMEOUT_MS); });
+
+            Promise.race([call, timeout]).then(text => {
                 _nativeErrorStreak = 0;
                 const code = String(text || "").trim();
-                if (code && _camRunning) handleCameraBarcodeDecoded(code);
-            }).catch(async (err) => {
-                if (!_nativeDetector || !_camRunning) return;   // ZXing path handles its own misses
-                _nativeErrorStreak++;
-                if (_nativeErrorStreak < 3) return;
-                console.warn("[barcode] native BarcodeDetector failing (" + ((err && err.name) || err) + ") — switching to ZXing");
-                _nativeDetector = null;
-                try {
-                    _zxingReader = await _buildZXingReader();
-                    _camDecoderName = "ZXing";
-                    _updateScannerDecoderLabel();
-                } catch (e2) {
-                    console.error("[barcode] ZXing fallback failed:", e2);
-                    showToast(t("products.cameraAccessFailed"), "error");
-                    await stopCameraScanner();
+                if (code) { _camLastResult = code; if (_camRunning) handleCameraBarcodeDecoded(code); }
+            }).catch(err => {
+                const name = (err && (err.name || err.message)) || String(err);
+                if (name === "detect-timeout") console.warn("[barcode] a detect() call timed out (" + CAMERA_DETECT_TIMEOUT_MS + "ms)");
+                if (_nativeDetector && _camRunning) {
+                    _nativeErrorStreak++;
+                    if (_nativeErrorStreak >= 3) _switchToZXing("native detector errors: " + name);
                 }
-            }).finally(() => { _camDetectInFlight = false; });
+            }).finally(() => { _camDetectInFlight = false; clearTimeout(_tid); });
         }
 
         async function toggleInlineCamera(mode) {
@@ -20201,6 +20250,8 @@
                 _anyCameraDecode = false;
                 _decoderSwitching = false;
                 _nativeSelectedAt = 0;
+                _camAttempts = 0;
+                _camLastResult = "";
                 _nativeDetector = await _buildNativeDetector();
                 if (_nativeDetector) {
                     _camDecoderName = "Native BarcodeDetector";
@@ -20384,7 +20435,7 @@
         // => nothing was ever decoded. One reused AudioContext, unlocked on the
         // camera tap / scan-field focus; entirely best-effort — a blocked or
         // missing AudioContext must never interrupt a scan.
-        console.log("[barcode] app.js build 2026-09-03-v16 — camera-v2 (resilient ZXing load + native watchdog) + wedge capture");
+        console.log("[barcode] app.js build 2026-09-03-v17 — camera-v2 (live on-screen scan diagnostics + hardened loop)");
         let _pipelineAudioCtx = null;
         function _primePipelineAudio() {
             try {
