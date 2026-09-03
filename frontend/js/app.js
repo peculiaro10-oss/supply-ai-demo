@@ -19963,7 +19963,7 @@
                 try {
                     ctorConfig = {
                         formatsToSupport: cameraScanFormats(),
-                        experimentalFeatures: { useBarCodeDetectorIfSupported: true }, // native path on Android/Chrome & Safari 17+
+                        experimentalFeatures: { useBarCodeDetectorIfSupported: false }, // force ZXing: iOS Safari BarcodeDetector is unreliable for UPC/EAN
                         verbose: false,
                     };
                 } catch (_) { ctorConfig = undefined; }
@@ -19988,10 +19988,12 @@
                     },
                 };
                 try {
-                    await scanner.start({ facingMode: { ideal: "environment" } }, startConfig, onCameraScanSuccess, onCameraScanFailure);
+                    // 2.3.8 accepts facingMode only as a bare string here (or an
+                    // object keyed "exact"); { ideal: ... } throws inside start().
+                    await scanner.start({ facingMode: "environment" }, startConfig, onCameraScanSuccess, onCameraScanFailure);
                 } catch (err) {
                     if (html5QrCodeScanner !== scanner) return; // superseded by a newer toggle while awaiting
-                    console.error("[barcode] camera start failed:", (err && (err.name || err.message)) || err);
+                    console.error("[barcode] Html5Qrcode start failed:", err);
                     showToast(t("products.cameraAccessFailed"), "error");
                     await stopCameraScanner();
                 }
