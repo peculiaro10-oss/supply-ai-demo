@@ -19960,15 +19960,14 @@
                 if (viewEl && viewEl.replaceChildren) viewEl.replaceChildren(); // drop any stale scanner DOM
                 document.getElementById(containerId)?.classList.remove("hidden");
 
-                let ctorConfig;
-                try {
-                    ctorConfig = {
-                        formatsToSupport: cameraScanFormats(),
-                        experimentalFeatures: { useBarCodeDetectorIfSupported: false }, // force ZXing: iOS Safari BarcodeDetector is unreliable for UPC/EAN
-                        verbose: false,
-                    };
-                } catch (_) { ctorConfig = undefined; }
-
+                // Let html5-qrcode pick its own decoder (native BarcodeDetector
+                // where the browser supports it, ZXing otherwise). Only the
+                // retail 1D format list is passed; no experimental overrides.
+                const formats = cameraScanFormats();
+                const ctorConfig = {
+                    ...(formats ? { formatsToSupport: formats } : {}),
+                    verbose: false,
+                };
                 const scanner = new Html5Qrcode(viewId, ctorConfig);
                 html5QrCodeScanner = scanner;
                 activeCameraMode = mode;
@@ -19976,13 +19975,11 @@
                 // Long, near-horizontal scan window sized from the real
                 // viewfinder — a retail 1D barcode filling the frame is far
                 // wider than the old fixed 200x120 box, so its bars fell
-                // outside the decoded crop and never resolved.
+                // outside the decoded crop and never resolved. qrbox as a
+                // function is supported by the bundled html5-qrcode 2.3.8
+                // (toQrdimensions); the 50px minimum is respected below.
                 const startConfig = {
                     fps: 15,
-                    // 1D retail barcodes are never mirrored — skip html5-qrcode's
-                    // flipped-frame re-scan pass so the whole frame budget goes to
-                    // a straight decode (~2x 1D throughput). Supported by 2.3.8.
-                    disableFlip: true,
                     qrbox: (vw, vh) => {
                         const W = (typeof vw === "number" && vw > 0) ? vw : 240;
                         const H = (typeof vh === "number" && vh > 0) ? vh : 180;
@@ -20043,19 +20040,26 @@
         }
 
         // Camera decode callback — deliberately tiny and deterministic.
-        // html5-qrcode calls this once per successful decode. Route by the mode
-        // captured BEFORE any cleanup (stopCameraScanner() nulls
-        // activeCameraMode), then converge on the SAME per-screen submission
-        // helper the hardware scanner and manual entry use.
+        // html5-qrcode calls this once per successful decode. A valid decode is
+        // ACKNOWLEDGED immediately (DEBUG log + visible status + LOW beep, all
+        // inside submitProductBarcode/submitPosBarcode) BEFORE the camera is
+        // torn down — scanner.stop() latency must never turn a good decode into
+        // a silent "nothing happened". Camera, hardware and manual all converge
+        // on the same per-screen submission helper from here.
         async function onCameraScanSuccess(decodedText) {
             const mode = activeCameraMode;
             if (!mode) return;                       // scanner already tearing down
             const code = String(decodedText == null ? "" : decodedText).trim();
             if (!code) return;                       // ignore an empty/garbage frame
+            console.log("[barcode DEBUG] onCameraScanSuccess entered", { mode, decodedText });
 
             if (mode === "product") {
-                await stopCameraScanner();           // release the camera first
-                submitProductBarcode(code, "camera"); // -> LOW beep -> lookupBarcode()
+                activeCameraMode = null;             // sync: no further frame re-enters this handler
+                try {
+                    submitProductBarcode(code, "camera"); // acknowledge NOW: log + status + LOW beep + lookup (once)
+                } finally {
+                    await stopCameraScanner();       // teardown must NOT gate the acknowledgement above
+                }
                 return;
             }
             if (mode === "pos") {
@@ -20179,6 +20183,7 @@
         // => nothing was ever decoded. One reused AudioContext, unlocked on the
         // camera tap / scan-field focus; entirely best-effort — a blocked or
         // missing AudioContext must never interrupt a scan.
+        console.log("[barcode] app.js build 2026-09-03-v14 — barcode capture pipeline (diagnostics build)");
         let _pipelineAudioCtx = null;
         function _primePipelineAudio() {
             try {
@@ -20242,7 +20247,8 @@
         const _barcodeKeyCadence = {};
         function _noteBarcodeKeystroke(fieldId) {
             const now = Date.now();
-            const s = _barcodeKeyCadence[fieldId] || (_barcodeKeyCadence[fieldId] = { last: 0, fast: 0, n: 0 });
+            let s = _barcodeKeyCadence[fieldId];
+            if (!s || (s.last && now - s.last > 1000)) s = _barcodeKeyCadence[fieldId] = { last: 0, fast: 0, n: 0 };
             if (s.last) { s.n++; if (now - s.last < 35) s.fast++; }
             s.last = now;
         }
@@ -20265,6 +20271,7 @@
             if (input) input.value = norm.value;
             console.log("[barcode] captured", { source: source || "manual", mode: "product", code: norm.canonical });
             playScanDetectedBeep();            // LOW — complete barcode captured, BEFORE any lookup
+            showToast("Barcode captured: " + norm.canonical, "info"); // temporary visible diagnostic
             lookupBarcode();
         }
 
@@ -20278,28 +20285,61 @@
             if (_isDuplicateBarcodeSubmit("pos", norm.value)) return;
             console.log("[barcode] captured", { source: source || "manual", mode: "pos", code: norm.canonical });
             playScanDetectedBeep();            // LOW — captured, BEFORE inventory matching
+            showToast("Barcode captured: " + norm.canonical, "info"); // temporary visible diagnostic
             const input = document.getElementById("pos-scan-input");
             if (input) input.value = "";
             document.getElementById("pos-autocomplete-dropdown")?.classList.add("hidden");
             resolveAndAddScannedProduct(norm.value);
         }
 
-        // Shared terminator handling for a scan field. keydown, not keypress:
+        // Shared completion handling for a scan field. keydown, not keypress:
         // keypress never fires for Tab, and browsers drop keypresses under the
-        // synthetic-keystroke burst a wedge scanner produces. Handles Enter,
-        // NumpadEnter and Tab — covering CR, LF, CRLF, Enter and Tab wedge
-        // suffixes. preventDefault stops Tab moving focus off the field before
-        // the value is read (and any stray form submit on Enter).
+        // synthetic-keystroke burst a wedge scanner produces.
+        //   - Enter / NumpadEnter / Tab  -> submit immediately (covers CR, LF,
+        //     CRLF, Enter and Tab wedge suffixes). preventDefault keeps Tab
+        //     from moving focus off the field before the value is read.
+        //   - NO suffix  -> after ~110ms with no new character, if the burst
+        //     arrived at scanner speed (existing _barcodeKeyCadence tracker)
+        //     AND the value is a plausible barcode, submit automatically.
+        //     Slow human typing never trips this; it is not used for the
+        //     Enter/Tab scanners, only as an additional path.
+        const BARCODE_IDLE_COMPLETE_MS = 110;
+        const _barcodeIdleTimer = {};
         function _wireScanField(fieldId, submitFn) {
             const el = document.getElementById(fieldId);
             if (!el) return;
+            const clearIdle = () => {
+                if (_barcodeIdleTimer[fieldId]) { clearTimeout(_barcodeIdleTimer[fieldId]); _barcodeIdleTimer[fieldId] = null; }
+            };
             el.addEventListener("focus", _primePipelineAudio);
+            el.addEventListener("blur", clearIdle);
             el.addEventListener("keydown", (e) => {
-                const isTerminator = e.key === "Enter" || e.key === "Tab" || e.code === "NumpadEnter";
-                if (!isTerminator) { _noteBarcodeKeystroke(fieldId); return; }
-                e.preventDefault();
-                if (!String(el.value).trim()) return;
-                submitFn(el.value, _classifyBarcodeSource(fieldId));
+                if (e.key === "Enter" || e.key === "Tab" || e.code === "NumpadEnter") {
+                    e.preventDefault();
+                    clearIdle();
+                    if (!String(el.value).trim()) return;
+                    submitFn(el.value, _classifyBarcodeSource(fieldId));
+                    return;
+                }
+                // Any non-terminator key cancels a pending idle-submit so a
+                // stale value is never sent. Only printable keys re-arm it
+                // (Shift / Backspace / arrows must not schedule a submit).
+                clearIdle();
+                if (!e.key || e.key.length !== 1) return;
+                // First character of a fresh entry -> start cadence clean, so
+                // slow typing that was cleared out can't drag down the ratio of
+                // the scan that follows it.
+                if (el.value.length === 0) _barcodeKeyCadence[fieldId] = { last: 0, fast: 0, n: 0 };
+                _noteBarcodeKeystroke(fieldId);
+                _barcodeIdleTimer[fieldId] = setTimeout(() => {
+                    _barcodeIdleTimer[fieldId] = null;
+                    const c = _barcodeKeyCadence[fieldId];
+                    const scannerSpeed = c && c.n >= 3 && (c.fast / c.n) > 0.7;
+                    if (!scannerSpeed) return;                              // human typing — leave it
+                    if (!normalizeBarcodeInput(el.value).isBarcode) return; // not a plausible barcode yet
+                    console.log("[barcode] idle-completed no-suffix scan on", fieldId);
+                    submitFn(el.value, _classifyBarcodeSource(fieldId));    // de-duped by _isDuplicateBarcodeSubmit if Enter also arrives
+                }, BARCODE_IDLE_COMPLETE_MS);
             });
         }
         _wireScanField("barcode-input", submitProductBarcode);
@@ -20373,6 +20413,7 @@
                     updateSkuPlaceholder();
                     console.log("[barcode] product resolved:", data.product_name, "(source:", (data.source || "catalog") + ")");
                     playProductResolvedBeep();     // HIGH — barcode resolved to a product identity
+                    showToast("Product resolved: " + (data.product_name || "(unnamed)"), "success"); // temporary visible diagnostic
                 } else {
                     document.getElementById("p-name").value = "";
                     console.warn("[barcode] not found:", inputVal);
@@ -20579,6 +20620,7 @@
             }
             console.log("[barcode] product resolved:", product.name);
             playProductResolvedBeep();          // HIGH — stocked product added/incremented in the cart
+            showToast("Product resolved: " + product.name, "success"); // temporary visible diagnostic
             document.getElementById("pos-scan-input").value = "";
             renderPOSCart();
             keepPOSScannerFocused();
