@@ -62,6 +62,9 @@ except Exception:
 # APP / CONFIG
 # -----------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
+# Cauldra deployment structure: the frontend is a separate top-level folder,
+# a sibling of backend/ (Railway container: /app/backend/main.py + /app/frontend/).
+# index.html, sw.js, assets/, css/ and js/ live under frontend/, never backend/.
 PROJECT_DIR = BASE_DIR.parent
 FRONTEND_DIR = PROJECT_DIR / "frontend"
 INDEX_PATH = FRONTEND_DIR / "index.html"
@@ -4007,6 +4010,7 @@ class SalesCheckoutItem(BaseModel):
     price_mode: Literal["retail", "wholesale", "negotiated"] = "retail"
     unit_price: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     negotiated_reason: Optional[str] = Field(default=None, max_length=200)
+
     @field_validator("unit_price", mode="before")
     @classmethod
     def _reject_non_finite_unit_price(cls, v):
@@ -6184,7 +6188,7 @@ def business_brain(user: User = Depends(require_ai_access), db: Session = Depend
     rows.sort(key=lambda row: {"critical": 0, "important": 1, "opportunity": 2}.get(row.priority, 3))
     if user.role == "staff": rows = [r for r in rows if r.kind == "stock_review"]
     def rec_out(r): return {"id": r.id, "kind": r.kind, "priority": r.priority, "title": r.title, "summary": r.summary, "evidence": json.loads(r.evidence_json or "{}"), "status": r.status, "updated_at": to_utc_iso(r.updated_at)}
-    # Business Brief History is a bounded read over records this engine already
+    # Business Brain History is a bounded read over records this engine already
     # stores. It does not invent a second intelligence system or persist a new
     # copy of the same insight: resolved recommendations and evaluated forecasts
     # are projected into a small, consistently-shaped timeline for the UI.
@@ -6252,7 +6256,7 @@ def action_business_brain_recommendation(recommendation_id: int, payload: Busine
     if action == "opened": row.opened_at = now
     elif action == "acted": row.acted_at = now
     else: row.dismissed_at = now
-    add_audit(db, user, "BUSINESS_BRAIN_RECOMMENDATION_" + action.upper(), f"Updated Business Brief recommendation #{row.id} to {action}."); db.commit()
+    add_audit(db, user, "BUSINESS_BRAIN_RECOMMENDATION_" + action.upper(), f"Updated Business Brain recommendation #{row.id} to {action}."); db.commit()
     return {"id": row.id, "status": row.status}
 
 # -----------------------------------------------------------------------------

@@ -84,7 +84,7 @@
             pointer-events: none !important;
         }
 
-        /* Business Brief: one responsive intelligence summary in the dashboard,
+        /* Business Brain: one responsive intelligence summary in the dashboard,
            with the same information hierarchy in its detail view. */
         .business-brief-header{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-bottom:1rem;}
         .business-brief-header-actions{display:flex;align-items:center;justify-content:flex-end;gap:.5rem;flex-wrap:wrap;}
