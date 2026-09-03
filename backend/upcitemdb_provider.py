@@ -112,6 +112,9 @@ def lookup_upcitemdb(barcode: str) -> Optional[UpcItemIdentity]:
     if not barcode:
         return None
     url, headers = _provider_url_and_headers()
+    # Provider mode is logged (never the key or headers) so a developer can see
+    # which endpoint/auth path a lookup took.
+    print(f"[upcitemdb] lookup (mode={UPCITEMDB_PLAN})")
     if UPCITEMDB_PLAN == "paid" and not UPCITEMDB_API_KEY:
         # Misconfiguration, not a provider failure — fail closed into manual
         # entry rather than sending an unauthenticated request to the paid
@@ -134,6 +137,7 @@ def lookup_upcitemdb(barcode: str) -> Optional[UpcItemIdentity]:
         print("[upcitemdb] rate limit exceeded (429) — falling back to manual entry, not retrying")
         return None
     if resp.status_code == 404:
+        print("[upcitemdb] barcode not found (HTTP 404)")
         return None
     if not resp.ok:
         print(f"[upcitemdb] lookup failed: HTTP {resp.status_code}")
@@ -146,6 +150,7 @@ def lookup_upcitemdb(barcode: str) -> Optional[UpcItemIdentity]:
         return None
 
     if not isinstance(payload, dict):
+        print("[upcitemdb] malformed response (top-level JSON was not an object)")
         return None
     # UPCitemdb's trial endpoint signals its burst limit as an HTTP 200 with
     # this body code, not a 429 status — treated exactly like the real 429
@@ -154,6 +159,13 @@ def lookup_upcitemdb(barcode: str) -> Optional[UpcItemIdentity]:
         print("[upcitemdb] rate limit exceeded (TOO_FAST) — falling back to manual entry, not retrying")
         return None
     items = payload.get("items")
-    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+    if isinstance(items, list) and not items:
+        print("[upcitemdb] barcode not found (no items in response)")
         return None
-    return _sanitize_item(barcode, items[0])
+    if not isinstance(items, list) or not isinstance(items[0], dict):
+        print("[upcitemdb] malformed response (unexpected 'items' shape)")
+        return None
+    identity = _sanitize_item(barcode, items[0])
+    if identity is None:
+        print("[upcitemdb] malformed item (no usable product title)")
+    return identity
