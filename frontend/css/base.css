@@ -144,8 +144,42 @@
         .business-brief-outcomes{margin-top:.75rem;}
         .business-brief-close{width:44px;height:44px;display:flex;align-items:center;justify-content:center;flex:none;border-radius:.65rem;}
 
+        /* Business Day bar - Business Day status | Sales Today | Net Profit | action.
+           Sales Today / Net Profit read the current open Business Day session. */
+        .business-day-bar{align-items:center;}
+        .bd-status{display:flex;align-items:center;gap:.5rem;min-width:0;margin-right:auto;}
+        .bd-metrics{display:flex;align-items:center;gap:0;}
+        #business-day-metrics.hidden,.bd-metric.hidden{display:none!important;}
+        .bd-metric{display:flex;flex-direction:column;align-items:flex-start;gap:.12rem;margin-left:.9rem;padding:.15rem 0 .15rem .9rem;border:0;border-left:1px solid #172033;background:transparent;color:#E2E8F0;cursor:pointer;text-align:left;transition:border-color .15s ease;}
+        .bd-metric:hover{border-left-color:rgba(67,107,238,.5);}
+        .bd-metric-label{font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#7C8BA1;line-height:1;}
+        .bd-metric>strong{font-size:13px;font-weight:800;line-height:1.15;font-variant-numeric:tabular-nums;}
+        .business-day-bar #business-day-header-action-btn{margin-left:.9rem;}
+
+        /* Business Brain dashboard: four sections, collapsible on phones, forced
+           open (card-style) on tablet/desktop. Empty sections show honest states. */
+        .business-brief-dash-section>summary{list-style:none;display:flex;align-items:center;gap:.5rem;cursor:pointer;min-height:44px;}
+        .business-brief-dash-section>summary::-webkit-details-marker{display:none;}
+        .business-brief-dash-section>summary .bb-sec-title{display:flex;align-items:center;gap:.45rem;color:#E2E8F0;font-size:11px;font-weight:800;}
+        .business-brief-dash-section>summary .bb-sec-hint{margin-left:auto;font-size:10px;font-weight:700;color:#7C8BA1;background:#0B1120;border:1px solid #172033;border-radius:999px;padding:.03rem .42rem;}
+        .business-brief-dash-section>summary .bb-sec-chevron{font-size:9px;color:#7C8BA1;transition:transform .15s ease;margin-left:.15rem;}
+        .business-brief-dash-section[open]>summary .bb-sec-chevron{transform:rotate(180deg);}
+        .business-brief-dash-section>.business-brief-area-body{margin-top:.6rem;}
+
         @media (min-width:640px){
             .business-brief-grid,.business-brief-overview-grid,.business-brief-memory-groups{grid-template-columns:repeat(2,minmax(0,1fr));}
+            .business-brief-dash-section>.business-brief-area-body{display:block!important;margin-top:0;}
+            .business-brief-dash-section>summary{cursor:default;min-height:0;margin-bottom:.65rem;}
+            .business-brief-dash-section>summary .bb-sec-hint,
+            .business-brief-dash-section>summary .bb-sec-chevron{display:none;}
+        }
+
+        /* iPad portrait / small laptop: Business Day metrics drop to their own
+           full-width row under the status + action, rather than squeezing. */
+        @media (min-width:640px) and (max-width:1000px){
+            .bd-metrics{order:5;width:100%;margin-top:.7rem;padding-top:.65rem;border-top:1px solid #172033;}
+            .bd-metric{flex:1 1 0;}
+            .bd-metrics .bd-metric:first-child{margin-left:0;padding-left:0;border-left:0;}
         }
 
         @media (min-width:1200px){
@@ -229,6 +263,15 @@
             .business-brief-open-btn{grid-column:1/-1;min-height:44px;}
             .business-brief-context-chip{min-height:44px;justify-content:space-between;min-width:0;padding-inline:.6rem;}
             .business-brief-area{padding:.75rem;}
+            /* Business Day bar stacks: status, then Sales Today | Net Profit, then action. */
+            .business-day-bar{flex-direction:column;align-items:stretch;gap:.75rem;}
+            .bd-status{margin-right:0;}
+            .bd-metrics{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;}
+            .bd-metric{margin-left:0;padding:.55rem .65rem;border:1px solid #172033;border-radius:.7rem;}
+            .business-day-bar #business-day-header-action-btn{margin-left:0;width:100%;}
+            /* Business Brain sections: compact collapsible list on phones. */
+            .business-brief-dash-section{padding:.15rem .75rem;}
+            .business-brief-dash-section>.business-brief-area-body{margin-top:.5rem;padding-bottom:.35rem;}
             #business-brain-modal{padding:0!important;align-items:stretch!important;}
             .business-brief-modal-shell{max-height:100dvh!important;min-height:100dvh;border-radius:0!important;border-left:0!important;border-right:0!important;padding:1rem!important;}
             .brain-tab-btn,.business-brief-history-filters button{min-height:44px;}

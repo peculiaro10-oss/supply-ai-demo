@@ -396,13 +396,25 @@
                      rendered from a client-guessed state — always from
                      whatever /sales/current-day (or an action's response)
                      returns. Hidden entirely for guests. -->
-                <div id="business-day-header-control" class="hidden items-center justify-between flex-wrap gap-2.5 mb-4 p-3.5 rounded-2xl border border-borderCol bg-cardBg shadow-sm">
-                    <div class="flex items-center gap-2 min-w-0 text-xs">
+                <div id="business-day-header-control" class="hidden business-day-bar items-center flex-wrap gap-2.5 mb-4 p-3.5 rounded-2xl border border-borderCol bg-cardBg shadow-sm">
+                    <div class="bd-status flex items-center gap-2 min-w-0 text-xs">
                         <span id="business-day-header-dot" class="inline-block w-2.5 h-2.5 rounded-full bg-textSec shrink-0"></span>
                         <div class="min-w-0">
                             <div id="business-day-header-label" class="font-semibold text-textMain truncate">Business Day Closed</div>
                             <div id="business-day-header-sub" class="text-[10px] text-textSec truncate"></div>
                         </div>
+                    </div>
+                    <!-- Sales Today / Net Profit live inside the Business Day bar (not Business Brain).
+                         Same IDs the profit/sales dashboard code already targets; same click-through to
+                         the Sales and Profit modals. Both read the CURRENT open Business Day session
+                         (GET /business-days/current-summary) - see the label note in CHANGES.md. -->
+                    <div id="business-day-metrics" class="bd-metrics hidden">
+                        <button type="button" id="dashboard-sales-today-row" onclick="checkFeatureAccess('daily sales', () => openDailySalesModal('current'))" class="hidden bd-metric">
+                            <span class="bd-metric-label">Sales Today</span><strong id="dashboard-sales-today-amount"></strong>
+                        </button>
+                        <button type="button" id="dashboard-net-profit-row" onclick="checkFeatureAccess('profit', () => openProfitModal('today'))" class="hidden bd-metric">
+                            <span class="bd-metric-label">Net Profit</span><strong id="dashboard-net-profit-amount"></strong>
+                        </button>
                     </div>
                     <button type="button" id="business-day-header-action-btn" class="hidden shrink-0 bg-primary hover:bg-primaryHover text-white text-[11px] font-semibold px-3.5 py-2 rounded-xl transition cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed">Open Business Day</button>
                 </div>
@@ -456,13 +468,7 @@
                             <p class="text-[11px] text-textSec mt-1">What's important in your business right now.</p>
                         </div>
                         <div class="business-brief-header-actions">
-                            <button type="button" id="dashboard-sales-today-row" onclick="checkFeatureAccess('daily sales', () => openDailySalesModal('current'))" class="hidden business-brief-context-chip">
-                                <span>Sales today</span><strong id="dashboard-sales-today-amount"></strong>
-                            </button>
-                            <button type="button" id="dashboard-net-profit-row" onclick="checkFeatureAccess('profit', () => openProfitModal('today'))" class="hidden business-brief-context-chip">
-                                <span>Net profit</span><strong id="dashboard-net-profit-amount"></strong>
-                            </button>
-                            <button type="button" onclick="checkFeatureAccess('business brain', openBusinessBrainModal)" class="business-brief-open-btn">Open Business Brain <span aria-hidden="true">→</span></button>
+                            <button type="button" onclick="checkFeatureAccess('business brain', openBusinessBrainModal)" class="business-brief-open-btn">View all insights <span aria-hidden="true">→</span></button>
                         </div>
                     </div>
                     <div id="business-brief-dashboard-content" class="business-brief-grid" aria-live="polite">
