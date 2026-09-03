@@ -19923,33 +19923,112 @@
             region.__statusTimer = setTimeout(() => region.classList.add('hidden'), type === 'error' ? 7000 : 4500);
         }
 
-        function toggleInlineCamera(mode) {
-            if (activeCameraMode === mode) { stopCameraScanner(); return; }
-            stopCameraScanner().then(() => {
-                activeCameraMode = mode;
-                const containerId = mode === 'product' ? 'product-camera-container' : 'pos-camera-container';
-                const viewId = mode === 'product' ? 'product-camera-view' : 'pos-camera-view';
-                document.getElementById(containerId).classList.remove("hidden");
-
-                html5QrCodeScanner = new Html5Qrcode(viewId);
-                html5QrCodeScanner.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 200, height: 120 } }, onCameraScanSuccess, () => {}).catch(() => {
-                    showToast(t("products.cameraAccessFailed"), "error");
-                    stopCameraScanner();
-                });
-            });
+        // Retail 1D barcodes only — both Add Product and POS scan product
+        // barcodes, never QR. Restricting the format set makes each camera
+        // frame decode focused and fast, which is what the pure-JS (ZXing)
+        // fallback on iOS Safari needs (it has no native BarcodeDetector).
+        // Names come from the Html5QrcodeSupportedFormats enum in the loaded
+        // /assets/vendor/html5-qrcode-2.3.8 build; missing ones are dropped.
+        function cameraScanFormats() {
+            if (typeof Html5QrcodeSupportedFormats === "undefined") return undefined;
+            const F = Html5QrcodeSupportedFormats;
+            const want = [F.UPC_A, F.UPC_E, F.EAN_13, F.EAN_8, F.CODE_128, F.CODE_39, F.ITF];
+            const list = want.filter(v => v !== undefined && v !== null);
+            return list.length ? list : undefined;
         }
 
-        async function stopCameraScanner() {
-            if (html5QrCodeScanner) {
-                try { await html5QrCodeScanner.stop(); } catch(e) {}
-                html5QrCodeScanner = null;
+        // One camera start at a time. Guards the rapid open/close and
+        // product<->POS mode-switch races that otherwise leave a second
+        // MediaStream running on iOS Safari.
+        let cameraScannerStarting = false;
+
+        async function toggleInlineCamera(mode) {
+            if (cameraScannerStarting) return;
+            if (activeCameraMode === mode) { await stopCameraScanner(); return; }
+            cameraScannerStarting = true;
+            try {
+                await stopCameraScanner();
+                if (typeof Html5Qrcode === "undefined") {
+                    console.error("[barcode] html5-qrcode library not loaded");
+                    showToast(t("products.cameraAccessFailed"), "error");
+                    return;
+                }
+                const containerId = mode === 'product' ? 'product-camera-container' : 'pos-camera-container';
+                const viewId = mode === 'product' ? 'product-camera-view' : 'pos-camera-view';
+                const viewEl = document.getElementById(viewId);
+                if (viewEl && viewEl.replaceChildren) viewEl.replaceChildren(); // drop any stale scanner DOM
+                document.getElementById(containerId)?.classList.remove("hidden");
+
+                let ctorConfig;
+                try {
+                    ctorConfig = {
+                        formatsToSupport: cameraScanFormats(),
+                        experimentalFeatures: { useBarCodeDetectorIfSupported: true }, // native path on Android/Chrome & Safari 17+
+                        verbose: false,
+                    };
+                } catch (_) { ctorConfig = undefined; }
+
+                const scanner = new Html5Qrcode(viewId, ctorConfig);
+                html5QrCodeScanner = scanner;
+                activeCameraMode = mode;
+
+                // Long, near-horizontal scan window sized from the real
+                // viewfinder — a retail 1D barcode filling the frame is far
+                // wider than the old fixed 200x120 box, so its bars fell
+                // outside the decoded crop and never resolved.
+                const startConfig = {
+                    fps: 15,
+                    qrbox: (vw, vh) => {
+                        const W = (typeof vw === "number" && vw > 0) ? vw : 240;
+                        const H = (typeof vh === "number" && vh > 0) ? vh : 180;
+                        return {
+                            width: Math.max(140, Math.min(Math.floor(W * 0.88), Math.floor(W) - 2)),
+                            height: Math.max(70, Math.min(Math.floor(Math.min(H * 0.42, 180)), Math.floor(H) - 2)),
+                        };
+                    },
+                };
+                try {
+                    await scanner.start({ facingMode: { ideal: "environment" } }, startConfig, onCameraScanSuccess, onCameraScanFailure);
+                } catch (err) {
+                    if (html5QrCodeScanner !== scanner) return; // superseded by a newer toggle while awaiting
+                    console.error("[barcode] camera start failed:", (err && (err.name || err.message)) || err);
+                    showToast(t("products.cameraAccessFailed"), "error");
+                    await stopCameraScanner();
+                }
+            } finally {
+                cameraScannerStarting = false;
             }
-            activeCameraMode = null;
+        }
+
+        // html5-qrcode fires this on every frame that does not decode — normal
+        // and constant while pointing the camera, so it stays silent. Never log
+        // per-frame decode failures.
+        function onCameraScanFailure() {}
+
+        async function stopCameraScanner() {
+            const scanner = html5QrCodeScanner;
+            html5QrCodeScanner = null;
+            activeCameraMode = null;         // nulled first: any in-flight decode callback now no-ops
+            if (scanner) {
+                try {
+                    const S = (typeof Html5QrcodeScannerState !== "undefined") ? Html5QrcodeScannerState : null;
+                    const state = (typeof scanner.getState === "function") ? scanner.getState() : null;
+                    const running = S ? (state === S.SCANNING || state === S.PAUSED) : true;
+                    if (running) await scanner.stop(); // stops decode loop AND releases the MediaStream/camera
+                } catch (_) { /* already stopped / never started — not an error */ }
+                try { if (typeof scanner.clear === "function") scanner.clear(); } catch (_) {}
+            }
             document.getElementById("product-camera-container")?.classList.add("hidden");
             document.getElementById("pos-camera-container")?.classList.add("hidden");
+            // Remove the <video>/<canvas> html5-qrcode injected so a reopen starts
+            // clean — iOS Safari can otherwise keep a stream bound to an orphan node.
+            document.getElementById("product-camera-view")?.replaceChildren?.();
+            document.getElementById("pos-camera-view")?.replaceChildren?.();
         }
 
         function onCameraScanSuccess(decodedText) {
+            if (!activeCameraMode) return; // scanner is being torn down
+            console.log("[barcode] decoded:", decodedText, "(mode:", activeCameraMode + ")");
             if (activeCameraMode === "product") {
                 playSuccessBeep();
                 document.getElementById("barcode-input").value = decodedText;
