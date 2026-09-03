@@ -62,8 +62,12 @@ except Exception:
 # APP / CONFIG
 # -----------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
-INDEX_PATH = BASE_DIR / "index.html"
-ASSETS_DIR = BASE_DIR / "assets"
+PROJECT_DIR = BASE_DIR.parent
+FRONTEND_DIR = PROJECT_DIR / "frontend"
+INDEX_PATH = FRONTEND_DIR / "index.html"
+ASSETS_DIR = FRONTEND_DIR / "assets"
+CSS_DIR = FRONTEND_DIR / "css"
+JS_DIR = FRONTEND_DIR / "js"
 ENVIRONMENT = os.getenv("SUPPLY_AI_ENV", "development").strip().lower()
 IS_PRODUCTION = ENVIRONMENT == "production"
 
@@ -273,6 +277,12 @@ if not IS_PRODUCTION:
     app.add_middleware(PerfLoggingMiddleware)
 if ASSETS_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
+if CSS_DIR.is_dir():
+    app.mount("/css", StaticFiles(directory=str(CSS_DIR)), name="css")
+if JS_DIR.is_dir():
+    app.mount("/js", StaticFiles(directory=str(JS_DIR)), name="js")
+if FRONTEND_DIR.is_dir():
+    app.mount("/frontend", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -3997,7 +4007,6 @@ class SalesCheckoutItem(BaseModel):
     price_mode: Literal["retail", "wholesale", "negotiated"] = "retail"
     unit_price: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     negotiated_reason: Optional[str] = Field(default=None, max_length=200)
-
     @field_validator("unit_price", mode="before")
     @classmethod
     def _reject_non_finite_unit_price(cls, v):
@@ -9848,7 +9857,7 @@ def serve_index():
 # intercept and cache the app shell / navigation requests.
 @app.get("/sw.js")
 def serve_service_worker():
-    return FileResponse(str(BASE_DIR / "sw.js"), media_type="application/javascript", headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
+    return FileResponse(str(FRONTEND_DIR / "sw.js"), media_type="application/javascript", headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
 
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
