@@ -19944,6 +19944,15 @@
         const SCANNER_BUILD = "zxing-only-v1";
         const ZX_SCAN_INTERVAL_MS = 180;
         const ZX_DECODE_COOLDOWN_MS = 1200;   // same code re-read while still in frame is ignored this long
+        // V20: ask the rear camera for at least Full-HD; after the stream is
+        // live we bump to the sensor's max via getCapabilities() (below).
+        const CAM_IDEAL_W = 1920, CAM_IDEAL_H = 1080;
+        function _camVideoConstraints(deviceId) {
+            const v = deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: "environment" } };
+            v.width = { ideal: CAM_IDEAL_W };
+            v.height = { ideal: CAM_IDEAL_H };
+            return { video: v, audio: false };
+        }
 
         let _zxReader = null;
         let _camVideo = null;
@@ -20057,6 +20066,54 @@
             catch (err) { console.warn("[camera-diag] applyConstraints(zoom) failed:", (err && err.message) || err); }
         }
 
+        // V20: if the sensor exposes a higher width/height than the current
+        // stream, request the max. Best-effort - a failure just leaves the
+        // >=1080p stream from getUserMedia() in place.
+        async function _applyMaxResolution() {
+            const trk = _camTrack;
+            if (!trk || !trk.getCapabilities || !trk.applyConstraints) return;
+            let caps = {}, cur = {};
+            try { caps = trk.getCapabilities() || {}; } catch (err) { return; }
+            try { cur = trk.getSettings() || {}; } catch (err) {}
+            const wMax = caps.width && caps.width.max;
+            const hMax = caps.height && caps.height.max;
+            if (wMax && hMax && (wMax > (cur.width || 0) || hMax > (cur.height || 0))) {
+                try {
+                    await trk.applyConstraints({ advanced: [{ width: wMax, height: hMax }] });
+                    let now = {};
+                    try { now = trk.getSettings() || {}; } catch (e) {}
+                    console.log("[camera-diag] requested max capture resolution " + wMax + "x" + hMax +
+                                " -> settings now " + (now.width || "?") + "x" + (now.height || "?"));
+                } catch (err) {
+                    console.warn("[camera-diag] applyConstraints(max width/height) failed:", (err && err.message) || err);
+                }
+            } else {
+                console.log("[camera-diag] no higher resolution to request (caps max " +
+                            (wMax || "?") + "x" + (hMax || "?") + ", current " + (cur.width || "?") + "x" + (cur.height || "?") + ")");
+            }
+        }
+
+        // The one required diagnostic line. The ZXing decode canvas is sized
+        // ONLY from video.videoWidth / video.videoHeight (see _zxScanTick) -
+        // never CSS, clientWidth, or the preview container. Also keeps the
+        // panel's live "capture:" line (getSettings + video element + canvas)
+        // in sync. Throttled: console logs only when the source resolution
+        // actually changes.
+        let _lastLoggedRes = "";
+        function _logDecodeResolution(reason) {
+            const v = _camVideo;
+            const vw = (v && v.videoWidth) || 0, vh = (v && v.videoHeight) || 0;
+            const cw = (_zxGrab && _zxGrab.width) || 0, ch = (_zxGrab && _zxGrab.height) || 0;
+            let sw = "?", sh = "?";
+            try { const s = _camTrack && _camTrack.getSettings && _camTrack.getSettings(); if (s) { sw = s.width || "?"; sh = s.height || "?"; } } catch (e) {}
+            const span = document.querySelector("[data-decode-res]");
+            if (span) span.textContent = "getSettings " + sw + "\u00d7" + sh + "  \u00b7  video " + vw + "\u00d7" + vh + "  \u00b7  canvas " + cw + "\u00d7" + ch;
+            const line = "decode source: " + vw + "x" + vh + " canvas: " + cw + "x" + ch;
+            if (line === _lastLoggedRes) return;
+            _lastLoggedRes = line;
+            console.log("[camera-diag] " + line + (reason ? "  (" + reason + ")" : ""));
+        }
+
         // Rear-camera cycle list: prefer devices whose label reads back/rear/
         // environment (phones expose wide + ultrawide + tele); fall back to all.
         function _rearCycleList() {
@@ -20071,10 +20128,7 @@
             }
             let stream;
             try {
-                stream = await navigator.mediaDevices.getUserMedia({
-                    video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: "environment" } },
-                    audio: false,
-                });
+                stream = await navigator.mediaDevices.getUserMedia(_camVideoConstraints(deviceId));
             } catch (err) {
                 console.error("[camera-diag] switch-camera getUserMedia failed:", (err && err.name) || err);
                 showToast("Could not open that camera", "error");
@@ -20089,7 +20143,9 @@
                 try { await _camVideo.play(); } catch (_) {}
             }
             await _applyContinuousFocus();
+            await _applyMaxResolution();
             _renderCameraDiagnostics(mode);
+            _logDecodeResolution("camera switch");
             console.log("[camera-diag] switched to deviceId:", _camDeviceId);
         }
 
@@ -20116,6 +20172,12 @@
             }
             const cap = _readTrackCapabilities();
             const rep = cap ? cap.report : { focusMode: "?", zoom: "?", width: "?", height: "?" };
+            const sW = (cap && cap.settings && cap.settings.width) || "?";
+            const sH = (cap && cap.settings && cap.settings.height) || "?";
+            const vW = (_camVideo && _camVideo.videoWidth) || 0;
+            const vH = (_camVideo && _camVideo.videoHeight) || 0;
+            const cW = (_zxGrab && _zxGrab.width) || 0;
+            const cH = (_zxGrab && _zxGrab.height) || 0;
             const list = _camDevices;
             const curIdx = list.findIndex(d => d.deviceId && d.deviceId === _camDeviceId);
             const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -20133,7 +20195,8 @@
                 "<div>focusMode: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.focusMode)) + "</b></div>" +
                 "<div>zoom: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.zoom)) + "</b></div>" +
                 "<div>width: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.width)) + "</b></div>" +
-                "<div>height: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.height)) + "</b></div>";
+                "<div>height: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.height)) + "</b></div>" +
+                "<div style='margin-top:3px'>capture: <b style='color:#a7f3d0' data-decode-res>getSettings " + sW + "\u00d7" + sH + "  \u00b7  video " + vW + "\u00d7" + vH + "  \u00b7  canvas " + cW + "\u00d7" + cH + "</b></div>";
 
             if (list.length > 1) {
                 const btn = document.createElement("button");
@@ -20203,7 +20266,10 @@
             if (v.readyState >= 2 && v.videoWidth) {
                 try {
                     if (!_zxGrab) _zxGrab = document.createElement("canvas");
+                    // V20: decode canvas dimensions come ONLY from the raw video
+                    // frame - never CSS / clientWidth / the preview container.
                     _zxGrab.width = v.videoWidth; _zxGrab.height = v.videoHeight;
+                    _logDecodeResolution("scan tick");
                     _zxGrab.getContext("2d", { willReadFrequently: true }).drawImage(v, 0, 0);
                     const result = _zxReader.decode(_zxGrab);          // ZXing BrowserMultiFormatReader.decode(canvas)
                     const code = (result && result.getText) ? result.getText() : "";
@@ -20243,10 +20309,10 @@
 
             let stream;
             try {
-                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+                stream = await navigator.mediaDevices.getUserMedia(_camVideoConstraints(null));
             } catch (e1) {
                 try {
-                    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+                    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: CAM_IDEAL_W }, height: { ideal: CAM_IDEAL_H } }, audio: false });
                 } catch (e2) {
                     console.error("[barcode] getUserMedia failed:", (e2 && e2.name) || e2);
                     _setScannerLine(mode, "Unable to access camera");
@@ -20269,7 +20335,9 @@
             try {
                 await _enumerateCameras();
                 await _applyContinuousFocus();
+                await _applyMaxResolution();
                 _renderCameraDiagnostics(mode);
+                _logDecodeResolution("stream start");
             } catch (err) {
                 console.warn("[camera-diag] setup failed (decoding unaffected):", (err && err.message) || err);
             }
@@ -20304,6 +20372,7 @@
             _camTrack = null;
             _camDevices = [];
             _camDeviceId = null;
+            _lastLoggedRes = "";
             if (_camVideo) {
                 try { _camVideo.pause(); } catch (_) {}
                 try { _camVideo.srcObject = null; } catch (_) {}
@@ -20430,7 +20499,7 @@
         // => nothing was ever decoded. One reused AudioContext, unlocked on the
         // camera tap / scan-field focus; entirely best-effort — a blocked or
         // missing AudioContext must never interrupt a scan.
-        console.log("[barcode] app.js build 2026-09-03-v19 — camera diagnostics (device list / switch / capabilities / focus / zoom)");
+        console.log("[barcode] app.js build 2026-09-03-v20 — camera capture-resolution diagnostics");
         let _pipelineAudioCtx = null;
         function _primePipelineAudio() {
             try {
