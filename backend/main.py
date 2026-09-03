@@ -35,17 +35,16 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from sqlalchemy.exc import IntegrityError
 from passlib.context import CryptContext
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import InvalidTokenError as JWTError
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
-from storage import build_storage_provider
 
 try:
     from dotenv import load_dotenv
-    # .env lives at the project root, one level above this backend/ package.
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    load_dotenv()
 except Exception:
     pass
 
@@ -62,31 +61,27 @@ except Exception:
 # -----------------------------------------------------------------------------
 # APP / CONFIG
 # -----------------------------------------------------------------------------
-# backend/ holds the server code; the project root (its parent) holds the
-# frontend/ bundle, the .env file, and the default data directories.
 BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE_DIR.parent
-FRONTEND_DIR = PROJECT_ROOT / "frontend"
-INDEX_PATH = FRONTEND_DIR / "index.html"
-ASSETS_DIR = FRONTEND_DIR / "assets"
+INDEX_PATH = BASE_DIR / "index.html"
+ASSETS_DIR = BASE_DIR / "assets"
 ENVIRONMENT = os.getenv("SUPPLY_AI_ENV", "development").strip().lower()
 IS_PRODUCTION = ENVIRONMENT == "production"
 
 def resolve_app_path(value: str, default: Path) -> Path:
     """Resolve configurable data paths without allowing an implicit web-root path."""
     candidate = Path(value).expanduser() if value else default
-    # Relative data paths are anchored at the project root, not backend/, so
-    # "uploads" keeps resolving to <project>/uploads after the backend move.
-    return candidate.resolve() if candidate.is_absolute() else (PROJECT_ROOT / candidate).resolve()
+    return candidate.resolve() if candidate.is_absolute() else (BASE_DIR / candidate).resolve()
 
 # -----------------------------------------------------------------------------
 # DATABASE_URL — mandatory, PostgreSQL-only, source of truth for both the app
 # and Alembic (see alembic/env.py, which reads this exact same variable).
-# There is no fallback engine: if DATABASE_URL is missing or is not a
-# PostgreSQL URL the process refuses to start. Every environment
-# (development, staging, production, tests) must supply its own real
-# PostgreSQL DATABASE_URL; see .env.example for the recommended per-environment
-# database names (cauldra_dev / cauldra_test / cauldra_prod).
+# Cauldra used to fall back to a local SQLite file when this was unset; that
+# fallback is gone entirely — a database engine chosen silently by "was an
+# env var present or not" is exactly the kind of environment drift this
+# removes. Every environment (development, staging, production, tests) must
+# supply a real PostgreSQL DATABASE_URL of its own; see DATABASE_MIGRATION.md
+# and .env.example for the recommended per-environment database names
+# (cauldra_dev / cauldra_test / cauldra_prod).
 # -----------------------------------------------------------------------------
 def _normalize_database_url(raw: str) -> str:
     """Normalizes provider-supplied URL forms into what this app's pinned
@@ -126,7 +121,7 @@ if not DATABASE_URL.startswith(("postgresql://", "postgresql+psycopg://", "postg
 # never also trigger main.py's own startup connectivity check as a side
 # effect (that check belongs to the app process actually serving traffic).
 SKIP_DB_STARTUP_CHECK = os.getenv("SUPPLY_AI_SKIP_DB_STARTUP_CHECK", "false").strip().lower() == "true"
-UPLOAD_STORAGE_DIR = resolve_app_path(os.getenv("SUPPLY_AI_UPLOAD_DIR", "uploads"), PROJECT_ROOT / "uploads")
+UPLOAD_STORAGE_DIR = resolve_app_path(os.getenv("SUPPLY_AI_UPLOAD_DIR", "uploads"), BASE_DIR / "uploads")
 MAX_UPLOAD_BYTES = int(os.getenv("SUPPLY_AI_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 
 SECRET_KEY = os.getenv("SUPPLY_AI_SECRET_KEY", "").strip()
@@ -278,13 +273,6 @@ if not IS_PRODUCTION:
     app.add_middleware(PerfLoggingMiddleware)
 if ASSETS_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
-# The frontend script/style bundles live beside index.html under frontend/;
-# each is served from its own root-level path so index.html can reference
-# "/css/..." and "/js/..." unchanged across web and Capacitor shells.
-if (FRONTEND_DIR / "css").is_dir():
-    app.mount("/css", StaticFiles(directory=str(FRONTEND_DIR / "css")), name="css")
-if (FRONTEND_DIR / "js").is_dir():
-    app.mount("/js", StaticFiles(directory=str(FRONTEND_DIR / "js")), name="js")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -406,8 +394,30 @@ def verify_database_connectivity() -> None:
     except Exception as exc:
         raise RuntimeError(_classify_database_connection_error(exc)) from exc
 
+def _log_database_backend_identity() -> None:
+    """One safe, unambiguous startup log line so a Railway deployment (or
+    anyone reading its logs) can immediately confirm which database is
+    actually in use, without ever printing a credential. Only host/port/
+    database name (from SQLAlchemy's already-parsed engine.url — never the
+    raw DATABASE_URL string, which is the only part that could carry a
+    password) plus a live current_schema() read. Best-effort: a failure here
+    is never fatal on its own — verify_database_connectivity() right above
+    this call is what actually gates startup."""
+    url = engine.url
+    schema = "unknown"
+    try:
+        with engine.connect() as conn:
+            schema = conn.execute(sql_text("SELECT current_schema()")).scalar() or "unknown"
+    except Exception:
+        pass
+    print(f"[startup] Database backend: PostgreSQL")
+    print(f"[startup] Database host: {url.host}:{url.port or 5432}")
+    print(f"[startup] Database name: {url.database}")
+    print(f"[startup] Database schema: {schema}")
+
 if not SKIP_DB_STARTUP_CHECK:
     verify_database_connectivity()
+    _log_database_backend_identity()
 
 # -----------------------------------------------------------------------------
 # MODELS
@@ -1391,24 +1401,7 @@ class NotificationPreference(Base):
     category = Column(String, nullable=False)
     enabled = Column(Boolean, nullable=False, default=True)
 
-UPLOAD_STORAGE = build_storage_provider(UPLOAD_STORAGE_DIR)
-
-
-@event.listens_for(Session, "after_commit")
-def _forget_committed_uploads(session: Session) -> None:
-    """A committed metadata row now owns each uploaded object."""
-    session.info.pop("pending_upload_storage_keys", None)
-
-
-@event.listens_for(Session, "after_rollback")
-def _remove_rolled_back_uploads(session: Session) -> None:
-    """Best-effort cleanup when object upload succeeds but DB work rolls back."""
-    keys = session.info.pop("pending_upload_storage_keys", [])
-    for key in keys:
-        try:
-            UPLOAD_STORAGE.delete(key)
-        except Exception as exc:
-            print(f"[upload-cleanup-failed] provider={UPLOAD_STORAGE.name} exception_type={type(exc).__name__}")
+UPLOAD_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Schema creation, ad-hoc ALTER/CREATE INDEX statements, and one-time legacy
 # data backfills used to live here, gated behind AUTO_CREATE_SCHEMA. All of
@@ -1419,10 +1412,9 @@ def _remove_rolled_back_uploads(session: Session) -> None:
 # every one-time data backfill (Business Day status/business_day_id,
 # card_verified grandfathering, subscription-anchor backfill, legacy role
 # rename, warehouse registry seed) is now migration 0012_legacy_data_backfill.
-# Ordinary application startup performs connectivity verification (see
-# verify_database_connectivity() above) and nothing else. Supabase projects
-# installed through SCHEMA_INSTALLATION.md remain human-managed in the SQL
-# Editor; Alembic is only for environments explicitly managed by Alembic.
+# Ordinary application startup performs schema verification (see
+# verify_database_connectivity() above) and nothing else — run
+# `alembic upgrade head` to apply schema changes.
 
 # Central subscription and AI-cost policy.  None represents an intentionally
 # unlimited Enterprise people/location resource, not a large hidden cap.
@@ -2158,12 +2150,18 @@ def persist_upload(db: Session, user: User, kind: str, original_name: str, conte
     )
     db.add(row)
     db.flush()
-    key = f"businesses/{user.business_id}/uploads/{row.id}-{secrets.token_urlsafe(18)}{suffix}"
+    key = f"{user.business_id}/{row.id}-{secrets.token_urlsafe(18)}{suffix}"
+    target = (UPLOAD_STORAGE_DIR / key).resolve()
+    if UPLOAD_STORAGE_DIR not in target.parents:
+        raise HTTPException(status_code=500, detail="The upload storage location is invalid.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
     try:
-        UPLOAD_STORAGE.put_bytes(key, raw, content_type)
-    except Exception as exc:
+        temporary.write_bytes(raw)
+        os.replace(temporary, target)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
         raise HTTPException(status_code=503, detail="The server could not securely store the uploaded file.") from exc
-    db.info.setdefault("pending_upload_storage_keys", []).append(key)
     row.storage_key = key
     return row
 
@@ -2560,7 +2558,8 @@ def checkout_key_expr():
     a real client_ref that happened to be all digits.
 
     cast(...) + literal string concat compiles to `'S' || CAST(id AS VARCHAR)`
-    on PostgreSQL; no dialect-specific branching needed."""
+    on both SQLite and PostgreSQL — verified against both dialects; no
+    dialect-specific branching needed."""
     return func.coalesce(SaleModel.client_ref, literal("S") + cast(SaleModel.id, String))
 
 def compute_financial_summary(db: Session, business_id: int, start_utc: Optional[datetime], end_utc: Optional[datetime]) -> Dict[str, Any]:
@@ -2821,6 +2820,34 @@ def get_current_user(user: User = Depends(get_authenticated_user), db: Session =
         raise HTTPException(status_code=403, detail="You must change your temporary password before using the application.")
     require_subscription_access(db, user)
     return user
+
+
+def enforce_offline_replay_identity(request: Request, user: User) -> None:
+    """Reject an outbox replay that is not bound to the current identity.
+
+    Ordinary online mutations do not carry the replay marker and remain
+    unchanged. Every durable outbox replay carries the business, user, and
+    account-auth generation captured when it was queued. This prevents a later
+    user in the same browser/business from executing or being audited for the
+    original user's operation.
+    """
+    if request.headers.get("x-cauldra-offline-replay") != "1":
+        return
+    try:
+        queued_business_id = int(request.headers.get("x-cauldra-offline-business-id", ""))
+        queued_user_id = int(request.headers.get("x-cauldra-offline-user-id", ""))
+        queued_auth_version = int(request.headers.get("x-cauldra-offline-auth-version", ""))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Offline replay identity is incomplete.")
+    if (
+        queued_business_id != int(user.business_id)
+        or queued_user_id != int(user.id)
+        or queued_auth_version != int(user.auth_version or 1)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This offline change belongs to a different or expired signed-in identity and was not applied.",
+        )
 
 def require_ai_access(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
     """Real security boundary for every AI-branded endpoint (Business Brain, AI
@@ -3158,6 +3185,7 @@ def serialize_user(u: User) -> dict:
         "id": u.id, "username": u.username, "role": u.role, "email": u.email, "phone": u.phone,
         "firstname": u.firstname, "lastname": u.lastname, "position": u.position,
         "must_change_password": u.must_change_password, "disabled": u.disabled,
+        "auth_version": int(u.auth_version or 1),
     }
 
 def serialize_business(b: BusinessProfile) -> dict:
@@ -4695,10 +4723,10 @@ def delete_business_profile(response: Response, user: User = Depends(get_current
     established convention for every table in this app) to be correctly
     swept up here with no code change.
 
-    The ONE thing a database cascade cannot do is delete objects from the
-    configured private storage provider. StoredUpload rows disappear with
-    everything else, so their opaque keys are captured before deletion and
-    removed only after the database commit succeeds."""
+    The ONE thing a database cascade cannot do is delete files on disk —
+    StoredUpload rows disappear with everything else, but the physical
+    files under UPLOAD_STORAGE_DIR do not, so those paths are captured
+    before deletion and removed after commit succeeds."""
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Only the business Admin can delete the business profile.")
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
@@ -4707,7 +4735,7 @@ def delete_business_profile(response: Response, user: User = Depends(get_current
 
     business_id, business_code = biz.id, biz.business_code
     upload_rows = db.query(StoredUpload).filter(StoredUpload.business_id == business_id).all()
-    upload_keys = [row.storage_key for row in upload_rows]
+    upload_paths = [(UPLOAD_STORAGE_DIR / row.storage_key).resolve() for row in upload_rows]
 
     # No audit_logs entry is written for this action: audit_logs.business_id
     # is itself part of the cascade (by design — the whole business's audit
@@ -4725,14 +4753,9 @@ def delete_business_profile(response: Response, user: User = Depends(get_current
         db.rollback()
         raise HTTPException(status_code=500, detail="The business could not be deleted. Please try again.")
 
-    for key in upload_keys:
-        try:
-            UPLOAD_STORAGE.delete(key)
-        except Exception as exc:
-            print(
-                f"[business-upload-cleanup-failed] business_id={business_id} "
-                f"provider={UPLOAD_STORAGE.name} exception_type={type(exc).__name__}"
-            )
+    for path in upload_paths:
+        if UPLOAD_STORAGE_DIR in path.parents:
+            path.unlink(missing_ok=True)
     clear_refresh_cookie(response)
     return {"message": "Business profile deleted successfully."}
 
@@ -5178,7 +5201,8 @@ def inventory_summary(warehouse: Optional[str] = Query(None), user: User = Depen
     }
 
 @app.post("/products/")
-def create_product(data: ProductCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_product(data: ProductCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    enforce_offline_replay_identity(request, user)
     if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot add products.")
     client_ref = (data.client_ref or "").strip()[:100] or None
     claim, replay = claim_idempotent_mutation(
@@ -5216,7 +5240,8 @@ def create_product(data: ProductCreate, user: User = Depends(get_current_user), 
     return response
 
 @app.patch("/products/{product_id}")
-def update_product(product_id: int, data: ProductUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_product(product_id: int, data: ProductUpdate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    enforce_offline_replay_identity(request, user)
     if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot edit products.")
     changes = data.model_dump(exclude_unset=True)
     client_ref = str(changes.pop("client_ref", "") or "").strip()[:100] or None
@@ -5310,7 +5335,8 @@ def update_product(product_id: int, data: ProductUpdate, user: User = Depends(ge
     return response
 
 @app.delete("/products/{product_id}")
-def delete_product(product_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def delete_product(product_id: int, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    enforce_offline_replay_identity(request, user)
     p = db.query(Product).filter(Product.id == product_id, Product.business_id == user.business_id).first()
     if not p: raise HTTPException(status_code=404, detail="The product could not be found in this inventory.")
     if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot delete products.")
@@ -6143,11 +6169,61 @@ def business_brain(user: User = Depends(require_ai_access), db: Session = Depend
         # performing (or just performed) the refresh — read whatever is
         # currently stored rather than double-computing.
     meta = _business_brain_meta(db, user.business_id)
-    rows = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.business_id == user.business_id, BusinessBrainRecommendation.status != "dismissed").order_by(BusinessBrainRecommendation.updated_at.desc()).limit(30).all()
+    # Overview is current-state only. Once an item is acted on or dismissed it
+    # leaves the active brief and remains available through History below.
+    rows = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.business_id == user.business_id, BusinessBrainRecommendation.status.in_(["new", "opened"])).order_by(BusinessBrainRecommendation.updated_at.desc()).limit(30).all()
     rows.sort(key=lambda row: {"critical": 0, "important": 1, "opportunity": 2}.get(row.priority, 3))
     if user.role == "staff": rows = [r for r in rows if r.kind == "stock_review"]
     def rec_out(r): return {"id": r.id, "kind": r.kind, "priority": r.priority, "title": r.title, "summary": r.summary, "evidence": json.loads(r.evidence_json or "{}"), "status": r.status, "updated_at": to_utc_iso(r.updated_at)}
-    output = {"learning": meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS, "history_days": meta["history_days"], "currency": business.currency if business else "USD ($)", "attention": [rec_out(r) for r in rows], "recommendations": [rec_out(r) for r in rows], "learning_message": "Cauldra is still learning this part of your business. Continue recording sales and closing business days to build reliable predictions." if meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS else None}
+    # Business Brief History is a bounded read over records this engine already
+    # stores. It does not invent a second intelligence system or persist a new
+    # copy of the same insight: resolved recommendations and evaluated forecasts
+    # are projected into a small, consistently-shaped timeline for the UI.
+    history_recommendations_query = db.query(BusinessBrainRecommendation).filter(
+        BusinessBrainRecommendation.business_id == user.business_id,
+        BusinessBrainRecommendation.status.in_(["acted", "dismissed"]),
+    )
+    if user.role == "staff":
+        history_recommendations_query = history_recommendations_query.filter(BusinessBrainRecommendation.kind == "stock_review")
+    history_recommendations = history_recommendations_query.order_by(BusinessBrainRecommendation.updated_at.desc()).limit(40).all()
+    history_events = []
+    for row in history_recommendations:
+        occurred_at = row.acted_at if row.status == "acted" else row.dismissed_at
+        occurred_at = occurred_at or row.updated_at
+        category = "Completed action" if row.status == "acted" else ("Resolved warning" if row.kind == "stock_review" else "Earlier recommendation")
+        history_events.append({
+            "type": "recommendation", "category": category, "title": row.title,
+            "summary": row.summary, "status": row.status, "priority": row.priority,
+            "occurred_at": to_utc_iso(occurred_at), "_sort_at": occurred_at,
+        })
+    if user.role != "staff":
+        evaluated_predictions = (
+            db.query(BusinessBrainPrediction, Product.name)
+            .join(Product, Product.id == BusinessBrainPrediction.product_id)
+            .filter(
+                BusinessBrainPrediction.business_id == user.business_id,
+                Product.business_id == user.business_id,
+                BusinessBrainPrediction.actual_units.isnot(None),
+            )
+            .order_by(BusinessBrainPrediction.evaluated_at.desc())
+            .limit(40)
+            .all()
+        )
+        for prediction, product_name in evaluated_predictions:
+            occurred_at = prediction.evaluated_at or prediction.target_at
+            accuracy = round(prediction.accuracy_score * 100, 1) if prediction.accuracy_score is not None else None
+            accuracy_text = f" Accuracy: {accuracy:g}%." if accuracy is not None else ""
+            history_events.append({
+                "type": "forecast",
+                "category": "Seasonal forecast" if prediction.kind == "seasonal" else "Demand forecast",
+                "title": f"{product_name} forecast evaluated",
+                "summary": f"Forecast {prediction.predicted_units:g} units; actual sales were {prediction.actual_units:g} units.{accuracy_text}",
+                "status": "evaluated", "occurred_at": to_utc_iso(occurred_at), "_sort_at": occurred_at,
+            })
+    history_events.sort(key=lambda event: event["_sort_at"] or datetime.min, reverse=True)
+    for event in history_events:
+        event.pop("_sort_at", None)
+    output = {"learning": meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS, "history_days": meta["history_days"], "currency": business.currency if business else "USD ($)", "attention": [rec_out(r) for r in rows], "recommendations": [rec_out(r) for r in rows], "history": history_events[:60], "learning_message": "Cauldra is still learning this part of your business. Continue recording sales and closing business days to build reliable predictions." if meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS else None}
     if user.role != "staff":
         memories = db.query(BusinessBrainMemory).filter(BusinessBrainMemory.business_id == user.business_id).order_by(BusinessBrainMemory.last_observed_at.desc()).limit(20).all()
         predictions = db.query(BusinessBrainPrediction, Product.name).join(Product, Product.id == BusinessBrainPrediction.product_id).filter(BusinessBrainPrediction.business_id == user.business_id, BusinessBrainPrediction.actual_units.is_(None)).order_by(BusinessBrainPrediction.forecast_at.desc()).limit(20).all()
@@ -6167,7 +6243,7 @@ def action_business_brain_recommendation(recommendation_id: int, payload: Busine
     if action == "opened": row.opened_at = now
     elif action == "acted": row.acted_at = now
     else: row.dismissed_at = now
-    add_audit(db, user, "BUSINESS_BRAIN_RECOMMENDATION_" + action.upper(), f"Updated Business Brain recommendation #{row.id} to {action}."); db.commit()
+    add_audit(db, user, "BUSINESS_BRAIN_RECOMMENDATION_" + action.upper(), f"Updated Business Brief recommendation #{row.id} to {action}."); db.commit()
     return {"id": row.id, "status": row.status}
 
 # -----------------------------------------------------------------------------
@@ -6186,7 +6262,8 @@ def list_expense_categories(user: User = Depends(get_current_user)):
     return {"categories": EXPENSE_CATEGORIES}
 
 @app.post("/expenses/")
-def create_expense(data: ExpenseCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_expense(data: ExpenseCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    enforce_offline_replay_identity(request, user)
     if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
     category = (data.category or "").strip()
     if not category: raise HTTPException(status_code=400, detail="Please choose or enter an expense category.")
@@ -6553,7 +6630,8 @@ def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Se
 # SALES / BUSINESS DAYS
 # -----------------------------------------------------------------------------
 @app.post("/sales/checkout")
-def sales_checkout(payload: SalesCheckoutRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    enforce_offline_replay_identity(request, user)
     if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
     client_ref = (payload.client_ref or "").strip()[:100] or None
 
@@ -8351,6 +8429,104 @@ def first_subscription_verification_mismatches(
             mismatches.append(f"metadata_{key}")
     return mismatches
 
+
+def reconcile_first_subscription_payment(
+    db: Session,
+    record: PaymentRecord,
+    business: BusinessProfile,
+    verified_transaction: dict,
+    now: Optional[datetime] = None,
+) -> dict:
+    """Apply one server-verified first-subscription payment exactly once.
+
+    Both the signed Paystack webhook and the authenticated browser callback use
+    this function. The browser therefore cannot become a second payment
+    authority: it supplies only our reference, while every financial fact comes
+    from the locked PaymentRecord and Paystack's verification response.
+    """
+    now = now or datetime.utcnow()
+    if record.status == "success":
+        return {"status": "success", "already_processed": True}
+
+    provider_status = str(verified_transaction.get("status") or "").strip().lower()
+    metadata = parse_paystack_metadata(record.transaction_metadata)
+    metadata.update({
+        "paystack_transaction_id": str(verified_transaction.get("id") or ""),
+        "server_verified_at": now.replace(microsecond=0).isoformat() + "Z",
+    })
+
+    if provider_status != "success":
+        if provider_status in {"failed", "abandoned", "reversed"}:
+            transitioned = record.status != "failed"
+            record.status = "failed"
+            metadata["verification_provider_status"] = provider_status
+            record.transaction_metadata = json.dumps(metadata, sort_keys=True)
+            if transitioned:
+                add_audit(
+                    db, None, "SUBSCRIPTION_PAYMENT_FAILED",
+                    f"Paystack transaction for reference {record.paystack_reference} is {provider_status}; subscription not activated.",
+                    business_id=record.business_id,
+                )
+            db.flush()
+            return {"status": "failed", "already_processed": False}
+
+        # Paystack may still be processing immediately after the browser
+        # returns. This is retryable and must not be converted into either a
+        # successful subscription or a durable mismatch.
+        record.status = "pending"
+        metadata["verification_provider_status"] = provider_status or "pending"
+        record.transaction_metadata = json.dumps(metadata, sort_keys=True)
+        db.flush()
+        return {"status": "pending", "already_processed": False}
+
+    mismatches = first_subscription_verification_mismatches(verified_transaction, record, business)
+    if mismatches:
+        transitioned = record.status != "flagged_verification_mismatch"
+        record.status = "flagged_verification_mismatch"
+        metadata["verification_mismatches"] = sorted(set(mismatches))
+        record.transaction_metadata = json.dumps(metadata, sort_keys=True)
+        if transitioned:
+            add_audit(
+                db, None, "SUBSCRIPTION_PAYMENT_VERIFICATION_MISMATCH",
+                f"Paystack server verification did not match the server-owned checkout for reference {record.paystack_reference}. Subscription not activated; payment flagged for review.",
+                business_id=record.business_id,
+            )
+        db.flush()
+        return {"status": "flagged_verification_mismatch", "already_processed": False,
+                "verification_mismatches": sorted(set(mismatches))}
+
+    metadata["verification_source"] = "paystack_verify_transaction"
+    record.transaction_metadata = json.dumps(metadata, sort_keys=True)
+    record.paystack_transaction_id = str(verified_transaction.get("id") or "") or None
+    record.status = "success"
+    record.paid_at = now
+
+    sub = get_or_create_subscription(db, business, commit=False)
+    sub.plan = record.plan
+    sub.billing_interval = record.billing_interval
+    sub.status = "active"
+    sub.payment_status = "paid"
+    sub.paid_at = now
+    sub.current_period_start = now
+    sub.current_period_end = add_billing_interval(now, record.billing_interval)
+    sub.next_billing_at = sub.current_period_end
+    sub.latest_transaction_reference = record.paystack_reference
+    sub.cancel_at_period_end = False
+    sub.cancelled_at = None
+    sub.grace_period_ends_at = None
+    clear_pending_downgrade(sub)
+    business.subscription_plan = record.plan
+    business.billing_interval = record.billing_interval
+    add_audit(
+        db, None, "SUBSCRIPTION_ACTIVATED",
+        f"Payment verified with Paystack; subscription active on {PLAN_CONFIG[record.plan]['label']} ({record.billing_interval}).",
+        business_id=business.id,
+    )
+    resolve_notifications(db, f"sub_expired:{business.id}", business.id)
+    resolve_notifications(db, f"payment_failed:{business.id}", business.id)
+    db.flush()
+    return {"status": "success", "already_processed": False}
+
 def paystack_get_or_create_customer(email: str) -> str:
     payload = paystack_request("POST", "/customer", {"email": email})
     return (payload.get("data") or {}).get("customer_code", "")
@@ -8975,6 +9151,72 @@ def start_checkout(data: CheckoutRequest, request: Request, user: User = Depends
     return {"authorization_url": payload["data"]["authorization_url"], "reference": reference, "amount_kobo": amount_kobo}
 
 
+class SubscriptionCheckoutConfirmRequest(BaseModel):
+    reference: str
+
+
+@app.post("/subscription/checkout/confirm")
+def confirm_subscription_checkout(
+    data: SubscriptionCheckoutConfirmRequest,
+    user: User = Depends(get_authenticated_user),
+    db: Session = Depends(get_db),
+):
+    """Reconcile a Paystack browser callback through the webhook's authority.
+
+    The caller cannot supply price, plan, tenant, or success. We lock and load
+    only this tenant's server-created PaymentRecord and independently fetch the
+    transaction from Paystack before applying the shared activation function.
+    """
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only an Admin can confirm a subscription payment.")
+    if not PAYSTACK_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Payment processing is not configured.")
+
+    reference = str(data.reference or "").strip()
+    if not reference:
+        raise HTTPException(status_code=400, detail="Payment reference is required.")
+
+    record = (
+        db.query(PaymentRecord)
+        .filter(
+            PaymentRecord.paystack_reference == reference,
+            PaymentRecord.business_id == user.business_id,
+            PaymentRecord.purpose == "subscription",
+        )
+        .with_for_update()
+        .first()
+    )
+    if not record:
+        # Tenant-scoped 404 avoids revealing whether another business owns the
+        # supplied reference.
+        raise HTTPException(status_code=404, detail="We couldn't find that subscription payment.")
+    business = db.query(BusinessProfile).filter(
+        BusinessProfile.id == user.business_id,
+    ).first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found.")
+
+    if record.status == "success":
+        return {"status": "success", "already_processed": True, "reference": reference}
+
+    try:
+        verified_transaction = paystack_verify_transaction(reference)
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=502, detail="Payment verification is temporarily unavailable. Please retry.")
+
+    result = reconcile_first_subscription_payment(db, record, business, verified_transaction)
+    db.commit()
+    payload = {**result, "reference": reference}
+    if result["status"] == "pending":
+        return JSONResponse(status_code=202, content=payload)
+    if result["status"] == "failed":
+        return JSONResponse(status_code=409, content={**payload, "detail": "Paystack reports that this payment failed."})
+    if result["status"] == "flagged_verification_mismatch":
+        return JSONResponse(status_code=409, content={**payload, "detail": "Payment verification did not match this checkout and was not applied."})
+    return payload
+
+
 # -----------------------------------------------------------------------------
 # SUBSCRIPTION UPGRADES WITH UNUSED-TIME PRORATION
 #
@@ -9337,55 +9579,32 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
                 db.flush()
         elif record and record.status != "success" and record.purpose != "card_verification":
             # First-time subscribe, initiated by our own /subscription/checkout.
-            # We already know the exact expected amount because we set it
-            # server-side when the transaction was initialized. This branch is
-            # never reached for an upgrade payment (handled above) — only a
-            # brand-new subscription genuinely starts a fresh billing period.
-            business = db.query(BusinessProfile).filter(BusinessProfile.id == record.business_id).first()
-            try:
-                verified_transaction = paystack_verify_transaction(reference)
-            except Exception:
-                # This is retryable provider unavailability, not a failed charge.
-                # Explicit rollback removes the F-03 event marker as well as any
-                # pending effects so Paystack can safely retry the webhook.
-                db.rollback()
-                raise HTTPException(status_code=502, detail="Payment verification is temporarily unavailable.")
-
-            mismatches = first_subscription_verification_mismatches(verified_transaction, record, business)
-            metadata = parse_paystack_metadata(record.transaction_metadata)
-            metadata.update({
-                "paystack_transaction_id": str(verified_transaction.get("id") or ""),
-                "server_verified_at": now.replace(microsecond=0).isoformat() + "Z",
-            })
-            if mismatches:
-                # A definitive authoritative mismatch is durable reconciliation
-                # evidence, but it must never grant access or alter either tenant.
-                record.status = "flagged_verification_mismatch"
-                metadata["verification_mismatches"] = sorted(set(mismatches))
-                record.transaction_metadata = json.dumps(metadata, sort_keys=True)
-                add_audit(
-                    db, None, "SUBSCRIPTION_PAYMENT_VERIFICATION_MISMATCH",
-                    f"Paystack server verification did not match the server-owned checkout for reference {reference}. Subscription not activated; payment flagged for review.",
-                    business_id=record.business_id,
+            # Lock the same PaymentRecord used by the authenticated callback so
+            # webhook/callback races share one authority and one activation.
+            record = (
+                db.query(PaymentRecord)
+                .filter(PaymentRecord.id == record.id)
+                .with_for_update()
+                .one()
+            )
+            if record.status != "success":
+                business = db.query(BusinessProfile).filter(BusinessProfile.id == record.business_id).first()
+                try:
+                    verified_transaction = paystack_verify_transaction(reference)
+                except Exception:
+                    # This is retryable provider unavailability, not a failed charge.
+                    # Explicit rollback removes the F-03 event marker as well as any
+                    # pending effects so Paystack can safely retry the webhook.
+                    db.rollback()
+                    raise HTTPException(status_code=502, detail="Payment verification is temporarily unavailable.")
+                result = reconcile_first_subscription_payment(
+                    db, record, business, verified_transaction, now,
                 )
-                db.flush()
-            else:
-                metadata["verification_source"] = "paystack_verify_transaction"
-                record.transaction_metadata = json.dumps(metadata, sort_keys=True)
-                record.status = "success"; record.paid_at = now; db.flush()
-                sub = get_or_create_subscription(db, business, commit=False)
-                sub.plan = record.plan; sub.billing_interval = record.billing_interval
-                sub.status = "active"; sub.payment_status = "paid"; sub.paid_at = now
-                sub.current_period_start = now; sub.current_period_end = add_billing_interval(now, record.billing_interval)
-                sub.next_billing_at = sub.current_period_end
-                sub.latest_transaction_reference = reference
-                sub.cancel_at_period_end = False; sub.cancelled_at = None; sub.grace_period_ends_at = None
-                clear_pending_downgrade(sub)
-                business.subscription_plan = record.plan; business.billing_interval = record.billing_interval
-                add_audit(db, None, "SUBSCRIPTION_ACTIVATED", f"Payment verified with Paystack; subscription active on {PLAN_CONFIG[record.plan]['label']} ({record.billing_interval}).", business_id=business.id)
-                resolve_notifications(db, f"sub_expired:{business.id}", business.id)
-                resolve_notifications(db, f"payment_failed:{business.id}", business.id)
-                db.flush()
+                if result["status"] == "pending":
+                    # Do not consume the webhook marker while Paystack's
+                    # authoritative read is still pending; its retry remains useful.
+                    db.rollback()
+                    raise HTTPException(status_code=502, detail="Payment verification is still pending.")
         elif not record and reference:
             # No PaymentRecord we created means this charge was triggered by
             # Paystack's own recurring-subscription schedule (the automatic
@@ -9543,24 +9762,12 @@ def download_upload(upload_id: int, user: User = Depends(get_current_user), db: 
     row = db.query(StoredUpload).filter(StoredUpload.id == upload_id, StoredUpload.business_id == user.business_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Uploaded file is unavailable.")
-    path = UPLOAD_STORAGE.get_path(row.storage_key)
-    content = None
-    if path is None:
-        try:
-            content = UPLOAD_STORAGE.read_bytes(row.storage_key)
-        except Exception:
-            raise HTTPException(status_code=404, detail="Uploaded file is unavailable.")
-    elif not path.is_file():
+    path = (UPLOAD_STORAGE_DIR / row.storage_key).resolve()
+    if UPLOAD_STORAGE_DIR not in path.parents or not path.is_file():
         raise HTTPException(status_code=404, detail="Uploaded file is unavailable.")
     add_audit(db, user, "UPLOADED_FILE_DOWNLOADED", f"Downloaded retained {row.kind} file {row.original_name}.")
     db.commit()
-    if path is not None:
-        return FileResponse(str(path), media_type=row.content_type, filename=row.original_name, content_disposition_type="attachment")
-    return Response(
-        content=content,
-        media_type=row.content_type,
-        headers={"Content-Disposition": f'attachment; filename="{row.original_name}"'},
-    )
+    return FileResponse(str(path), media_type=row.content_type, filename=row.original_name, content_disposition_type="attachment")
 
 @app.get("/ai/insights")
 def ai_insights(user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
@@ -9600,17 +9807,40 @@ def health():
             content={"status": "degraded", "database": "unavailable", "version": app.version, "refresh_enabled": True},
         )
 
+@app.get("/health/database")
+def health_database():
+    """Manual diagnostic view — safe to hit from a browser or Railway's logs
+    to confirm exactly which PostgreSQL database this running deployment is
+    connected to (e.g. after a deploy, or when investigating "why does this
+    look like the wrong environment"). Complements the lightweight /health
+    above (which stays a fast, minimal check for load balancers/uptime
+    monitors) rather than replacing it.
+
+    Every value here comes from SQLAlchemy's already-parsed engine.url
+    (host/port/database name) or a live read-only query (schema, server
+    version) — never the raw DATABASE_URL string, and never a username or
+    password. A Supabase hostname naturally contains the project reference
+    (e.g. db.<ref>.supabase.co) — that's expected and not a secret on its
+    own; nothing else about the connection is ever included."""
+    url = engine.url
+    try:
+        with engine.connect() as conn:
+            version = conn.execute(sql_text("SHOW server_version")).scalar()
+            schema = conn.execute(sql_text("SELECT current_schema()")).scalar()
+        return {
+            "status": "ok", "database": "postgresql", "connected": True,
+            "host": url.host, "port": url.port, "database_name": url.database,
+            "schema": schema, "postgres_version": version,
+        }
+    except Exception as exc:
+        print(f"[health/database] database check failed: {_classify_database_connection_error(exc)}")
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "database": "postgresql", "connected": False},
+        )
+
 @app.get("/")
 def serve_index():
-    return FileResponse(str(INDEX_PATH))
-
-# Explicit entry points for the Hub/onboarding surface. The same app shell is
-# served so the frontend can restore the HttpOnly refresh session first, then
-# apply its canonical auth + business guard: guests/users without a business
-# see onboarding, while users with an active business are returned to `/`.
-@app.get("/hub", include_in_schema=False)
-@app.get("/onboarding", include_in_schema=False)
-def serve_hub_onboarding():
     return FileResponse(str(INDEX_PATH))
 
 # Served from the root path (not /assets/) so its default scope covers the
@@ -9618,10 +9848,10 @@ def serve_hub_onboarding():
 # intercept and cache the app shell / navigation requests.
 @app.get("/sw.js")
 def serve_service_worker():
-    return FileResponse(str(FRONTEND_DIR / "sw.js"), media_type="application/javascript", headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
+    return FileResponse(str(BASE_DIR / "sw.js"), media_type="application/javascript", headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
 
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     # Production launcher should run without reload. Use an external process manager in production.
-    uvicorn.run("main:app", host=os.getenv("HOST", "127.0.0.2"), port=int(os.getenv("PORT", "8001")), reload=False)
+    uvicorn.run("main:app", host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")), reload=False)

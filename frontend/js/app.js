@@ -1123,7 +1123,7 @@
                     groupMain: "Main", groupManagement: "Management", groupIntelligence: "Intelligence", groupSystem: "System",
                     dashboard: "Dashboard", todaysSales: "Sales", teamManagement: "Team Management", teamPresence: "Team Presence",
                     generatePO: "Generate PO", purchaseOrders: "Purchase Orders", inventory: "Inventory", suppliers: "Suppliers",
-                    warehouses: "Warehouses", expenses: "Expenses", profit: "Profit", businessBrain: "Business Brain", aiCenter: "AI Center",
+                    warehouses: "Warehouses", expenses: "Expenses", profit: "Profit", businessBrain: "Business Brief", aiCenter: "AI Center",
                     priceMonitor: "Price Monitor", predictive: "Predictive", businessProfile: "Business Profile", getStarted: "Get Started",
                     guestHub: "Guest Hub", hub: "Hub", signIn: "Sign In", guest: "Guest",
                     adminHub: "Admin Hub", managerHub: "Manager Hub", staffHub: "Staff Hub",
@@ -1332,16 +1332,21 @@
                     noRecordedActivity: "No recorded activity yet.", systemFallback: "System", activityFallback: "Activity",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
-                    subtitle: "Here is what deserves your attention, what is coming, and what Cauldra has learned.",
+                    title: "Business Brief",
+                    subtitle: "A focused summary of what matters now, what is approaching, and what Cauldra has learned.",
                     reviewing: "Reviewing your business data…",
                     tabAttention: "Attention", tabComing: "Coming", tabRecommendations: "Recommendations", tabMemory: "Memory", tabOutcomes: "Outcomes",
-                    unavailable: "Business Brain unavailable", stillLearning: "Cauldra is still learning from your business data.",
+                    tabOverview: "Overview", tabHistory: "History",
+                    needsYourAttention: "Needs Your Attention", comingUp: "Coming Up", cauldraRecommends: "Cauldra Recommends", whatCauldraIsLearning: "What Cauldra is Learning",
+                    memorySalesPatterns: "Sales patterns", memorySeasonalPatterns: "Seasonal patterns", memoryProductRelationships: "Product relationships", memoryOther: "Other observations",
+                    historyAll: "All", historyRecommendations: "Recommendations", historyForecasts: "Forecasts", historyEmpty: "No earlier intelligence has been recorded yet.",
+                    healthyState: "Nothing urgent needs your attention right now.", noComingUp: "No supported forecast is ready yet.", noCurrentRecommendation: "No supported recommendation is needed right now.",
+                    unavailable: "Business Brief unavailable", stillLearning: "Cauldra is still learning from your business data.",
                     attentionCount: { one: "1 thing deserves your attention.", other: "{count} things deserve your attention." },
                     noPriorities: "No immediate priorities were found in your current data.",
                     keepRecording: "Continue recording normal sales and inventory activity. Cauldra will surface useful priorities when evidence supports them.",
-                    starterRequired: "Business Brain is available on Starter and above.",
-                    upgradeToUnlock: "Upgrade to Starter to unlock Business Brain →",
+                    starterRequired: "Business Brief is available on Starter and above.",
+                    upgradeToUnlock: "Upgrade to Starter to unlock Business Brief →",
                     temporarilyUnavailable: "Business intelligence is temporarily unavailable. Your normal business tools are unaffected.",
                     accuracyImproving: "Predictions have been getting more accurate recently.",
                     accuracyDeclining: "Recent predictions have been less accurate than earlier ones.",
@@ -1517,7 +1522,7 @@
                     groupMain: "Principal", groupManagement: "Gestion", groupIntelligence: "Intelligence", groupSystem: "Système",
                     dashboard: "Tableau de bord", todaysSales: "Ventes du jour", teamManagement: "Gestion de l'équipe", teamPresence: "Présence de l'équipe",
                     generatePO: "Générer un bon de commande", purchaseOrders: "Bons de commande", inventory: "Inventaire", suppliers: "Fournisseurs",
-                    warehouses: "Entrepôts", expenses: "Dépenses", profit: "Bénéfice", businessBrain: "Business Brain", aiCenter: "Centre IA",
+                    warehouses: "Entrepôts", expenses: "Dépenses", profit: "Bénéfice", businessBrain: "Business Brief", aiCenter: "Centre IA",
                     priceMonitor: "Suivi des prix", predictive: "Prédictif", businessProfile: "Profil de l'entreprise", getStarted: "Commencer",
                     guestHub: "Espace invité", hub: "Accueil", signIn: "Connexion", guest: "Invité",
                     adminHub: "Espace administrateur", managerHub: "Espace gestionnaire", staffHub: "Espace employé",
@@ -1752,16 +1757,16 @@
                     noRecordedActivity: "Aucune activité enregistrée pour le moment.", systemFallback: "Système", activityFallback: "Activité",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Voici ce qui mérite votre attention, ce qui s'en vient et ce que Cauldra a appris.",
                     reviewing: "Analyse de vos données d'entreprise en cours…",
                     tabAttention: "Attention", tabComing: "À venir", tabRecommendations: "Recommandations", tabMemory: "Mémoire", tabOutcomes: "Résultats",
-                    unavailable: "Business Brain indisponible", stillLearning: "Cauldra apprend encore de vos données d'entreprise.",
+                    unavailable: "Business Brief indisponible", stillLearning: "Cauldra apprend encore de vos données d'entreprise.",
                     attentionCount: { one: "1 élément mérite votre attention.", other: "{count} éléments méritent votre attention." },
                     noPriorities: "Aucune priorité immédiate n'a été trouvée dans vos données actuelles.",
                     keepRecording: "Continuez à enregistrer les ventes et l'activité d'inventaire habituelles. Cauldra fera ressortir des priorités utiles lorsque les preuves le justifieront.",
-                    starterRequired: "Business Brain est disponible à partir du forfait Starter.",
-                    upgradeToUnlock: "Passez au forfait Starter pour débloquer Business Brain →",
+                    starterRequired: "Business Brief est disponible à partir du forfait Starter.",
+                    upgradeToUnlock: "Passez au forfait Starter pour débloquer Business Brief →",
                     temporarilyUnavailable: "L'intelligence d'affaires est temporairement indisponible. Vos outils habituels ne sont pas affectés.",
                     accuracyImproving: "Les prédictions sont devenues plus précises récemment.",
                     accuracyDeclining: "Les prédictions récentes ont été moins précises que les précédentes.",
@@ -1927,7 +1932,7 @@
                     groupMain: "Principal", groupManagement: "Gestión", groupIntelligence: "Inteligencia", groupSystem: "Sistema",
                     dashboard: "Panel", todaysSales: "Ventas de hoy", teamManagement: "Gestión de equipo", teamPresence: "Presencia del equipo",
                     generatePO: "Generar orden de compra", purchaseOrders: "Órdenes de compra", inventory: "Inventario", suppliers: "Proveedores",
-                    warehouses: "Almacenes", expenses: "Gastos", profit: "Beneficio", businessBrain: "Business Brain", aiCenter: "Centro de IA",
+                    warehouses: "Almacenes", expenses: "Gastos", profit: "Beneficio", businessBrain: "Business Brief", aiCenter: "Centro de IA",
                     priceMonitor: "Monitor de precios", predictive: "Predictivo", businessProfile: "Perfil de la empresa", getStarted: "Comenzar",
                     guestHub: "Panel de invitado", hub: "Inicio", signIn: "Iniciar sesión", guest: "Invitado",
                     adminHub: "Panel de administrador", managerHub: "Panel de gerente", staffHub: "Panel de personal",
@@ -2162,16 +2167,16 @@
                     noRecordedActivity: "Aún no hay actividad registrada.", systemFallback: "Sistema", activityFallback: "Actividad",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Esto es lo que merece su atención, lo que viene y lo que Cauldra ha aprendido.",
                     reviewing: "Revisando los datos de su empresa…",
                     tabAttention: "Atención", tabComing: "Próximamente", tabRecommendations: "Recomendaciones", tabMemory: "Memoria", tabOutcomes: "Resultados",
-                    unavailable: "Business Brain no disponible", stillLearning: "Cauldra todavía está aprendiendo de los datos de su empresa.",
+                    unavailable: "Business Brief no disponible", stillLearning: "Cauldra todavía está aprendiendo de los datos de su empresa.",
                     attentionCount: { one: "1 elemento merece su atención.", other: "{count} elementos merecen su atención." },
                     noPriorities: "No se encontraron prioridades inmediatas en sus datos actuales.",
                     keepRecording: "Continúe registrando la actividad normal de ventas e inventario. Cauldra mostrará prioridades útiles cuando la evidencia lo respalde.",
-                    starterRequired: "Business Brain está disponible en el plan Starter y superiores.",
-                    upgradeToUnlock: "Actualice a Starter para desbloquear Business Brain →",
+                    starterRequired: "Business Brief está disponible en el plan Starter y superiores.",
+                    upgradeToUnlock: "Actualice a Starter para desbloquear Business Brief →",
                     temporarilyUnavailable: "La inteligencia empresarial no está disponible temporalmente. Sus herramientas normales no se ven afectadas.",
                     accuracyImproving: "Las predicciones han sido más precisas recientemente.",
                     accuracyDeclining: "Las predicciones recientes han sido menos precisas que las anteriores.",
@@ -3155,7 +3160,7 @@
                     groupMain: "Principal", groupManagement: "Gestão", groupIntelligence: "Inteligência", groupSystem: "Sistema",
                     dashboard: "Painel", todaysSales: "Vendas de hoje", teamManagement: "Gestão de equipe", teamPresence: "Presença da equipe",
                     generatePO: "Gerar pedido de compra", purchaseOrders: "Pedidos de compra", inventory: "Estoque", suppliers: "Fornecedores",
-                    warehouses: "Armazéns", expenses: "Despesas", profit: "Lucro", businessBrain: "Business Brain", aiCenter: "Central de IA",
+                    warehouses: "Armazéns", expenses: "Despesas", profit: "Lucro", businessBrain: "Business Brief", aiCenter: "Central de IA",
                     priceMonitor: "Monitor de preços", predictive: "Preditivo", businessProfile: "Perfil da empresa", getStarted: "Começar",
                     guestHub: "Painel de visitante", hub: "Início", signIn: "Entrar", guest: "Visitante",
                     adminHub: "Painel do administrador", managerHub: "Painel do gerente", staffHub: "Painel da equipe",
@@ -3390,16 +3395,16 @@
                     noRecordedActivity: "Nenhuma atividade registrada até o momento.", systemFallback: "Sistema", activityFallback: "Atividade",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Aqui está o que merece sua atenção, o que está por vir e o que a Cauldra aprendeu.",
                     reviewing: "Revisando os dados da sua empresa…",
                     tabAttention: "Atenção", tabComing: "Em breve", tabRecommendations: "Recomendações", tabMemory: "Memória", tabOutcomes: "Resultados",
-                    unavailable: "Business Brain indisponível", stillLearning: "A Cauldra ainda está aprendendo com os dados da sua empresa.",
+                    unavailable: "Business Brief indisponível", stillLearning: "A Cauldra ainda está aprendendo com os dados da sua empresa.",
                     attentionCount: { one: "1 item merece sua atenção.", other: "{count} itens merecem sua atenção." },
                     noPriorities: "Nenhuma prioridade imediata foi encontrada em seus dados atuais.",
                     keepRecording: "Continue registrando as vendas normais e a atividade de estoque. A Cauldra mostrará prioridades úteis quando as evidências as sustentarem.",
-                    starterRequired: "O Business Brain está disponível no plano Starter e superiores.",
-                    upgradeToUnlock: "Faça upgrade para o Starter para desbloquear o Business Brain →",
+                    starterRequired: "O Business Brief está disponível no plano Starter e superiores.",
+                    upgradeToUnlock: "Faça upgrade para o Starter para desbloquear o Business Brief →",
                     temporarilyUnavailable: "A inteligência de negócios está temporariamente indisponível. Suas ferramentas normais não são afetadas.",
                     accuracyImproving: "As previsões têm ficado mais precisas recentemente.",
                     accuracyDeclining: "As previsões recentes têm sido menos precisas do que as anteriores.",
@@ -3565,7 +3570,7 @@
                     groupMain: "Hauptmenü", groupManagement: "Verwaltung", groupIntelligence: "Intelligenz", groupSystem: "System",
                     dashboard: "Dashboard", todaysSales: "Heutige Verkäufe", teamManagement: "Teamverwaltung", teamPresence: "Team-Anwesenheit",
                     generatePO: "Bestellung generieren", purchaseOrders: "Bestellungen", inventory: "Lagerbestand", suppliers: "Lieferanten",
-                    warehouses: "Lager", expenses: "Ausgaben", profit: "Gewinn", businessBrain: "Business Brain", aiCenter: "KI-Zentrum",
+                    warehouses: "Lager", expenses: "Ausgaben", profit: "Gewinn", businessBrain: "Business Brief", aiCenter: "KI-Zentrum",
                     priceMonitor: "Preisüberwachung", predictive: "Prognose", businessProfile: "Unternehmensprofil", getStarted: "Loslegen",
                     guestHub: "Gastbereich", hub: "Start", signIn: "Anmelden", guest: "Gast",
                     adminHub: "Admin-Bereich", managerHub: "Manager-Bereich", staffHub: "Mitarbeiterbereich",
@@ -3800,16 +3805,16 @@
                     noRecordedActivity: "Bisher keine erfasste Aktivität.", systemFallback: "System", activityFallback: "Aktivität",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Hier ist, was Ihre Aufmerksamkeit verdient, was ansteht und was Cauldra gelernt hat.",
                     reviewing: "Ihre Unternehmensdaten werden überprüft…",
                     tabAttention: "Aufmerksamkeit", tabComing: "Bevorstehend", tabRecommendations: "Empfehlungen", tabMemory: "Erinnerungen", tabOutcomes: "Ergebnisse",
-                    unavailable: "Business Brain nicht verfügbar", stillLearning: "Cauldra lernt noch aus Ihren Unternehmensdaten.",
+                    unavailable: "Business Brief nicht verfügbar", stillLearning: "Cauldra lernt noch aus Ihren Unternehmensdaten.",
                     attentionCount: { one: "1 Sache verdient Ihre Aufmerksamkeit.", other: "{count} Dinge verdienen Ihre Aufmerksamkeit." },
                     noPriorities: "In Ihren aktuellen Daten wurden keine unmittelbaren Prioritäten gefunden.",
                     keepRecording: "Erfassen Sie weiterhin normale Verkaufs- und Bestandsaktivitäten. Cauldra zeigt nützliche Prioritäten an, sobald Belege dies unterstützen.",
-                    starterRequired: "Business Brain ist ab dem Starter-Tarif verfügbar.",
-                    upgradeToUnlock: "Upgraden Sie auf Starter, um Business Brain freizuschalten →",
+                    starterRequired: "Business Brief ist ab dem Starter-Tarif verfügbar.",
+                    upgradeToUnlock: "Upgraden Sie auf Starter, um Business Brief freizuschalten →",
                     temporarilyUnavailable: "Business Intelligence ist vorübergehend nicht verfügbar. Ihre normalen Geschäftstools sind nicht betroffen.",
                     accuracyImproving: "Die Prognosen sind in letzter Zeit genauer geworden.",
                     accuracyDeclining: "Die jüngsten Prognosen waren weniger genau als frühere.",
@@ -4795,7 +4800,7 @@
                     groupMain: "Principale", groupManagement: "Gestione", groupIntelligence: "Intelligenza", groupSystem: "Sistema",
                     dashboard: "Dashboard", todaysSales: "Vendite di oggi", teamManagement: "Gestione del team", teamPresence: "Presenza del team",
                     generatePO: "Genera ordine d'acquisto", purchaseOrders: "Ordini d'acquisto", inventory: "Inventario", suppliers: "Fornitori",
-                    warehouses: "Magazzini", expenses: "Spese", profit: "Profitto", businessBrain: "Business Brain", aiCenter: "Centro IA",
+                    warehouses: "Magazzini", expenses: "Spese", profit: "Profitto", businessBrain: "Business Brief", aiCenter: "Centro IA",
                     priceMonitor: "Monitoraggio prezzi", predictive: "Predittivo", businessProfile: "Profilo aziendale", getStarted: "Inizia",
                     guestHub: "Area ospite", hub: "Home", signIn: "Accedi", guest: "Ospite",
                     adminHub: "Area amministratore", managerHub: "Area manager", staffHub: "Area staff",
@@ -5030,16 +5035,16 @@
                     noRecordedActivity: "Nessuna attività registrata finora.", systemFallback: "Sistema", activityFallback: "Attività",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Ecco cosa merita la tua attenzione, cosa sta arrivando e cosa ha imparato Cauldra.",
                     reviewing: "Revisione dei dati della tua attività in corso…",
                     tabAttention: "Attenzione", tabComing: "In arrivo", tabRecommendations: "Raccomandazioni", tabMemory: "Memoria", tabOutcomes: "Risultati",
-                    unavailable: "Business Brain non disponibile", stillLearning: "Cauldra sta ancora imparando dai dati della tua attività.",
+                    unavailable: "Business Brief non disponibile", stillLearning: "Cauldra sta ancora imparando dai dati della tua attività.",
                     attentionCount: { one: "1 elemento merita la tua attenzione.", other: "{count} elementi meritano la tua attenzione." },
                     noPriorities: "Nessuna priorità immediata trovata nei tuoi dati attuali.",
                     keepRecording: "Continua a registrare le normali attività di vendita e magazzino. Cauldra mostrerà priorità utili quando le prove le supporteranno.",
-                    starterRequired: "Business Brain è disponibile dal piano Starter in su.",
-                    upgradeToUnlock: "Esegui l'upgrade a Starter per sbloccare Business Brain →",
+                    starterRequired: "Business Brief è disponibile dal piano Starter in su.",
+                    upgradeToUnlock: "Esegui l'upgrade a Starter per sbloccare Business Brief →",
                     temporarilyUnavailable: "La business intelligence non è temporaneamente disponibile. I tuoi normali strumenti aziendali non sono interessati.",
                     accuracyImproving: "Le previsioni sono diventate più accurate di recente.",
                     accuracyDeclining: "Le previsioni recenti sono state meno accurate di quelle precedenti.",
@@ -5205,7 +5210,7 @@
                     groupMain: "Hoofdmenu", groupManagement: "Beheer", groupIntelligence: "Intelligentie", groupSystem: "Systeem",
                     dashboard: "Dashboard", todaysSales: "Verkoop vandaag", teamManagement: "Teambeheer", teamPresence: "Teamaanwezigheid",
                     generatePO: "Inkooporder genereren", purchaseOrders: "Inkooporders", inventory: "Voorraad", suppliers: "Leveranciers",
-                    warehouses: "Magazijnen", expenses: "Uitgaven", profit: "Winst", businessBrain: "Business Brain", aiCenter: "AI-centrum",
+                    warehouses: "Magazijnen", expenses: "Uitgaven", profit: "Winst", businessBrain: "Business Brief", aiCenter: "AI-centrum",
                     priceMonitor: "Prijsmonitor", predictive: "Voorspellend", businessProfile: "Bedrijfsprofiel", getStarted: "Aan de slag",
                     guestHub: "Gastenhub", hub: "Start", signIn: "Inloggen", guest: "Gast",
                     adminHub: "Beheerdershub", managerHub: "Managershub", staffHub: "Personeelshub",
@@ -5440,16 +5445,16 @@
                     noRecordedActivity: "Nog geen geregistreerde activiteit.", systemFallback: "Systeem", activityFallback: "Activiteit",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Hier is wat uw aandacht verdient, wat eraan komt en wat Cauldra heeft geleerd.",
                     reviewing: "Uw bedrijfsgegevens worden beoordeeld…",
                     tabAttention: "Aandacht", tabComing: "Binnenkort", tabRecommendations: "Aanbevelingen", tabMemory: "Geheugen", tabOutcomes: "Resultaten",
-                    unavailable: "Business Brain niet beschikbaar", stillLearning: "Cauldra leert nog steeds van uw bedrijfsgegevens.",
+                    unavailable: "Business Brief niet beschikbaar", stillLearning: "Cauldra leert nog steeds van uw bedrijfsgegevens.",
                     attentionCount: { one: "1 zaak verdient uw aandacht.", other: "{count} zaken verdienen uw aandacht." },
                     noPriorities: "Er zijn geen onmiddellijke prioriteiten gevonden in uw huidige gegevens.",
                     keepRecording: "Blijf normale verkoop- en voorraadactiviteiten registreren. Cauldra toont nuttige prioriteiten zodra bewijs dit ondersteunt.",
-                    starterRequired: "Business Brain is beschikbaar vanaf het Starter-abonnement.",
-                    upgradeToUnlock: "Upgrade naar Starter om Business Brain te ontgrendelen →",
+                    starterRequired: "Business Brief is beschikbaar vanaf het Starter-abonnement.",
+                    upgradeToUnlock: "Upgrade naar Starter om Business Brief te ontgrendelen →",
                     temporarilyUnavailable: "Business intelligence is tijdelijk niet beschikbaar. Uw normale bedrijfstools zijn niet beïnvloed.",
                     accuracyImproving: "Voorspellingen zijn recentelijk nauwkeuriger geworden.",
                     accuracyDeclining: "Recente voorspellingen waren minder nauwkeurig dan eerdere.",
@@ -5615,7 +5620,7 @@
                     groupMain: "Ana", groupManagement: "Yönetim", groupIntelligence: "Zeka", groupSystem: "Sistem",
                     dashboard: "Kontrol Paneli", todaysSales: "Bugünkü Satışlar", teamManagement: "Ekip Yönetimi", teamPresence: "Ekip Durumu",
                     generatePO: "Satın Alma Siparişi Oluştur", purchaseOrders: "Satın Alma Siparişleri", inventory: "Envanter", suppliers: "Tedarikçiler",
-                    warehouses: "Depolar", expenses: "Giderler", profit: "Kâr", businessBrain: "Business Brain", aiCenter: "AI Merkezi",
+                    warehouses: "Depolar", expenses: "Giderler", profit: "Kâr", businessBrain: "Business Brief", aiCenter: "AI Merkezi",
                     priceMonitor: "Fiyat Takibi", predictive: "Tahminsel", businessProfile: "İşletme Profili", getStarted: "Başlayın",
                     guestHub: "Misafir Merkezi", hub: "Ana Sayfa", signIn: "Giriş Yap", guest: "Misafir",
                     adminHub: "Yönetici Merkezi", managerHub: "Yönetici Merkezi", staffHub: "Personel Merkezi",
@@ -6025,7 +6030,7 @@
                     groupMain: "Главное", groupManagement: "Управление", groupIntelligence: "Аналитика", groupSystem: "Система",
                     dashboard: "Панель управления", todaysSales: "Продажи за сегодня", teamManagement: "Управление командой", teamPresence: "Присутствие команды",
                     generatePO: "Создать заказ на закупку", purchaseOrders: "Заказы на закупку", inventory: "Инвентарь", suppliers: "Поставщики",
-                    warehouses: "Склады", expenses: "Расходы", profit: "Прибыль", businessBrain: "Business Brain", aiCenter: "Центр ИИ",
+                    warehouses: "Склады", expenses: "Расходы", profit: "Прибыль", businessBrain: "Business Brief", aiCenter: "Центр ИИ",
                     priceMonitor: "Мониторинг цен", predictive: "Прогнозирование", businessProfile: "Профиль компании", getStarted: "Начать",
                     guestHub: "Гостевой центр", hub: "Главная", signIn: "Войти", guest: "Гость",
                     adminHub: "Центр администратора", managerHub: "Центр менеджера", staffHub: "Центр сотрудника",
@@ -6260,16 +6265,16 @@
                     noRecordedActivity: "Пока нет записанной активности.", systemFallback: "Система", activityFallback: "Активность",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Вот что заслуживает вашего внимания, что предстоит и чему научилась Cauldra.",
                     reviewing: "Просмотр данных вашего бизнеса…",
                     tabAttention: "Внимание", tabComing: "Предстоящее", tabRecommendations: "Рекомендации", tabMemory: "Память", tabOutcomes: "Результаты",
-                    unavailable: "Business Brain недоступен", stillLearning: "Cauldra всё ещё обучается на данных вашего бизнеса.",
+                    unavailable: "Business Brief недоступен", stillLearning: "Cauldra всё ещё обучается на данных вашего бизнеса.",
                     attentionCount: { one: "1 пункт заслуживает вашего внимания.", other: "{count} пунктов заслуживают вашего внимания." },
                     noPriorities: "В ваших текущих данных не найдено срочных приоритетов.",
                     keepRecording: "Продолжайте записывать обычные продажи и активность по запасам. Cauldra покажет полезные приоритеты, когда появятся достаточные основания.",
-                    starterRequired: "Business Brain доступен на тарифе Starter и выше.",
-                    upgradeToUnlock: "Улучшите тариф до Starter, чтобы разблокировать Business Brain →",
+                    starterRequired: "Business Brief доступен на тарифе Starter и выше.",
+                    upgradeToUnlock: "Улучшите тариф до Starter, чтобы разблокировать Business Brief →",
                     temporarilyUnavailable: "Бизнес-аналитика временно недоступна. Ваши обычные бизнес-инструменты не затронуты.",
                     accuracyImproving: "Прогнозы стали точнее в последнее время.",
                     accuracyDeclining: "Недавние прогнозы были менее точными, чем предыдущие.",
@@ -7255,7 +7260,7 @@
                     groupMain: "Kuu", groupManagement: "Usimamizi", groupIntelligence: "Akili", groupSystem: "Mfumo",
                     dashboard: "Dashibodi", todaysSales: "Mauzo ya Leo", teamManagement: "Usimamizi wa Timu", teamPresence: "Uwepo wa Timu",
                     generatePO: "Tengeneza Agizo la Ununuzi", purchaseOrders: "Maagizo ya Ununuzi", inventory: "Bidhaa Ghalani", suppliers: "Wasambazaji",
-                    warehouses: "Maghala", expenses: "Matumizi", profit: "Faida", businessBrain: "Business Brain", aiCenter: "Kituo cha AI",
+                    warehouses: "Maghala", expenses: "Matumizi", profit: "Faida", businessBrain: "Business Brief", aiCenter: "Kituo cha AI",
                     priceMonitor: "Ufuatiliaji wa Bei", predictive: "Utabiri", businessProfile: "Wasifu wa Biashara", getStarted: "Anza",
                     guestHub: "Kituo cha Mgeni", hub: "Nyumbani", signIn: "Ingia", guest: "Mgeni",
                     adminHub: "Kituo cha Msimamizi", managerHub: "Kituo cha Meneja", staffHub: "Kituo cha Wafanyakazi",
@@ -7490,16 +7495,16 @@
                     noRecordedActivity: "Hakuna shughuli iliyorekodiwa bado.", systemFallback: "Mfumo", activityFallback: "Shughuli",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Hapa kuna kile kinachostahili tahadhari yako, kinachokuja, na kile ambacho Cauldra kimejifunza.",
                     reviewing: "Inakagua data ya biashara yako…",
                     tabAttention: "Tahadhari", tabComing: "Inakuja", tabRecommendations: "Mapendekezo", tabMemory: "Kumbukumbu", tabOutcomes: "Matokeo",
-                    unavailable: "Business Brain hapatikani", stillLearning: "Cauldra bado inajifunza kutoka kwa data ya biashara yako.",
+                    unavailable: "Business Brief hapatikani", stillLearning: "Cauldra bado inajifunza kutoka kwa data ya biashara yako.",
                     attentionCount: { one: "Jambo 1 linastahili tahadhari yako.", other: "Mambo {count} yanastahili tahadhari yako." },
                     noPriorities: "Hakuna vipaumbele vya haraka vilivyopatikana katika data yako ya sasa.",
                     keepRecording: "Endelea kurekodi mauzo ya kawaida na shughuli za hesabu. Cauldra itaonyesha vipaumbele muhimu wakati ushahidi unavyounga mkono.",
-                    starterRequired: "Business Brain inapatikana kwenye mpango wa Starter na zaidi.",
-                    upgradeToUnlock: "Boresha kwenda Starter ili kufungua Business Brain →",
+                    starterRequired: "Business Brief inapatikana kwenye mpango wa Starter na zaidi.",
+                    upgradeToUnlock: "Boresha kwenda Starter ili kufungua Business Brief →",
                     temporarilyUnavailable: "Akili ya biashara hapatikani kwa muda. Zana zako za kawaida za biashara hazijaathirika.",
                     accuracyImproving: "Utabiri umekuwa sahihi zaidi hivi karibuni.",
                     accuracyDeclining: "Utabiri wa hivi karibuni umekuwa sahihi kidogo kuliko wa awali.",
@@ -7665,7 +7670,7 @@
                     groupMain: "Àkọ́kọ́", groupManagement: "Ìṣàkóso", groupIntelligence: "Òye", groupSystem: "Ìlànà",
                     dashboard: "Dáṣíbọ́dù", todaysSales: "Títà Òní", teamManagement: "Ìṣàkóso Ẹgbẹ́", teamPresence: "Ìwàníhìn-ín Ẹgbẹ́",
                     generatePO: "Ṣẹ̀dá Àṣẹ Rírà", purchaseOrders: "Àṣẹ Rírà", inventory: "Ọjà Ilé Ìtajà", suppliers: "Àwọn Olùpèsè",
-                    warehouses: "Ilé Ìtọ́jú Ọjà", expenses: "Ìnáwó", profit: "Èrè", businessBrain: "Business Brain", aiCenter: "Àárín AI",
+                    warehouses: "Ilé Ìtọ́jú Ọjà", expenses: "Ìnáwó", profit: "Èrè", businessBrain: "Business Brief", aiCenter: "Àárín AI",
                     priceMonitor: "Àbójútó Owó", predictive: "Àsọtẹ́lẹ̀", businessProfile: "Àlàyé Iṣòwò", getStarted: "Bẹ̀rẹ̀",
                     guestHub: "Ibùdó Àlejò", hub: "Ilé", signIn: "Wọlé", guest: "Àlejò",
                     adminHub: "Ibùdó Alábòójútó", managerHub: "Ibùdó Alákóso", staffHub: "Ibùdó Òṣìṣẹ́",
@@ -7900,16 +7905,16 @@
                     noRecordedActivity: "Kò sí ìgbòkègbodò tí a ṣàkọsílẹ̀ rẹ̀ síbẹ̀.", systemFallback: "Ètò", activityFallback: "Ìgbòkègbodò",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Ẹ̀yí ni ohun tí ó yẹ kí o kíyèsí, ohun tí ń bọ̀, àti ohun tí Cauldra ti kọ́.",
                     reviewing: "Ń ṣàyẹ̀wò dátà iṣẹ́ rẹ…",
                     tabAttention: "Ìkíyèsí", tabComing: "Ń bọ̀", tabRecommendations: "Àwọn Àbá", tabMemory: "Ìrántí", tabOutcomes: "Àbájáde",
-                    unavailable: "Business Brain kò sí lọ́wọ́lọ́wọ́", stillLearning: "Cauldra ṣì ń kọ́ láti inú dátà iṣẹ́ rẹ.",
+                    unavailable: "Business Brief kò sí lọ́wọ́lọ́wọ́", stillLearning: "Cauldra ṣì ń kọ́ láti inú dátà iṣẹ́ rẹ.",
                     attentionCount: { one: "Ohun kan yẹ kí o kíyèsí.", other: "Ohun {count} yẹ kí o kíyèsí." },
                     noPriorities: "A kò rí àyọ́nda kánkán nínú dátà rẹ lọ́wọ́lọ́wọ́.",
                     keepRecording: "Máa ṣàkọsílẹ̀ títà àti ìgbòkègbodò ọjà lásán. Cauldra yóò fi àyọ́nda tí ó wúlò hàn nígbà tí ẹ̀rí bá ti tó.",
-                    starterRequired: "Business Brain wà lórí ètò Starter àti jù bẹ́ẹ̀ lọ.",
-                    upgradeToUnlock: "Ṣe àtúnṣe sí Starter láti ṣí Business Brain sílẹ̀ →",
+                    starterRequired: "Business Brief wà lórí ètò Starter àti jù bẹ́ẹ̀ lọ.",
+                    upgradeToUnlock: "Ṣe àtúnṣe sí Starter láti ṣí Business Brief sílẹ̀ →",
                     temporarilyUnavailable: "Ọgbọ́n iṣẹ́ kò sí fún ìgbà díẹ̀. Àwọn ohun èlò iṣẹ́ rẹ lásán kò kan.",
                     accuracyImproving: "Àwọn àsọtẹ́lẹ̀ ti túbọ̀ dára síi láìpẹ́.",
                     accuracyDeclining: "Àwọn àsọtẹ́lẹ̀ láìpẹ́ ti dín kù ní ìpéye ju àwọn tí ó ṣáájú lọ.",
@@ -8075,7 +8080,7 @@
                     groupMain: "Isi", groupManagement: "Njikwa", groupIntelligence: "Ọgụgụ isi", groupSystem: "Usoro",
                     dashboard: "Dashboard", todaysSales: "Ire Taa", teamManagement: "Njikwa Otu", teamPresence: "Ọnụnọ Otu",
                     generatePO: "Mepụta Order Ịzụta", purchaseOrders: "Order Ịzụta", inventory: "Ngwaahịa", suppliers: "Ndị Na-enye Ngwaahịa",
-                    warehouses: "Ụlọ Nchekwa", expenses: "Mmefu", profit: "Uru", businessBrain: "Business Brain", aiCenter: "Ebe AI",
+                    warehouses: "Ụlọ Nchekwa", expenses: "Mmefu", profit: "Uru", businessBrain: "Business Brief", aiCenter: "Ebe AI",
                     priceMonitor: "Nlekọta Ọnụ Ahịa", predictive: "Amụma", businessProfile: "Profaịlụ Azụmahịa", getStarted: "Malite",
                     guestHub: "Ebe Ọbịa", hub: "Ụlọ", signIn: "Banye", guest: "Ọbịa",
                     adminHub: "Ebe Onye Nchịkwa", managerHub: "Ebe Onye Njikwa", staffHub: "Ebe Ndị Ọrụ",
@@ -8310,16 +8315,16 @@
                     noRecordedActivity: "Enweghị omume edekọtara ugbu a.", systemFallback: "Sistem", activityFallback: "Omume",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Nke a bụ ihe kwesịrị ntị gị, ihe na-abịa, na ihe Cauldra mụtara.",
                     reviewing: "Na-enyocha data azụmahịa gị…",
                     tabAttention: "Ntị", tabComing: "Na-abịa", tabRecommendations: "Ndụmọdụ", tabMemory: "Ncheta", tabOutcomes: "Nsonaazụ",
-                    unavailable: "Business Brain adịghị", stillLearning: "Cauldra ka na-amụta site na data azụmahịa gị.",
+                    unavailable: "Business Brief adịghị", stillLearning: "Cauldra ka na-amụta site na data azụmahịa gị.",
                     attentionCount: { one: "Ihe 1 kwesịrị ntị gị.", other: "Ihe {count} kwesịrị ntị gị." },
                     noPriorities: "Ahụghị ihe mbụ ọ bụla na data gị ugbu a.",
                     keepRecording: "Gaa n'ihu na-edekọ ahịa na omume ngwongwo nkịtị. Cauldra ga-egosi ihe mbụ bara uru mgbe akaebe kwadoro ya.",
-                    starterRequired: "Business Brain dị na Starter na ndị dị elu.",
-                    upgradeToUnlock: "Melite na Starter iji mepee Business Brain →",
+                    starterRequired: "Business Brief dị na Starter na ndị dị elu.",
+                    upgradeToUnlock: "Melite na Starter iji mepee Business Brief →",
                     temporarilyUnavailable: "Ọgụgụ isi azụmahịa adịghị nwa oge. Ngwá ọrụ azụmahịa gị nkịtị anaghị emetụta.",
                     accuracyImproving: "Amụma abịala nnọọ ka ziri ezi n'oge na-adịbeghị anya.",
                     accuracyDeclining: "Amụma na-adịbeghị anya adịla ntakịrị ziri ezi karịa nke mbụ.",
@@ -8485,7 +8490,7 @@
                     groupMain: "Babban", groupManagement: "Gudanarwa", groupIntelligence: "Basira", groupSystem: "Tsari",
                     dashboard: "Dashboard", todaysSales: "Sayarwar Yau", teamManagement: "Gudanar da Ƙungiya", teamPresence: "Kasancewar Ƙungiya",
                     generatePO: "Ƙirƙiri Odar Saye", purchaseOrders: "Odar Saye", inventory: "Kaya", suppliers: "Masu Kaya",
-                    warehouses: "Ma'ajiya", expenses: "Kashe Kuɗi", profit: "Riba", businessBrain: "Business Brain", aiCenter: "Cibiyar AI",
+                    warehouses: "Ma'ajiya", expenses: "Kashe Kuɗi", profit: "Riba", businessBrain: "Business Brief", aiCenter: "Cibiyar AI",
                     priceMonitor: "Kula da Farashi", predictive: "Hasashe", businessProfile: "Bayanan Kasuwanci", getStarted: "Fara",
                     guestHub: "Cibiyar Baƙo", hub: "Gida", signIn: "Shiga", guest: "Baƙo",
                     adminHub: "Cibiyar Admin", managerHub: "Cibiyar Manaja", staffHub: "Cibiyar Ma'aikata",
@@ -8720,16 +8725,16 @@
                     noRecordedActivity: "Babu wani aiki da aka rubuta tukuna.", systemFallback: "Tsari", activityFallback: "Aiki",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Ga abin da ya cancanci kulawarku, abin da ke zuwa, da abin da Cauldra ta koya.",
                     reviewing: "Ana bitar bayanan kasuwancinku…",
                     tabAttention: "Kulawa", tabComing: "Mai Zuwa", tabRecommendations: "Shawarwari", tabMemory: "Ƙwaƙwalwa", tabOutcomes: "Sakamako",
-                    unavailable: "Business Brain ba ya samuwa", stillLearning: "Cauldra har yanzu tana koya daga bayanan kasuwancinku.",
+                    unavailable: "Business Brief ba ya samuwa", stillLearning: "Cauldra har yanzu tana koya daga bayanan kasuwancinku.",
                     attentionCount: { one: "Abu 1 ya cancanci kulawarku.", other: "Abubuwa {count} sun cancanci kulawarku." },
                     noPriorities: "Ba a sami wata muhimmiyar fifiko a bayananku na yanzu ba.",
                     keepRecording: "Ci gaba da rubuta sayarwa da ayyukan kaya na yau da kullun. Cauldra za ta nuna fifikon amfani lokacin da hujja ta tallafa.",
-                    starterRequired: "Business Brain yana samuwa daga tsarin Starter zuwa sama.",
-                    upgradeToUnlock: "Ka inganta zuwa Starter don buɗe Business Brain →",
+                    starterRequired: "Business Brief yana samuwa daga tsarin Starter zuwa sama.",
+                    upgradeToUnlock: "Ka inganta zuwa Starter don buɗe Business Brief →",
                     temporarilyUnavailable: "Basirar kasuwanci ba ta samuwa na ɗan lokaci. Kayan aikin kasuwancinku na yau da kullun ba su shafa ba.",
                     accuracyImproving: "Hasashe sun ƙara zama daidai kwanan nan.",
                     accuracyDeclining: "Hasashen kwanan nan sun kasance ƙasa da daidai fiye da na baya.",
@@ -8895,7 +8900,7 @@
                     groupMain: "Головне", groupManagement: "Керування", groupIntelligence: "Аналітика", groupSystem: "Система",
                     dashboard: "Панель керування", todaysSales: "Продажі за сьогодні", teamManagement: "Керування командою", teamPresence: "Присутність команди",
                     generatePO: "Створити замовлення", purchaseOrders: "Замовлення на закупівлю", inventory: "Інвентар", suppliers: "Постачальники",
-                    warehouses: "Склади", expenses: "Витрати", profit: "Прибуток", businessBrain: "Business Brain", aiCenter: "Центр ШІ",
+                    warehouses: "Склади", expenses: "Витрати", profit: "Прибуток", businessBrain: "Business Brief", aiCenter: "Центр ШІ",
                     priceMonitor: "Моніторинг цін", predictive: "Прогнозування", businessProfile: "Профіль компанії", getStarted: "Почати",
                     guestHub: "Гостьовий центр", hub: "Головна", signIn: "Увійти", guest: "Гість",
                     adminHub: "Центр адміністратора", managerHub: "Центр менеджера", staffHub: "Центр працівника",
@@ -9130,16 +9135,16 @@
                     noRecordedActivity: "Поки немає зареєстрованої активності.", systemFallback: "Система", activityFallback: "Активність",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Ось що заслуговує на вашу увагу, що на підході, і чого навчилась Cauldra.",
                     reviewing: "Перегляд даних вашого бізнесу…",
                     tabAttention: "Увага", tabComing: "Незабаром", tabRecommendations: "Рекомендації", tabMemory: "Пам'ять", tabOutcomes: "Результати",
-                    unavailable: "Business Brain недоступний", stillLearning: "Cauldra все ще навчається на даних вашого бізнесу.",
+                    unavailable: "Business Brief недоступний", stillLearning: "Cauldra все ще навчається на даних вашого бізнесу.",
                     attentionCount: { one: "1 пункт заслуговує на вашу увагу.", other: "{count} пунктів заслуговують на вашу увагу." },
                     noPriorities: "У ваших поточних даних не знайдено термінових пріоритетів.",
                     keepRecording: "Продовжуйте записувати звичайні продажі та активність інвентаря. Cauldra покаже корисні пріоритети, коли з'являться достатні докази.",
-                    starterRequired: "Business Brain доступний на тарифі Starter і вище.",
-                    upgradeToUnlock: "Покращте до Starter, щоб розблокувати Business Brain →",
+                    starterRequired: "Business Brief доступний на тарифі Starter і вище.",
+                    upgradeToUnlock: "Покращте до Starter, щоб розблокувати Business Brief →",
                     temporarilyUnavailable: "Бізнес-аналітика тимчасово недоступна. Ваші звичайні бізнес-інструменти не постраждали.",
                     accuracyImproving: "Прогнози стали точнішими останнім часом.",
                     accuracyDeclining: "Останні прогнози були менш точними, ніж попередні.",
@@ -9305,7 +9310,7 @@
                     groupMain: "Główne", groupManagement: "Zarządzanie", groupIntelligence: "Inteligencja", groupSystem: "System",
                     dashboard: "Panel", todaysSales: "Dzisiejsza sprzedaż", teamManagement: "Zarządzanie zespołem", teamPresence: "Obecność zespołu",
                     generatePO: "Wygeneruj zamówienie", purchaseOrders: "Zamówienia zakupu", inventory: "Magazyn", suppliers: "Dostawcy",
-                    warehouses: "Magazyny", expenses: "Wydatki", profit: "Zysk", businessBrain: "Business Brain", aiCenter: "Centrum AI",
+                    warehouses: "Magazyny", expenses: "Wydatki", profit: "Zysk", businessBrain: "Business Brief", aiCenter: "Centrum AI",
                     priceMonitor: "Monitor cen", predictive: "Predykcyjne", businessProfile: "Profil firmy", getStarted: "Rozpocznij",
                     guestHub: "Centrum gościa", hub: "Start", signIn: "Zaloguj się", guest: "Gość",
                     adminHub: "Centrum administratora", managerHub: "Centrum menedżera", staffHub: "Centrum pracownika",
@@ -9540,16 +9545,16 @@
                     noRecordedActivity: "Brak zarejestrowanej aktywności.", systemFallback: "System", activityFallback: "Aktywność",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Oto co zasługuje na Twoją uwagę, co nadchodzi i czego nauczyła się Cauldra.",
                     reviewing: "Przeglądanie danych Twojej firmy…",
                     tabAttention: "Uwaga", tabComing: "Nadchodzące", tabRecommendations: "Rekomendacje", tabMemory: "Pamięć", tabOutcomes: "Wyniki",
-                    unavailable: "Business Brain niedostępny", stillLearning: "Cauldra wciąż uczy się na podstawie danych Twojej firmy.",
+                    unavailable: "Business Brief niedostępny", stillLearning: "Cauldra wciąż uczy się na podstawie danych Twojej firmy.",
                     attentionCount: { one: "1 sprawa zasługuje na Twoją uwagę.", other: "{count} spraw zasługuje na Twoją uwagę." },
                     noPriorities: "Nie znaleziono pilnych priorytetów w Twoich aktualnych danych.",
                     keepRecording: "Kontynuuj rejestrowanie normalnej sprzedaży i aktywności magazynowej. Cauldra pokaże przydatne priorytety, gdy dowody będą wystarczające.",
-                    starterRequired: "Business Brain jest dostępny od planu Starter wzwyż.",
-                    upgradeToUnlock: "Ulepsz do Starter, aby odblokować Business Brain →",
+                    starterRequired: "Business Brief jest dostępny od planu Starter wzwyż.",
+                    upgradeToUnlock: "Ulepsz do Starter, aby odblokować Business Brief →",
                     temporarilyUnavailable: "Analityka biznesowa jest tymczasowo niedostępna. Twoje zwykłe narzędzia biznesowe nie są dotknięte.",
                     accuracyImproving: "Prognozy stały się ostatnio dokładniejsze.",
                     accuracyDeclining: "Ostatnie prognozy były mniej dokładne niż wcześniejsze.",
@@ -9715,7 +9720,7 @@
                     groupMain: "Chính", groupManagement: "Quản lý", groupIntelligence: "Trí tuệ", groupSystem: "Hệ thống",
                     dashboard: "Bảng điều khiển", todaysSales: "Doanh số hôm nay", teamManagement: "Quản lý nhóm", teamPresence: "Trạng thái nhóm",
                     generatePO: "Tạo đơn đặt hàng", purchaseOrders: "Đơn đặt hàng", inventory: "Kho hàng", suppliers: "Nhà cung cấp",
-                    warehouses: "Kho", expenses: "Chi phí", profit: "Lợi nhuận", businessBrain: "Business Brain", aiCenter: "Trung tâm AI",
+                    warehouses: "Kho", expenses: "Chi phí", profit: "Lợi nhuận", businessBrain: "Business Brief", aiCenter: "Trung tâm AI",
                     priceMonitor: "Giám sát giá", predictive: "Dự đoán", businessProfile: "Hồ sơ doanh nghiệp", getStarted: "Bắt đầu",
                     guestHub: "Trung tâm khách", hub: "Trang chủ", signIn: "Đăng nhập", guest: "Khách",
                     adminHub: "Trung tâm quản trị viên", managerHub: "Trung tâm quản lý", staffHub: "Trung tâm nhân viên",
@@ -9950,16 +9955,16 @@
                     noRecordedActivity: "Chưa có hoạt động nào được ghi nhận.", systemFallback: "Hệ Thống", activityFallback: "Hoạt Động",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Đây là những gì đáng được bạn chú ý, những gì sắp tới, và những gì Cauldra đã học được.",
                     reviewing: "Đang xem xét dữ liệu doanh nghiệp của bạn…",
                     tabAttention: "Chú Ý", tabComing: "Sắp Tới", tabRecommendations: "Đề Xuất", tabMemory: "Bộ Nhớ", tabOutcomes: "Kết Quả",
-                    unavailable: "Business Brain không khả dụng", stillLearning: "Cauldra vẫn đang học từ dữ liệu doanh nghiệp của bạn.",
+                    unavailable: "Business Brief không khả dụng", stillLearning: "Cauldra vẫn đang học từ dữ liệu doanh nghiệp của bạn.",
                     attentionCount: { one: "1 điều đáng được bạn chú ý.", other: "{count} điều đáng được bạn chú ý." },
                     noPriorities: "Không tìm thấy ưu tiên khẩn cấp nào trong dữ liệu hiện tại của bạn.",
                     keepRecording: "Tiếp tục ghi nhận hoạt động bán hàng và tồn kho bình thường. Cauldra sẽ hiển thị các ưu tiên hữu ích khi có đủ bằng chứng.",
-                    starterRequired: "Business Brain có sẵn từ gói Starter trở lên.",
-                    upgradeToUnlock: "Nâng cấp lên Starter để mở khóa Business Brain →",
+                    starterRequired: "Business Brief có sẵn từ gói Starter trở lên.",
+                    upgradeToUnlock: "Nâng cấp lên Starter để mở khóa Business Brief →",
                     temporarilyUnavailable: "Trí tuệ kinh doanh tạm thời không khả dụng. Các công cụ kinh doanh thông thường của bạn không bị ảnh hưởng.",
                     accuracyImproving: "Các dự đoán đã trở nên chính xác hơn gần đây.",
                     accuracyDeclining: "Các dự đoán gần đây kém chính xác hơn so với trước đó.",
@@ -10125,7 +10130,7 @@
                     groupMain: "หลัก", groupManagement: "การจัดการ", groupIntelligence: "ระบบวิเคราะห์", groupSystem: "ระบบ",
                     dashboard: "แดชบอร์ด", todaysSales: "ยอดขายวันนี้", teamManagement: "การจัดการทีม", teamPresence: "สถานะทีม",
                     generatePO: "สร้างใบสั่งซื้อ", purchaseOrders: "ใบสั่งซื้อ", inventory: "สินค้าคงคลัง", suppliers: "ซัพพลายเออร์",
-                    warehouses: "คลังสินค้า", expenses: "ค่าใช้จ่าย", profit: "กำไร", businessBrain: "Business Brain", aiCenter: "ศูนย์ AI",
+                    warehouses: "คลังสินค้า", expenses: "ค่าใช้จ่าย", profit: "กำไร", businessBrain: "Business Brief", aiCenter: "ศูนย์ AI",
                     priceMonitor: "ติดตามราคา", predictive: "การพยากรณ์", businessProfile: "โปรไฟล์ธุรกิจ", getStarted: "เริ่มต้นใช้งาน",
                     guestHub: "ศูนย์ผู้เยี่ยมชม", hub: "หน้าหลัก", signIn: "เข้าสู่ระบบ", guest: "ผู้เยี่ยมชม",
                     adminHub: "ศูนย์ผู้ดูแลระบบ", managerHub: "ศูนย์ผู้จัดการ", staffHub: "ศูนย์พนักงาน",
@@ -10360,16 +10365,16 @@
                     noRecordedActivity: "ยังไม่มีกิจกรรมที่บันทึกไว้", systemFallback: "ระบบ", activityFallback: "กิจกรรม",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "นี่คือสิ่งที่ควรได้รับความสนใจของคุณ สิ่งที่กำลังจะมาถึง และสิ่งที่ Cauldra ได้เรียนรู้",
                     reviewing: "กำลังตรวจสอบข้อมูลธุรกิจของคุณ…",
                     tabAttention: "ความสนใจ", tabComing: "กำลังจะมาถึง", tabRecommendations: "คำแนะนำ", tabMemory: "หน่วยความจำ", tabOutcomes: "ผลลัพธ์",
-                    unavailable: "Business Brain ไม่พร้อมใช้งาน", stillLearning: "Cauldra ยังคงเรียนรู้จากข้อมูลธุรกิจของคุณ",
+                    unavailable: "Business Brief ไม่พร้อมใช้งาน", stillLearning: "Cauldra ยังคงเรียนรู้จากข้อมูลธุรกิจของคุณ",
                     attentionCount: { one: "1 รายการควรได้รับความสนใจของคุณ", other: "{count} รายการควรได้รับความสนใจของคุณ" },
                     noPriorities: "ไม่พบลำดับความสำคัญเร่งด่วนในข้อมูลปัจจุบันของคุณ",
                     keepRecording: "บันทึกยอดขายและกิจกรรมสินค้าคงคลังตามปกติต่อไป Cauldra จะแสดงลำดับความสำคัญที่เป็นประโยชน์เมื่อมีหลักฐานสนับสนุนเพียงพอ",
-                    starterRequired: "Business Brain มีให้ใช้ตั้งแต่แพ็กเกจ Starter ขึ้นไป",
-                    upgradeToUnlock: "อัปเกรดเป็น Starter เพื่อปลดล็อก Business Brain →",
+                    starterRequired: "Business Brief มีให้ใช้ตั้งแต่แพ็กเกจ Starter ขึ้นไป",
+                    upgradeToUnlock: "อัปเกรดเป็น Starter เพื่อปลดล็อก Business Brief →",
                     temporarilyUnavailable: "ระบบวิเคราะห์ธุรกิจไม่พร้อมใช้งานชั่วคราว เครื่องมือทางธุรกิจปกติของคุณไม่ได้รับผลกระทบ",
                     accuracyImproving: "การคาดการณ์มีความแม่นยำมากขึ้นเมื่อเร็ว ๆ นี้",
                     accuracyDeclining: "การคาดการณ์ล่าสุดมีความแม่นยำน้อยกว่าครั้งก่อน ๆ",
@@ -10535,7 +10540,7 @@
                     groupMain: "Utama", groupManagement: "Manajemen", groupIntelligence: "Kecerdasan", groupSystem: "Sistem",
                     dashboard: "Dasbor", todaysSales: "Penjualan Hari Ini", teamManagement: "Manajemen Tim", teamPresence: "Kehadiran Tim",
                     generatePO: "Buat Pesanan Pembelian", purchaseOrders: "Pesanan Pembelian", inventory: "Inventaris", suppliers: "Pemasok",
-                    warehouses: "Gudang", expenses: "Pengeluaran", profit: "Keuntungan", businessBrain: "Business Brain", aiCenter: "Pusat AI",
+                    warehouses: "Gudang", expenses: "Pengeluaran", profit: "Keuntungan", businessBrain: "Business Brief", aiCenter: "Pusat AI",
                     priceMonitor: "Pemantau Harga", predictive: "Prediktif", businessProfile: "Profil Bisnis", getStarted: "Mulai",
                     guestHub: "Hub Tamu", hub: "Beranda", signIn: "Masuk", guest: "Tamu",
                     adminHub: "Hub Admin", managerHub: "Hub Manajer", staffHub: "Hub Staf",
@@ -10770,16 +10775,16 @@
                     noRecordedActivity: "Belum ada aktivitas yang tercatat.", systemFallback: "Sistem", activityFallback: "Aktivitas",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Berikut adalah hal-hal yang layak mendapat perhatian Anda, yang akan datang, dan apa yang telah dipelajari Cauldra.",
                     reviewing: "Meninjau data bisnis Anda…",
                     tabAttention: "Perhatian", tabComing: "Akan Datang", tabRecommendations: "Rekomendasi", tabMemory: "Memori", tabOutcomes: "Hasil",
-                    unavailable: "Business Brain tidak tersedia", stillLearning: "Cauldra masih belajar dari data bisnis Anda.",
+                    unavailable: "Business Brief tidak tersedia", stillLearning: "Cauldra masih belajar dari data bisnis Anda.",
                     attentionCount: { one: "1 hal layak mendapat perhatian Anda.", other: "{count} hal layak mendapat perhatian Anda." },
                     noPriorities: "Tidak ada prioritas mendesak yang ditemukan dalam data Anda saat ini.",
                     keepRecording: "Terus catat aktivitas penjualan dan inventaris normal. Cauldra akan menampilkan prioritas yang berguna ketika bukti mendukungnya.",
-                    starterRequired: "Business Brain tersedia mulai paket Starter ke atas.",
-                    upgradeToUnlock: "Tingkatkan ke Starter untuk membuka Business Brain →",
+                    starterRequired: "Business Brief tersedia mulai paket Starter ke atas.",
+                    upgradeToUnlock: "Tingkatkan ke Starter untuk membuka Business Brief →",
                     temporarilyUnavailable: "Kecerdasan bisnis sementara tidak tersedia. Alat bisnis normal Anda tidak terpengaruh.",
                     accuracyImproving: "Prediksi menjadi lebih akurat akhir-akhir ini.",
                     accuracyDeclining: "Prediksi terbaru kurang akurat dibandingkan sebelumnya.",
@@ -10945,7 +10950,7 @@
                     groupMain: "Utama", groupManagement: "Pengurusan", groupIntelligence: "Kecerdasan", groupSystem: "Sistem",
                     dashboard: "Papan Pemuka", todaysSales: "Jualan Hari Ini", teamManagement: "Pengurusan Pasukan", teamPresence: "Kehadiran Pasukan",
                     generatePO: "Jana Pesanan Belian", purchaseOrders: "Pesanan Belian", inventory: "Inventori", suppliers: "Pembekal",
-                    warehouses: "Gudang", expenses: "Perbelanjaan", profit: "Keuntungan", businessBrain: "Business Brain", aiCenter: "Pusat AI",
+                    warehouses: "Gudang", expenses: "Perbelanjaan", profit: "Keuntungan", businessBrain: "Business Brief", aiCenter: "Pusat AI",
                     priceMonitor: "Pemantauan Harga", predictive: "Ramalan", businessProfile: "Profil Perniagaan", getStarted: "Mula",
                     guestHub: "Hab Tetamu", hub: "Laman Utama", signIn: "Log Masuk", guest: "Tetamu",
                     adminHub: "Hab Pentadbir", managerHub: "Hab Pengurus", staffHub: "Hab Kakitangan",
@@ -11180,16 +11185,16 @@
                     noRecordedActivity: "Tiada aktiviti direkodkan lagi.", systemFallback: "Sistem", activityFallback: "Aktiviti",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Berikut ialah perkara yang patut mendapat perhatian anda, apa yang akan datang, dan apa yang telah dipelajari oleh Cauldra.",
                     reviewing: "Mengkaji data perniagaan anda…",
                     tabAttention: "Perhatian", tabComing: "Akan Datang", tabRecommendations: "Cadangan", tabMemory: "Memori", tabOutcomes: "Hasil",
-                    unavailable: "Business Brain tidak tersedia", stillLearning: "Cauldra masih belajar daripada data perniagaan anda.",
+                    unavailable: "Business Brief tidak tersedia", stillLearning: "Cauldra masih belajar daripada data perniagaan anda.",
                     attentionCount: { one: "1 perkara patut mendapat perhatian anda.", other: "{count} perkara patut mendapat perhatian anda." },
                     noPriorities: "Tiada keutamaan segera ditemui dalam data semasa anda.",
                     keepRecording: "Teruskan merekod jualan biasa dan aktiviti inventori. Cauldra akan menunjukkan keutamaan berguna apabila bukti menyokongnya.",
-                    starterRequired: "Business Brain tersedia dari pelan Starter ke atas.",
-                    upgradeToUnlock: "Naik taraf ke Starter untuk membuka kunci Business Brain →",
+                    starterRequired: "Business Brief tersedia dari pelan Starter ke atas.",
+                    upgradeToUnlock: "Naik taraf ke Starter untuk membuka kunci Business Brief →",
                     temporarilyUnavailable: "Kecerdasan perniagaan tidak tersedia buat sementara waktu. Alat perniagaan biasa anda tidak terjejas.",
                     accuracyImproving: "Ramalan menjadi lebih tepat baru-baru ini.",
                     accuracyDeclining: "Ramalan terkini kurang tepat berbanding sebelumnya.",
@@ -11355,7 +11360,7 @@
                     groupMain: "اصلی", groupManagement: "مدیریت", groupIntelligence: "هوش", groupSystem: "سیستم",
                     dashboard: "داشبورد", todaysSales: "فروش امروز", teamManagement: "مدیریت تیم", teamPresence: "حضور تیم",
                     generatePO: "ایجاد سفارش خرید", purchaseOrders: "سفارش‌های خرید", inventory: "موجودی", suppliers: "تأمین‌کنندگان",
-                    warehouses: "انبارها", expenses: "هزینه‌ها", profit: "سود", businessBrain: "Business Brain", aiCenter: "مرکز هوش مصنوعی",
+                    warehouses: "انبارها", expenses: "هزینه‌ها", profit: "سود", businessBrain: "Business Brief", aiCenter: "مرکز هوش مصنوعی",
                     priceMonitor: "پایش قیمت", predictive: "پیش‌بینی", businessProfile: "پروفایل کسب‌وکار", getStarted: "شروع کنید",
                     guestHub: "مرکز مهمان", hub: "خانه", signIn: "ورود", guest: "مهمان",
                     adminHub: "مرکز مدیر", managerHub: "مرکز مدیر بخش", staffHub: "مرکز کارکنان",
@@ -11590,16 +11595,16 @@
                     noRecordedActivity: "هنوز هیچ فعالیتی ثبت نشده است.", systemFallback: "سیستم", activityFallback: "فعالیت",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "این موارد شایسته توجه شما هستند، آنچه در راه است، و آنچه Cauldra آموخته است.",
                     reviewing: "در حال بررسی داده‌های کسب‌وکار شما…",
                     tabAttention: "توجه", tabComing: "در راه", tabRecommendations: "پیشنهادها", tabMemory: "حافظه", tabOutcomes: "نتایج",
-                    unavailable: "Business Brain در دسترس نیست", stillLearning: "Cauldra هنوز در حال یادگیری از داده‌های کسب‌وکار شماست.",
+                    unavailable: "Business Brief در دسترس نیست", stillLearning: "Cauldra هنوز در حال یادگیری از داده‌های کسب‌وکار شماست.",
                     attentionCount: { one: "۱ مورد شایسته توجه شماست.", other: "{count} مورد شایسته توجه شماست." },
                     noPriorities: "هیچ اولویت فوری در داده‌های فعلی شما یافت نشد.",
                     keepRecording: "به ثبت فروش عادی و فعالیت موجودی ادامه دهید. Cauldra زمانی که شواهد کافی وجود داشته باشد، اولویت‌های مفید را نشان خواهد داد.",
-                    starterRequired: "Business Brain از طرح Starter به بالا در دسترس است.",
-                    upgradeToUnlock: "برای باز کردن Business Brain به Starter ارتقا دهید ←",
+                    starterRequired: "Business Brief از طرح Starter به بالا در دسترس است.",
+                    upgradeToUnlock: "برای باز کردن Business Brief به Starter ارتقا دهید ←",
                     temporarilyUnavailable: "هوش تجاری به‌طور موقت در دسترس نیست. ابزارهای عادی کسب‌وکار شما تحت تأثیر قرار نگرفته‌اند.",
                     accuracyImproving: "پیش‌بینی‌ها اخیراً دقیق‌تر شده‌اند.",
                     accuracyDeclining: "پیش‌بینی‌های اخیر نسبت به پیش‌بینی‌های قبلی دقت کمتری داشته‌اند.",
@@ -11765,7 +11770,7 @@
                     groupMain: "ראשי", groupManagement: "ניהול", groupIntelligence: "אינטליגנציה", groupSystem: "מערכת",
                     dashboard: "לוח בקרה", todaysSales: "מכירות היום", teamManagement: "ניהול צוות", teamPresence: "נוכחות צוות",
                     generatePO: "צור הזמנת רכש", purchaseOrders: "הזמנות רכש", inventory: "מלאי", suppliers: "ספקים",
-                    warehouses: "מחסנים", expenses: "הוצאות", profit: "רווח", businessBrain: "Business Brain", aiCenter: "מרכז בינה מלאכותית",
+                    warehouses: "מחסנים", expenses: "הוצאות", profit: "רווח", businessBrain: "Business Brief", aiCenter: "מרכז בינה מלאכותית",
                     priceMonitor: "ניטור מחירים", predictive: "חיזוי", businessProfile: "פרופיל עסקי", getStarted: "התחל",
                     guestHub: "מרכז אורח", hub: "בית", signIn: "התחברות", guest: "אורח",
                     adminHub: "מרכז מנהל", managerHub: "מרכז מנהל צוות", staffHub: "מרכז צוות",
@@ -12000,16 +12005,16 @@
                     noRecordedActivity: "עדיין לא נרשמה פעילות.", systemFallback: "מערכת", activityFallback: "פעילות",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "הנה מה שראוי לתשומת ליבך, מה שצפוי, ומה ש-Cauldra למדה.",
                     reviewing: "בודק את נתוני העסק שלך…",
                     tabAttention: "תשומת לב", tabComing: "בקרוב", tabRecommendations: "המלצות", tabMemory: "זיכרון", tabOutcomes: "תוצאות",
-                    unavailable: "Business Brain אינו זמין", stillLearning: "Cauldra עדיין לומדת מנתוני העסק שלך.",
+                    unavailable: "Business Brief אינו זמין", stillLearning: "Cauldra עדיין לומדת מנתוני העסק שלך.",
                     attentionCount: { one: "פריט אחד ראוי לתשומת ליבך.", other: "{count} פריטים ראויים לתשומת ליבך." },
                     noPriorities: "לא נמצאו עדיפויות דחופות בנתונים הנוכחיים שלך.",
                     keepRecording: "המשך לתעד מכירות ופעילות מלאי רגילות. Cauldra תציג עדיפויות שימושיות כאשר הראיות יתמכו בכך.",
-                    starterRequired: "Business Brain זמין החל מחבילת Starter ומעלה.",
-                    upgradeToUnlock: "שדרג ל-Starter כדי לפתוח את Business Brain ←",
+                    starterRequired: "Business Brief זמין החל מחבילת Starter ומעלה.",
+                    upgradeToUnlock: "שדרג ל-Starter כדי לפתוח את Business Brief ←",
                     temporarilyUnavailable: "בינת העסקים אינה זמינה באופן זמני. כלי העסק הרגילים שלך אינם מושפעים.",
                     accuracyImproving: "התחזיות נעשו מדויקות יותר לאחרונה.",
                     accuracyDeclining: "התחזיות האחרונות היו פחות מדויקות מהקודמות.",
@@ -12175,7 +12180,7 @@
                     groupMain: "Principal", groupManagement: "Gestionare", groupIntelligence: "Inteligență", groupSystem: "Sistem",
                     dashboard: "Tablou de bord", todaysSales: "Vânzările de azi", teamManagement: "Gestionarea echipei", teamPresence: "Prezența echipei",
                     generatePO: "Generează comandă de achiziție", purchaseOrders: "Comenzi de achiziție", inventory: "Inventar", suppliers: "Furnizori",
-                    warehouses: "Depozite", expenses: "Cheltuieli", profit: "Profit", businessBrain: "Business Brain", aiCenter: "Centru AI",
+                    warehouses: "Depozite", expenses: "Cheltuieli", profit: "Profit", businessBrain: "Business Brief", aiCenter: "Centru AI",
                     priceMonitor: "Monitorizare prețuri", predictive: "Predictiv", businessProfile: "Profilul afacerii", getStarted: "Începe",
                     guestHub: "Hub oaspeți", hub: "Acasă", signIn: "Autentificare", guest: "Oaspete",
                     adminHub: "Hub administrator", managerHub: "Hub manager", staffHub: "Hub personal",
@@ -12410,16 +12415,16 @@
                     noRecordedActivity: "Nicio activitate înregistrată încă.", systemFallback: "Sistem", activityFallback: "Activitate",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Iată ce merită atenția dvs., ce urmează și ce a învățat Cauldra.",
                     reviewing: "Se examinează datele afacerii dvs.…",
                     tabAttention: "Atenție", tabComing: "Următoare", tabRecommendations: "Recomandări", tabMemory: "Memorie", tabOutcomes: "Rezultate",
-                    unavailable: "Business Brain nu este disponibil", stillLearning: "Cauldra încă învață din datele afacerii dvs.",
+                    unavailable: "Business Brief nu este disponibil", stillLearning: "Cauldra încă învață din datele afacerii dvs.",
                     attentionCount: { one: "1 lucru merită atenția dvs.", other: "{count} lucruri merită atenția dvs." },
                     noPriorities: "Nu au fost găsite priorități imediate în datele dvs. curente.",
                     keepRecording: "Continuați să înregistrați vânzările și activitatea de inventar normală. Cauldra va afișa priorități utile atunci când dovezile le susțin.",
-                    starterRequired: "Business Brain este disponibil începând cu planul Starter.",
-                    upgradeToUnlock: "Faceți upgrade la Starter pentru a debloca Business Brain →",
+                    starterRequired: "Business Brief este disponibil începând cu planul Starter.",
+                    upgradeToUnlock: "Faceți upgrade la Starter pentru a debloca Business Brief →",
                     temporarilyUnavailable: "Business intelligence este temporar indisponibil. Instrumentele dvs. normale de afaceri nu sunt afectate.",
                     accuracyImproving: "Previziunile au devenit mai precise recent.",
                     accuracyDeclining: "Previziunile recente au fost mai puțin precise decât cele anterioare.",
@@ -12585,7 +12590,7 @@
                     groupMain: "Hlavní", groupManagement: "Správa", groupIntelligence: "Inteligence", groupSystem: "Systém",
                     dashboard: "Přehled", todaysSales: "Dnešní prodeje", teamManagement: "Správa týmu", teamPresence: "Přítomnost týmu",
                     generatePO: "Vytvořit objednávku", purchaseOrders: "Objednávky", inventory: "Sklad", suppliers: "Dodavatelé",
-                    warehouses: "Sklady", expenses: "Výdaje", profit: "Zisk", businessBrain: "Business Brain", aiCenter: "Centrum AI",
+                    warehouses: "Sklady", expenses: "Výdaje", profit: "Zisk", businessBrain: "Business Brief", aiCenter: "Centrum AI",
                     priceMonitor: "Sledování cen", predictive: "Predikce", businessProfile: "Profil firmy", getStarted: "Začít",
                     guestHub: "Centrum hosta", hub: "Domů", signIn: "Přihlásit se", guest: "Host",
                     adminHub: "Centrum správce", managerHub: "Centrum manažera", staffHub: "Centrum zaměstnance",
@@ -12820,16 +12825,16 @@
                     noRecordedActivity: "Zatím nebyla zaznamenána žádná aktivita.", systemFallback: "Systém", activityFallback: "Aktivita",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Zde je to, co si zaslouží vaši pozornost, co se blíží, a co se Cauldra naučila.",
                     reviewing: "Kontrola dat vaší firmy…",
                     tabAttention: "Pozornost", tabComing: "Nadcházející", tabRecommendations: "Doporučení", tabMemory: "Paměť", tabOutcomes: "Výsledky",
-                    unavailable: "Business Brain není k dispozici", stillLearning: "Cauldra se stále učí z dat vaší firmy.",
+                    unavailable: "Business Brief není k dispozici", stillLearning: "Cauldra se stále učí z dat vaší firmy.",
                     attentionCount: { one: "1 věc si zaslouží vaši pozornost.", other: "{count} věcí si zaslouží vaši pozornost." },
                     noPriorities: "Ve vašich aktuálních datech nebyly nalezeny žádné okamžité priority.",
                     keepRecording: "Pokračujte v zaznamenávání běžných prodejů a inventárních aktivit. Cauldra zobrazí užitečné priority, jakmile je podpoří důkazy.",
-                    starterRequired: "Business Brain je k dispozici od plánu Starter výše.",
-                    upgradeToUnlock: "Upgradujte na Starter a odemkněte Business Brain →",
+                    starterRequired: "Business Brief je k dispozici od plánu Starter výše.",
+                    upgradeToUnlock: "Upgradujte na Starter a odemkněte Business Brief →",
                     temporarilyUnavailable: "Obchodní inteligence je dočasně nedostupná. Vaše běžné obchodní nástroje nejsou ovlivněny.",
                     accuracyImproving: "Předpovědi se v poslední době staly přesnějšími.",
                     accuracyDeclining: "Nedávné předpovědi byly méně přesné než dřívější.",
@@ -12995,7 +13000,7 @@
                     groupMain: "Huvudmeny", groupManagement: "Hantering", groupIntelligence: "Intelligens", groupSystem: "System",
                     dashboard: "Instrumentpanel", todaysSales: "Dagens försäljning", teamManagement: "Teamhantering", teamPresence: "Team-närvaro",
                     generatePO: "Skapa inköpsorder", purchaseOrders: "Inköpsordrar", inventory: "Lager", suppliers: "Leverantörer",
-                    warehouses: "Lager", expenses: "Utgifter", profit: "Vinst", businessBrain: "Business Brain", aiCenter: "AI-centrum",
+                    warehouses: "Lager", expenses: "Utgifter", profit: "Vinst", businessBrain: "Business Brief", aiCenter: "AI-centrum",
                     priceMonitor: "Prisövervakning", predictive: "Prediktiv", businessProfile: "Företagsprofil", getStarted: "Kom igång",
                     guestHub: "Gästnav", hub: "Hem", signIn: "Logga in", guest: "Gäst",
                     adminHub: "Admin-nav", managerHub: "Chefsnav", staffHub: "Personalnav",
@@ -13230,16 +13235,16 @@
                     noRecordedActivity: "Ingen registrerad aktivitet ännu.", systemFallback: "System", activityFallback: "Aktivitet",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Här är vad som förtjänar din uppmärksamhet, vad som är på gång och vad Cauldra har lärt sig.",
                     reviewing: "Granskar dina företagsdata…",
                     tabAttention: "Uppmärksamhet", tabComing: "Kommande", tabRecommendations: "Rekommendationer", tabMemory: "Minne", tabOutcomes: "Resultat",
-                    unavailable: "Business Brain är inte tillgänglig", stillLearning: "Cauldra lär sig fortfarande av dina företagsdata.",
+                    unavailable: "Business Brief är inte tillgänglig", stillLearning: "Cauldra lär sig fortfarande av dina företagsdata.",
                     attentionCount: { one: "1 sak förtjänar din uppmärksamhet.", other: "{count} saker förtjänar din uppmärksamhet." },
                     noPriorities: "Inga omedelbara prioriteringar hittades i dina nuvarande data.",
                     keepRecording: "Fortsätt registrera normal försäljning och lageraktivitet. Cauldra kommer att visa användbara prioriteringar när bevis stödjer det.",
-                    starterRequired: "Business Brain är tillgänglig från Starter-planen och uppåt.",
-                    upgradeToUnlock: "Uppgradera till Starter för att låsa upp Business Brain →",
+                    starterRequired: "Business Brief är tillgänglig från Starter-planen och uppåt.",
+                    upgradeToUnlock: "Uppgradera till Starter för att låsa upp Business Brief →",
                     temporarilyUnavailable: "Affärsintelligens är tillfälligt otillgänglig. Dina vanliga affärsverktyg påverkas inte.",
                     accuracyImproving: "Prognoserna har blivit mer exakta på sistone.",
                     accuracyDeclining: "De senaste prognoserna har varit mindre exakta än tidigare.",
@@ -13405,7 +13410,7 @@
                     groupMain: "Hoved", groupManagement: "Administration", groupIntelligence: "Intelligens", groupSystem: "System",
                     dashboard: "Dashboard", todaysSales: "Dagens salg", teamManagement: "Teamstyring", teamPresence: "Team-tilstedeværelse",
                     generatePO: "Generer indkøbsordre", purchaseOrders: "Indkøbsordrer", inventory: "Lager", suppliers: "Leverandører",
-                    warehouses: "Lagre", expenses: "Udgifter", profit: "Overskud", businessBrain: "Business Brain", aiCenter: "AI-center",
+                    warehouses: "Lagre", expenses: "Udgifter", profit: "Overskud", businessBrain: "Business Brief", aiCenter: "AI-center",
                     priceMonitor: "Prisovervågning", predictive: "Prædiktiv", businessProfile: "Virksomhedsprofil", getStarted: "Kom i gang",
                     guestHub: "Gæstehub", hub: "Hjem", signIn: "Log ind", guest: "Gæst",
                     adminHub: "Admin-hub", managerHub: "Leder-hub", staffHub: "Personale-hub",
@@ -13640,16 +13645,16 @@
                     noRecordedActivity: "Ingen registreret aktivitet endnu.", systemFallback: "System", activityFallback: "Aktivitet",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Her er, hvad der fortjener din opmærksomhed, hvad der er på vej, og hvad Cauldra har lært.",
                     reviewing: "Gennemgår dine virksomhedsdata…",
                     tabAttention: "Opmærksomhed", tabComing: "Kommende", tabRecommendations: "Anbefalinger", tabMemory: "Hukommelse", tabOutcomes: "Resultater",
-                    unavailable: "Business Brain er ikke tilgængelig", stillLearning: "Cauldra lærer stadig fra dine virksomhedsdata.",
+                    unavailable: "Business Brief er ikke tilgængelig", stillLearning: "Cauldra lærer stadig fra dine virksomhedsdata.",
                     attentionCount: { one: "1 ting fortjener din opmærksomhed.", other: "{count} ting fortjener din opmærksomhed." },
                     noPriorities: "Der blev ikke fundet umiddelbare prioriteter i dine nuværende data.",
                     keepRecording: "Fortsæt med at registrere normalt salg og lageraktivitet. Cauldra vil vise nyttige prioriteter, når beviser understøtter det.",
-                    starterRequired: "Business Brain er tilgængelig fra Starter-planen og opefter.",
-                    upgradeToUnlock: "Opgrader til Starter for at låse Business Brain op →",
+                    starterRequired: "Business Brief er tilgængelig fra Starter-planen og opefter.",
+                    upgradeToUnlock: "Opgrader til Starter for at låse Business Brief op →",
                     temporarilyUnavailable: "Business intelligence er midlertidigt utilgængelig. Dine normale forretningsværktøjer er ikke påvirket.",
                     accuracyImproving: "Prognoserne er blevet mere præcise på det seneste.",
                     accuracyDeclining: "De seneste prognoser har været mindre præcise end tidligere.",
@@ -13815,7 +13820,7 @@
                     groupMain: "Hoved", groupManagement: "Administrasjon", groupIntelligence: "Intelligens", groupSystem: "System",
                     dashboard: "Dashbord", todaysSales: "Dagens salg", teamManagement: "Teamadministrasjon", teamPresence: "Team-tilstedeværelse",
                     generatePO: "Generer innkjøpsordre", purchaseOrders: "Innkjøpsordrer", inventory: "Lagerbeholdning", suppliers: "Leverandører",
-                    warehouses: "Lagre", expenses: "Utgifter", profit: "Fortjeneste", businessBrain: "Business Brain", aiCenter: "AI-senter",
+                    warehouses: "Lagre", expenses: "Utgifter", profit: "Fortjeneste", businessBrain: "Business Brief", aiCenter: "AI-senter",
                     priceMonitor: "Prisovervåking", predictive: "Prediktiv", businessProfile: "Bedriftsprofil", getStarted: "Kom i gang",
                     guestHub: "Gjestehub", hub: "Hjem", signIn: "Logg inn", guest: "Gjest",
                     adminHub: "Admin-hub", managerHub: "Leder-hub", staffHub: "Ansatt-hub",
@@ -14050,16 +14055,16 @@
                     noRecordedActivity: "Ingen registrert aktivitet ennå.", systemFallback: "System", activityFallback: "Aktivitet",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Her er hva som fortjener din oppmerksomhet, hva som kommer, og hva Cauldra har lært.",
                     reviewing: "Gjennomgår bedriftsdataene dine…",
                     tabAttention: "Oppmerksomhet", tabComing: "Kommende", tabRecommendations: "Anbefalinger", tabMemory: "Minne", tabOutcomes: "Resultater",
-                    unavailable: "Business Brain er ikke tilgjengelig", stillLearning: "Cauldra lærer fortsatt fra bedriftsdataene dine.",
+                    unavailable: "Business Brief er ikke tilgjengelig", stillLearning: "Cauldra lærer fortsatt fra bedriftsdataene dine.",
                     attentionCount: { one: "1 ting fortjener din oppmerksomhet.", other: "{count} ting fortjener din oppmerksomhet." },
                     noPriorities: "Ingen umiddelbare prioriteringer ble funnet i de nåværende dataene dine.",
                     keepRecording: "Fortsett å registrere normalt salg og lageraktivitet. Cauldra vil vise nyttige prioriteringer når bevis støtter dem.",
-                    starterRequired: "Business Brain er tilgjengelig fra Starter-planen og oppover.",
-                    upgradeToUnlock: "Oppgrader til Starter for å låse opp Business Brain →",
+                    starterRequired: "Business Brief er tilgjengelig fra Starter-planen og oppover.",
+                    upgradeToUnlock: "Oppgrader til Starter for å låse opp Business Brief →",
                     temporarilyUnavailable: "Forretningsintelligens er midlertidig utilgjengelig. De vanlige forretningsverktøyene dine er ikke påvirket.",
                     accuracyImproving: "Prognosene har blitt mer nøyaktige den siste tiden.",
                     accuracyDeclining: "De siste prognosene har vært mindre nøyaktige enn tidligere.",
@@ -14225,7 +14230,7 @@
                     groupMain: "Päävalikko", groupManagement: "Hallinta", groupIntelligence: "Älykkyys", groupSystem: "Järjestelmä",
                     dashboard: "Kojelauta", todaysSales: "Tämän päivän myynti", teamManagement: "Tiiminhallinta", teamPresence: "Tiimin läsnäolo",
                     generatePO: "Luo ostotilaus", purchaseOrders: "Ostotilaukset", inventory: "Varasto", suppliers: "Toimittajat",
-                    warehouses: "Varastot", expenses: "Kulut", profit: "Voitto", businessBrain: "Business Brain", aiCenter: "Tekoälykeskus",
+                    warehouses: "Varastot", expenses: "Kulut", profit: "Voitto", businessBrain: "Business Brief", aiCenter: "Tekoälykeskus",
                     priceMonitor: "Hintaseuranta", predictive: "Ennustava", businessProfile: "Yritysprofiili", getStarted: "Aloita",
                     guestHub: "Vierashubi", hub: "Koti", signIn: "Kirjaudu sisään", guest: "Vieras",
                     adminHub: "Ylläpitäjän keskus", managerHub: "Esimiehen keskus", staffHub: "Henkilöstön keskus",
@@ -14460,16 +14465,16 @@
                     noRecordedActivity: "Ei tallennettua toimintaa vielä.", systemFallback: "Järjestelmä", activityFallback: "Toiminta",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Tässä on, mikä ansaitsee huomiosi, mitä on tulossa, ja mitä Cauldra on oppinut.",
                     reviewing: "Tarkastellaan yritystietojasi…",
                     tabAttention: "Huomio", tabComing: "Tulossa", tabRecommendations: "Suositukset", tabMemory: "Muisti", tabOutcomes: "Tulokset",
-                    unavailable: "Business Brain ei ole käytettävissä", stillLearning: "Cauldra oppii edelleen yritystietojesi perusteella.",
+                    unavailable: "Business Brief ei ole käytettävissä", stillLearning: "Cauldra oppii edelleen yritystietojesi perusteella.",
                     attentionCount: { one: "1 asia ansaitsee huomiosi.", other: "{count} asiaa ansaitsee huomiosi." },
                     noPriorities: "Nykyisistä tiedoistasi ei löytynyt välittömiä prioriteetteja.",
                     keepRecording: "Jatka normaalin myynnin ja varastotoiminnan kirjaamista. Cauldra näyttää hyödyllisiä prioriteetteja, kun todisteet tukevat niitä.",
-                    starterRequired: "Business Brain on saatavilla Starter-tasosta alkaen.",
-                    upgradeToUnlock: "Päivitä Starter-tasoon avataksesi Business Brainin →",
+                    starterRequired: "Business Brief on saatavilla Starter-tasosta alkaen.",
+                    upgradeToUnlock: "Päivitä Starter-tasoon avataksesi Business Briefin →",
                     temporarilyUnavailable: "Liiketoiminta-analytiikka ei ole tilapäisesti käytettävissä. Tavalliset liiketoimintatyökalusi eivät ole vaikuttuneet.",
                     accuracyImproving: "Ennusteet ovat parantuneet tarkkuudeltaan viime aikoina.",
                     accuracyDeclining: "Viimeisimmät ennusteet ovat olleet epätarkempia kuin aiemmin.",
@@ -14635,7 +14640,7 @@
                     groupMain: "Κύριο", groupManagement: "Διαχείριση", groupIntelligence: "Ευφυΐα", groupSystem: "Σύστημα",
                     dashboard: "Πίνακας ελέγχου", todaysSales: "Πωλήσεις σήμερα", teamManagement: "Διαχείριση ομάδας", teamPresence: "Παρουσία ομάδας",
                     generatePO: "Δημιουργία παραγγελίας αγοράς", purchaseOrders: "Παραγγελίες αγοράς", inventory: "Απόθεμα", suppliers: "Προμηθευτές",
-                    warehouses: "Αποθήκες", expenses: "Έξοδα", profit: "Κέρδος", businessBrain: "Business Brain", aiCenter: "Κέντρο AI",
+                    warehouses: "Αποθήκες", expenses: "Έξοδα", profit: "Κέρδος", businessBrain: "Business Brief", aiCenter: "Κέντρο AI",
                     priceMonitor: "Παρακολούθηση τιμών", predictive: "Προβλεπτική ανάλυση", businessProfile: "Προφίλ επιχείρησης", getStarted: "Ξεκινήστε",
                     guestHub: "Κέντρο επισκέπτη", hub: "Αρχική", signIn: "Σύνδεση", guest: "Επισκέπτης",
                     adminHub: "Κέντρο διαχειριστή", managerHub: "Κέντρο διευθυντή", staffHub: "Κέντρο προσωπικού",
@@ -14870,16 +14875,16 @@
                     noRecordedActivity: "Δεν υπάρχει καταγεγραμμένη δραστηριότητα ακόμα.", systemFallback: "Σύστημα", activityFallback: "Δραστηριότητα",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Ορίστε τι αξίζει την προσοχή σας, τι έρχεται και τι έχει μάθει το Cauldra.",
                     reviewing: "Ελέγχονται τα δεδομένα της επιχείρησής σας…",
                     tabAttention: "Προσοχή", tabComing: "Επερχόμενα", tabRecommendations: "Συστάσεις", tabMemory: "Μνήμη", tabOutcomes: "Αποτελέσματα",
-                    unavailable: "Το Business Brain δεν είναι διαθέσιμο", stillLearning: "Το Cauldra εξακολουθεί να μαθαίνει από τα δεδομένα της επιχείρησής σας.",
+                    unavailable: "Το Business Brief δεν είναι διαθέσιμο", stillLearning: "Το Cauldra εξακολουθεί να μαθαίνει από τα δεδομένα της επιχείρησής σας.",
                     attentionCount: { one: "1 στοιχείο αξίζει την προσοχή σας.", other: "{count} στοιχεία αξίζουν την προσοχή σας." },
                     noPriorities: "Δεν βρέθηκαν άμεσες προτεραιότητες στα τρέχοντα δεδομένα σας.",
                     keepRecording: "Συνεχίστε να καταγράφετε κανονικές πωλήσεις και δραστηριότητα αποθέματος. Το Cauldra θα εμφανίσει χρήσιμες προτεραιότητες όταν τα στοιχεία τις υποστηρίζουν.",
-                    starterRequired: "Το Business Brain είναι διαθέσιμο από το πρόγραμμα Starter και άνω.",
-                    upgradeToUnlock: "Αναβαθμίστε στο Starter για να ξεκλειδώσετε το Business Brain →",
+                    starterRequired: "Το Business Brief είναι διαθέσιμο από το πρόγραμμα Starter και άνω.",
+                    upgradeToUnlock: "Αναβαθμίστε στο Starter για να ξεκλειδώσετε το Business Brief →",
                     temporarilyUnavailable: "Η επιχειρηματική νοημοσύνη δεν είναι προσωρινά διαθέσιμη. Τα κανονικά εργαλεία επιχείρησής σας δεν επηρεάζονται.",
                     accuracyImproving: "Οι προβλέψεις έχουν γίνει πιο ακριβείς πρόσφατα.",
                     accuracyDeclining: "Οι πρόσφατες προβλέψεις ήταν λιγότερο ακριβείς από πριν.",
@@ -15045,7 +15050,7 @@
                     groupMain: "Fő", groupManagement: "Kezelés", groupIntelligence: "Intelligencia", groupSystem: "Rendszer",
                     dashboard: "Irányítópult", todaysSales: "Mai eladások", teamManagement: "Csapatkezelés", teamPresence: "Csapat jelenléte",
                     generatePO: "Beszerzési rendelés létrehozása", purchaseOrders: "Beszerzési rendelések", inventory: "Készlet", suppliers: "Beszállítók",
-                    warehouses: "Raktárak", expenses: "Kiadások", profit: "Nyereség", businessBrain: "Business Brain", aiCenter: "AI Központ",
+                    warehouses: "Raktárak", expenses: "Kiadások", profit: "Nyereség", businessBrain: "Business Brief", aiCenter: "AI Központ",
                     priceMonitor: "Árfigyelés", predictive: "Előrejelzés", businessProfile: "Vállalati profil", getStarted: "Kezdés",
                     guestHub: "Vendégközpont", hub: "Kezdőlap", signIn: "Bejelentkezés", guest: "Vendég",
                     adminHub: "Adminisztrátori központ", managerHub: "Menedzseri központ", staffHub: "Munkatársi központ",
@@ -15280,16 +15285,16 @@
                     noRecordedActivity: "Még nincs rögzített tevékenység.", systemFallback: "Rendszer", activityFallback: "Tevékenység",
                 },
                 businessBrain: {
-                    title: "Cauldra Business Brain",
+                    title: "Cauldra Business Brief",
                     subtitle: "Itt van, ami figyelmet érdemel, mi következik, és mit tanult a Cauldra.",
                     reviewing: "Vállalkozási adatainak áttekintése…",
                     tabAttention: "Figyelem", tabComing: "Közelgő", tabRecommendations: "Ajánlások", tabMemory: "Emlékezet", tabOutcomes: "Eredmények",
-                    unavailable: "A Business Brain nem érhető el", stillLearning: "A Cauldra még mindig tanul a vállalkozása adataiból.",
+                    unavailable: "A Business Brief nem érhető el", stillLearning: "A Cauldra még mindig tanul a vállalkozása adataiból.",
                     attentionCount: { one: "1 dolog érdemel figyelmet.", other: "{count} dolog érdemel figyelmet." },
                     noPriorities: "Nem találtunk azonnali prioritásokat a jelenlegi adataiban.",
                     keepRecording: "Folytassa a normál eladások és készletmozgások rögzítését. A Cauldra hasznos prioritásokat fog megjeleníteni, amint azokat bizonyítékok támasztják alá.",
-                    starterRequired: "A Business Brain a Starter csomagtól kezdve érhető el.",
-                    upgradeToUnlock: "Frissítsen a Starter csomagra a Business Brain feloldásához →",
+                    starterRequired: "A Business Brief a Starter csomagtól kezdve érhető el.",
+                    upgradeToUnlock: "Frissítsen a Starter csomagra a Business Brief feloldásához →",
                     temporarilyUnavailable: "Az üzleti intelligencia átmenetileg nem érhető el. A szokásos üzleti eszközeit ez nem érinti.",
                     accuracyImproving: "A előrejelzések az utóbbi időben pontosabbá váltak.",
                     accuracyDeclining: "A legutóbbi előrejelzések kevésbé voltak pontosak, mint korábban.",
@@ -17109,12 +17114,9 @@
             warehousesReady = false;
             inventoryEverLoaded = false;
             coreDataEverLoaded = false;
-            // Same reasoning as handleAuthenticationFailure(): Business
-            // Insights/Needs Attention hold the previous session's business
-            // data in module state, never re-fetched just to render — must
-            // be cleared explicitly or a signed-out view keeps showing it.
-            dashboardBrainAttention = [];
-            dashboardBrainLearningMessage = null;
+            // The Business Brief holds the previous session's intelligence in
+            // module state, so clear it before rendering the signed-out view.
+            businessBrainData = null;
             dashboardBrainForbiddenMessage = null;
             lastFinancialIntelData = null;
             dashboardTodayProfit = null;
@@ -20338,7 +20340,7 @@
                 // metrics, Business Day status, Today's Sales if open)
                 // instead of reloading the entire application (see
                 // performance refactor, section 12/44). The backend already
-                // marks Business Brain dirty for this sale — it recomputes
+                // marks Business Brief dirty for this sale — it recomputes
                 // on its own next read, not forced here.
                 (data.updated_products || []).forEach(u => {
                     const idx = globalProducts.findIndex(p => p.id === u.id);
@@ -22136,12 +22138,8 @@
             warehousesReady = false;
             inventoryEverLoaded = false;
             coreDataEverLoaded = false;
-            // Business Insights/Needs Attention hold the previous session's
-            // business data in module state (never re-fetched just to
-            // render) — without clearing it here, a signed-out view would
-            // keep showing the last signed-in business's figures.
-            dashboardBrainAttention = [];
-            dashboardBrainLearningMessage = null;
+            // Clear the prior business's Brief before rendering signed-out UI.
+            businessBrainData = null;
             dashboardBrainForbiddenMessage = null;
             lastFinancialIntelData = null;
             dashboardTodayProfit = null;
@@ -22671,8 +22669,14 @@
 
 
         let businessBrainData = null;
+        let businessBriefHistoryFilter = 'all';
         const brainEsc = value => escapeEmployeeHtml(String(value ?? ''));
-        const brainPriorityClass = priority => priority === 'critical' ? 'border-danger/35 bg-danger/10 text-danger' : 'border-warning/35 bg-warning/10 text-warning';
+        const brainPriorityClass = priority => priority === 'critical'
+            ? 'border-danger/35 bg-danger/10 text-danger'
+            : priority === 'opportunity'
+                ? 'border-success/35 bg-success/10 text-success'
+                : 'border-warning/35 bg-warning/10 text-warning';
+
         async function fetchBusinessBrain() {
             const res = await fetch(`${API_URL}/business-brain`, {credentials:'include', headers:{'Authorization':`Bearer ${authToken}`, 'Accept':'application/json'}});
             if (!res.ok) {
@@ -22681,144 +22685,134 @@
                 err.status = res.status;
                 throw err;
             }
-            businessBrainData = await res.json(); return businessBrainData;
+            businessBrainData = await res.json();
+            return businessBrainData;
         }
-        // Business Brain's dashboard footprint is now just its top 2
-        // priority lines inside the compact Business Insights card (see
-        // dashboard decluttering) — the full priority list/tabs remain in
-        // the dedicated Business Brain destination, unchanged.
-        let dashboardBrainAttention = [];
-        let dashboardBrainLearningMessage = null;
+
         let dashboardBrainForbiddenMessage = null;
         async function loadBusinessBrainDashboard() {
-            dashboardBrainAttention = [];
-            dashboardBrainLearningMessage = null;
+            businessBrainData = null;
             dashboardBrainForbiddenMessage = null;
-            if (!hasAuthenticatedBusinessContext()) { renderBusinessInsights(); return; }
-            try {
-                const data = await fetchBusinessBrain();
-                dashboardBrainAttention = data.attention || [];
-                if (data.learning) dashboardBrainLearningMessage = data.learning_message || t("businessBrain.stillLearning");
-            } catch (err) {
+            if (!hasAuthenticatedBusinessContext()) { renderBusinessBriefDashboard(); return; }
+            try { await fetchBusinessBrain(); }
+            catch (err) {
                 if (err.status === 403) dashboardBrainForbiddenMessage = err.message || t("businessBrain.starterRequired");
             }
-            renderBusinessInsights();
+            renderBusinessBriefDashboard();
         }
 
-        // =====================================================================
-        // DASHBOARD: NEEDS ATTENTION + BUSINESS INSIGHTS (compact summaries)
-        // =====================================================================
-        // These two render functions are the single consolidated replacement
-        // for what used to be four separate large dashboard sections. Each
-        // reads only already-fetched module-level state (inventoryStatusCounts,
-        // dashboardSubscriptionWarning, dashboardPendingReopenCount,
-        // dashboardBrainAttention/lastFinancialIntelData/dashboardTodayProfit)
-        // — neither function ever fetches anything itself, so calling them
-        // repeatedly as each independent data source resolves is free.
+        function businessBriefEmpty(icon, text, tone = 'text-textSec') {
+            return `<div class="business-brief-empty ${tone}"><i class="fa-solid ${icon}"></i><span>${brainEsc(text)}</span></div>`;
+        }
 
-        function brainPriorityDot(priority) { return priority === 'critical' ? 'bg-danger' : 'bg-warning'; }
+        function businessBriefCard(title, icon, tone, body, extraClass = '') {
+            return `<div class="business-brief-area ${extraClass}"><h4><i class="fa-solid ${icon} ${tone}"></i>${brainEsc(title)}</h4><div class="business-brief-area-body">${body}</div></div>`;
+        }
 
-        function renderNeedsAttention() {
-            const container = document.getElementById('needs-attention-items');
-            if (!container) return;
+        function businessBriefMore(total) {
+            const additional = Math.max(0, Number(total || 0) - 2);
+            return additional ? `<button type="button" class="business-brief-more" onclick="checkFeatureAccess('business brain', openBusinessBrainModal)">View ${additional} more <span aria-hidden="true">→</span></button>` : '';
+        }
+
+        function businessBriefSignalRow(item, compact = false) {
+            const tag = item.onclick ? 'button' : 'div';
+            const click = item.onclick ? ` type="button" onclick="${item.onclick}"` : '';
+            const priority = item.priority || 'important';
+            return `<${tag}${click} class="business-brief-signal ${item.onclick ? 'is-action' : ''} ${compact ? 'is-compact' : ''}"><span class="business-brief-signal-icon ${brainPriorityClass(priority)}"><i class="fa-solid ${item.icon || 'fa-circle'}"></i></span><span class="min-w-0"><strong>${brainEsc(item.title)}</strong>${item.summary ? `<small>${brainEsc(item.summary)}</small>` : ''}</span>${item.onclick ? '<i class="fa-solid fa-chevron-right business-brief-chevron" aria-hidden="true"></i>' : ''}</${tag}>`;
+        }
+
+        function getBusinessBriefAttentionItems(data = businessBrainData) {
             const role = getCurrentRole();
             const items = [];
-
             const out = inventoryStatusCounts?.out || 0;
             const low = inventoryStatusCounts?.low || 0;
-            if (out > 0) items.push({ icon: 'fa-circle-xmark', color: 'text-danger', text: `${out} out of stock`, onclick: "focusInventoryStatusFromDashboard('out')" });
-            if (low > 0) items.push({ icon: 'fa-triangle-exclamation', color: 'text-warning', text: `${low} low-stock product${low === 1 ? '' : 's'}`, onclick: "focusInventoryStatusFromDashboard('low')" });
+            if (out > 0) items.push({ priority:'critical', icon:'fa-circle-xmark', title:`${out} out of stock`, summary:'Open the Inventory view to review the affected products.', onclick:"focusInventoryStatusFromDashboard('out')" });
+            if (low > 0) items.push({ priority:'important', icon:'fa-triangle-exclamation', title:`${low} low-stock product${low === 1 ? '' : 's'}`, summary:'Review stock levels before they run out.', onclick:"focusInventoryStatusFromDashboard('low')" });
+            if (['admin', 'manager'].includes(role) && dashboardPendingReopenCount > 0) items.push({ priority:'important', icon:'fa-hourglass-half', title:`${dashboardPendingReopenCount} pending reopen request${dashboardPendingReopenCount === 1 ? '' : 's'}`, summary:'Review the pending Business Day request.', onclick:"checkFeatureAccess('daily sales', () => openDailySalesModal('history'))" });
+            if (['admin', 'manager'].includes(role) && dashboardSubscriptionWarning) items.push({ priority:'important', icon:'fa-credit-card', title:'Subscription needs review', summary:dashboardSubscriptionWarning, onclick:"openBillingModal()" });
 
-            if (['admin', 'manager'].includes(role) && dashboardPendingReopenCount > 0) {
-                items.push({ icon: 'fa-hourglass-half', color: 'text-warning', text: `${dashboardPendingReopenCount} pending reopen request${dashboardPendingReopenCount === 1 ? '' : 's'}`, onclick: "checkFeatureAccess('daily sales', () => openDailySalesModal('history'))" });
-            }
-
-            if (['admin', 'manager'].includes(role) && dashboardSubscriptionWarning) {
-                items.push({ icon: 'fa-triangle-exclamation', color: 'text-warning', text: dashboardSubscriptionWarning, onclick: "openBillingModal()" });
-            }
-
-            if (!items.length) {
-                container.innerHTML = `<div class="text-[11px] text-success flex items-center gap-1.5"><i class="fa-solid fa-circle-check"></i> Nothing urgent needs attention.</div>`;
-                return;
-            }
-            container.innerHTML = items.map(i => `<button type="button" onclick="${i.onclick}" class="w-full flex items-center justify-between gap-2 text-left rounded-xl bg-bgMain border border-borderCol hover:border-primary/40 px-3 py-2 text-[11px] cursor-pointer">
-                <span class="flex items-center gap-2 ${i.color} font-semibold"><i class="fa-solid ${i.icon}"></i>${brainEsc(i.text)}</span>
-                <span class="text-textSec">View →</span>
-            </button>`).join('');
-        }
-
-        function renderBusinessInsights() {
-            const container = document.getElementById('business-insights-items');
-            if (!container) return;
-
-            if (dashboardBrainForbiddenMessage) {
-                container.innerHTML = `<button type="button" onclick="openBillingModal()" class="w-full text-center rounded-xl bg-primary/10 border border-primary/30 text-primary hover:bg-primary/15 px-3 py-2 text-[11px] font-semibold cursor-pointer">${brainEsc(t("businessBrain.upgradeToUnlock"))}</button>`;
-                return;
-            }
-
-            const lines = [];
-            // Sales Today — the current Business Day SESSION's own
-            // recognized sales (see dashboardSalesToday above), not an
-            // "opportunity" the AI spotted like the lines below it. Pushed
-            // first and unconditionally (including a truthful ₦0 for a
-            // brand-new/no-activity session) so it can never be pushed out
-            // of the 4-line slice by brain-attention/financial-intel items,
-            // and never omitted just because there was nothing to report —
-            // see section 1/12 of the Business Insights spec. Replaces the
-            // old "Margin pressure" line that used to appear here: Margin
-            // Pressure is a historical/estimated Financial Intelligence
-            // metric (see openPredictiveModal('margin')), not today's
-            // activity, and showing it directly under a "Current Business
-            // Day" card falsely implied it was part of today's numbers —
-            // it still lives in Financial Intelligence, untouched.
-            if (dashboardSalesToday !== null) {
-                lines.push({
-                    dot: 'bg-primary',
-                    text: `Sales Today: ${formatCurrency(dashboardSalesToday)}`,
-                    // Reuses the existing Sales interface's own current-
-                    // Business-Day tab (not the calendar-based Sales History
-                    // "Today" preset, which excludes the still-open session
-                    // by design — see /sales/history's docstring) so the
-                    // figure clicked into is provably the same one shown
-                    // here: both read business_day_sales_query()/refund-
-                    // totals for the SAME active BusinessDay row.
-                    onclick: "checkFeatureAccess('daily sales', () => openDailySalesModal('current'))",
-                });
-            }
-            dashboardBrainAttention.slice(0, 2).forEach(item => {
-                lines.push({ dot: brainPriorityDot(item.priority), text: `${item.title} — ${item.summary}`, onclick: "checkFeatureAccess('business brain', openBusinessBrainModal)" });
+            (data?.attention || []).filter(row => row.priority === 'critical').forEach(row => {
+                if (row.kind === 'stock_review' && (out > 0 || low > 0)) return;
+                items.push({ ...row, icon:'fa-bell', onclick:"checkFeatureAccess('business brain', openBusinessBrainModal)" });
             });
-
-            const fi = lastFinancialIntelData;
-            if (fi && fi.report_ready) {
-                if (fi.potentially_recoverable?.total > 0) lines.push({ dot: 'bg-success', text: `${formatCurrency(fi.potentially_recoverable.total)} potentially recoverable`, onclick: "checkFeatureAccess('predictive monitor', () => openPredictiveModal('recoverable'))" });
-                if (fi.money_at_risk?.total > 0) lines.push({ dot: 'bg-danger', text: `${formatCurrency(fi.money_at_risk.total)} at risk from stockouts`, onclick: "checkFeatureAccess('predictive monitor', () => openPredictiveModal('at-risk'))" });
-            }
-
-            renderDashboardNetProfit();
-
-            if (!lines.length) {
-                container.innerHTML = `<div class="text-[11px] text-textSec flex items-center gap-1.5"><i class="fa-solid fa-circle-info"></i> ${brainEsc(dashboardBrainLearningMessage || 'No new business insights right now.')}</div>`;
-                return;
-            }
-            container.innerHTML = lines.slice(0, 4).map(l => `<button type="button" onclick="${l.onclick}" class="w-full flex items-center gap-2 text-left rounded-xl bg-bgMain border border-borderCol hover:border-primary/45 px-3 py-2 text-[11px] cursor-pointer"><span class="inline-block w-1.5 h-1.5 rounded-full ${l.dot} shrink-0"></span><span class="text-textMain">${brainEsc(l.text)}</span></button>`).join('');
+            const risk = lastFinancialIntelData?.report_ready ? lastFinancialIntelData.money_at_risk?.total : 0;
+            if (risk > 0) items.push({ priority:'critical', icon:'fa-chart-line', title:`${formatCurrency(risk)} at risk from stockouts`, summary:'Open Financial Intelligence for the product-level evidence.', onclick:"checkFeatureAccess('predictive monitor', () => openPredictiveModal('at-risk'))" });
+            return items;
         }
 
-        // The dashboard's headline Net Profit figure — always its own fixed
-        // row (see the HTML comment above dashboard-net-profit-row), never
-        // competing with the scrollable Business Insights list for one of
-        // its 4 slots. formatCurrency() already renders a real "-" sign for
-        // negative amounts (Intl.NumberFormat's standard currency sign), so
-        // a loss is never silently shown as if it were positive.
+        function getBusinessBriefRecommendationItems(data = businessBrainData) {
+            const rows = (data?.recommendations || []).filter(row => row.priority !== 'critical').map(row => ({ ...row, icon:'fa-lightbulb', onclick:"checkFeatureAccess('business brain', openBusinessBrainModal)" }));
+            const recoverable = lastFinancialIntelData?.report_ready ? lastFinancialIntelData.potentially_recoverable?.total : 0;
+            if (recoverable > 0) rows.push({ priority:'opportunity', icon:'fa-arrow-trend-up', title:`${formatCurrency(recoverable)} potentially recoverable`, summary:'Review the slow-moving stock and supported actions.', onclick:"checkFeatureAccess('predictive monitor', () => openPredictiveModal('recoverable'))" });
+            return rows;
+        }
+
+        function getBusinessBriefLearningSummary(data = businessBrainData) {
+            if (!data) return t("businessBrain.stillLearning");
+            const days = Number(data.history_days || 0);
+            if (data.learning) return data.learning_message || t("businessBrain.stillLearning");
+            const patterns = (data.memory || []).length;
+            const evaluated = Number(data.outcomes?.evaluated_predictions || 0);
+            if (!patterns && !evaluated) return `Cauldra has ${days} completed business day${days === 1 ? '' : 's'} of evidence and will stay quiet until a pattern is supported.`;
+            return `Based on ${days} completed business day${days === 1 ? '' : 's'}, Cauldra is tracking ${patterns} supported pattern${patterns === 1 ? '' : 's'} and ${evaluated} evaluated forecast${evaluated === 1 ? '' : 's'}.`;
+        }
+
+        function renderDashboardContext() {
+            const salesRow = document.getElementById('dashboard-sales-today-row');
+            const salesAmount = document.getElementById('dashboard-sales-today-amount');
+            if (salesRow && salesAmount) {
+                salesRow.classList.toggle('hidden', dashboardSalesToday === null);
+                salesAmount.textContent = dashboardSalesToday === null ? '' : formatCurrency(dashboardSalesToday);
+            }
+            renderDashboardNetProfit();
+        }
+
+        function renderBusinessBriefDashboard() {
+            const container = document.getElementById('business-brief-dashboard-content');
+            if (!container) return;
+            renderDashboardContext();
+            if (!hasAuthenticatedBusinessContext()) {
+                container.innerHTML = businessBriefEmpty('fa-lock', 'Sign in to receive a Business Brief based on your own business activity.');
+                return;
+            }
+            if (dashboardBrainForbiddenMessage) {
+                container.innerHTML = `<button type="button" onclick="openBillingModal()" class="business-brief-upgrade">${brainEsc(t("businessBrain.upgradeToUnlock"))}</button>`;
+                return;
+            }
+            const attention = getBusinessBriefAttentionItems();
+            const coming = businessBrainData?.coming || [];
+            const recommendations = getBusinessBriefRecommendationItems();
+            if (!attention.length && !coming.length && !recommendations.length) {
+                const learning = !!businessBrainData?.learning;
+                const title = learning ? 'Cauldra is learning your business.' : 'Everything looks steady.';
+                const summary = learning ? getBusinessBriefLearningSummary() : `Nothing currently needs your attention. ${getBusinessBriefLearningSummary()}`;
+                container.innerHTML = `<div class="business-brief-steady"><span class="business-brief-steady-icon ${learning ? 'text-primary' : 'text-success'}"><i class="fa-solid ${learning ? 'fa-seedling' : 'fa-circle-check'}"></i></span><div><strong>${brainEsc(title)}</strong><p>${brainEsc(summary)}</p></div></div>`;
+                return;
+            }
+            const attentionBody = attention.length ? attention.slice(0, 2).map(row => businessBriefSignalRow(row, true)).join('') + businessBriefMore(attention.length) : businessBriefEmpty('fa-circle-check', t("businessBrain.healthyState"), 'text-success');
+            const comingBody = coming.length ? coming.slice(0, 2).map(row => businessBriefSignalRow({ priority:'opportunity', icon:'fa-calendar-days', title:`${row.product_name}: about ${row.predicted_units} units`, summary:`By ${formatBusinessDate(row.target_at, {dateStyle:'medium'})} · ${row.confidence}` }, true)).join('') + businessBriefMore(coming.length) : businessBriefEmpty('fa-calendar-check', t("businessBrain.noComingUp"));
+            const recommendationBody = recommendations.length ? recommendations.slice(0, 2).map(row => businessBriefSignalRow(row, true)).join('') + businessBriefMore(recommendations.length) : businessBriefEmpty('fa-circle-check', t("businessBrain.noCurrentRecommendation"), 'text-success');
+            const learningBody = businessBriefEmpty('fa-chart-simple', getBusinessBriefLearningSummary(), businessBrainData?.learning ? 'text-primary' : 'text-textSec');
+            container.innerHTML = [
+                businessBriefCard(t("businessBrain.needsYourAttention"), 'fa-bell', attention.length ? 'text-warning' : 'text-success', attentionBody),
+                businessBriefCard(t("businessBrain.comingUp"), 'fa-calendar-days', 'text-primary', comingBody),
+                businessBriefCard(t("businessBrain.cauldraRecommends"), 'fa-lightbulb', 'text-success', recommendationBody),
+                businessBriefCard(t("businessBrain.whatCauldraIsLearning"), 'fa-chart-simple', 'text-primary', learningBody),
+            ].join('');
+        }
+
+        // Existing data-load call sites keep these compatibility wrappers. Both
+        // now refresh the one Business Brief instead of separate dashboard cards.
+        function renderNeedsAttention() { renderBusinessBriefDashboard(); }
+        function renderBusinessInsights() { renderBusinessBriefDashboard(); }
+
         function renderDashboardNetProfit() {
             const row = document.getElementById('dashboard-net-profit-row');
             const amountEl = document.getElementById('dashboard-net-profit-amount');
             if (!row || !amountEl) return;
-            if (dashboardTodayProfit === null) { row.classList.add('hidden'); row.classList.remove('flex'); return; }
-            row.classList.remove('hidden'); row.classList.add('flex');
-            const colorClass = dashboardTodayProfit > 0 ? 'text-success' : (dashboardTodayProfit < 0 ? 'text-danger' : 'text-textMain');
-            amountEl.className = `font-mono font-bold text-sm ${colorClass}`;
-            amountEl.textContent = formatCurrency(dashboardTodayProfit);
+            row.classList.toggle('hidden', dashboardTodayProfit === null);
+            amountEl.className = dashboardTodayProfit > 0 ? 'text-success' : (dashboardTodayProfit < 0 ? 'text-danger' : 'text-textMain');
+            amountEl.textContent = dashboardTodayProfit === null ? '' : formatCurrency(dashboardTodayProfit);
         }
 
         // Reuses the existing role-scoped reopen-requests endpoint (Admin
@@ -22835,38 +22829,99 @@
         }
 
         async function openBusinessBrainModal() {
-            const modal = document.getElementById('business-brain-modal'); modal.classList.remove('hidden');
-            document.getElementById('business-brain-loading').classList.remove('hidden'); document.getElementById('business-brain-body').classList.add('hidden');
-            try { renderBusinessBrain(await fetchBusinessBrain(), 'attention'); }
+            const modal = document.getElementById('business-brain-modal');
+            modal.classList.remove('hidden');
+            document.getElementById('business-brain-loading').classList.remove('hidden');
+            document.getElementById('business-brain-body').classList.add('hidden');
+            businessBriefHistoryFilter = 'all';
+            try { renderBusinessBrain(await fetchBusinessBrain(), 'overview'); }
             catch (err) { document.getElementById('business-brain-loading').textContent = err.message || t("businessBrain.temporarilyUnavailable"); }
         }
+
         function closeBusinessBrainModal() { document.getElementById('business-brain-modal').classList.add('hidden'); }
         function switchBusinessBrainTab(tab) { if (businessBrainData) renderBusinessBrain(businessBrainData, tab); }
-        function renderBusinessBrain(data, tab) {
-            document.getElementById('business-brain-loading').classList.add('hidden'); document.getElementById('business-brain-body').classList.remove('hidden');
-            const learning = document.getElementById('business-brain-learning'); learning.classList.toggle('hidden', !data.learning); learning.textContent = data.learning_message || '';
-            const staff = getCurrentRole() === 'staff';
-            ['coming','memory','outcomes'].forEach(id => document.querySelector(`#business-brain-tabs [data-tab="${id}"]`)?.classList.toggle('hidden', staff));
-            if (staff && ['coming','memory','outcomes'].includes(tab)) tab = 'attention';
-            document.querySelectorAll('.brain-tab-btn').forEach(btn => btn.className = `brain-tab-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer ${btn.dataset.tab === tab ? 'bg-primary/15 text-primary border border-primary/25' : 'text-textSec hover:text-textMain hover:bg-bgMain'}`);
-            const content = document.getElementById('business-brain-content');
-            if (tab === 'outcomes') {
-                const o = data.outcomes || {};
-                const trendText = o.accuracy_trend === 'improving' ? t("businessBrain.accuracyImproving") : o.accuracy_trend === 'declining' ? t("businessBrain.accuracyDeclining") : '';
-                const predictionsCard = `<div class="rounded-xl bg-bgMain border border-borderCol p-3 text-[11px]"><div class="font-semibold text-textMain">${t("businessBrain.predictionOutcomes")}</div><p class="text-textSec mt-1">${o.accuracy == null ? brainEsc(o.message || t("businessBrain.noForecastPeriods")) : `${tPlural("businessBrain.forecastSummary", o.evaluated_predictions, {accuracy: brainEsc(o.accuracy), trend: brainEsc(trendText)})}`}</p></div>`;
-                const hasImpact = (o.actions_taken > 0) || (o.revenue_at_risk != null && o.revenue_at_risk > 0);
-                const impactCard = hasImpact ? `<div class="rounded-xl bg-bgMain border border-borderCol p-3 text-[11px] mt-2"><div class="font-semibold text-textMain"><i class="fa-solid fa-bolt text-primary mr-1"></i>${t("businessBrain.cauldraImpact")}</div><p class="text-textSec mt-1">${o.actions_taken > 0 ? tPlural("businessBrain.recommendationsActedOn", o.actions_taken) : ''}${o.revenue_at_risk != null && o.revenue_at_risk > 0 ? t("businessBrain.revenueAtRisk", {amount: formatCurrency(o.revenue_at_risk)}) : ''}</p></div>` : '';
-                content.innerHTML = predictionsCard + impactCard;
-                return;
-            }
-            if (tab === 'coming') { const rows = data.coming || []; content.innerHTML = rows.map(row => `<div class="rounded-xl bg-bgMain border border-borderCol p-3 text-[11px]"><div class="font-semibold text-textMain">${tPlural("businessBrain.forecastUnits", row.predicted_units, {name: brainEsc(row.product_name), units: brainEsc(row.predicted_units)})}</div><p class="text-textSec mt-1">${tPlural("businessBrain.forecastBasis", row.evidence?.completed_business_days ?? 0, {name: brainEsc(row.confidence), days: brainEsc(row.evidence?.completed_business_days)})}</p></div>`).join('') || `<div class="text-[11px] text-textSec py-5 text-center">${t("businessBrain.needMoreHistory")}</div>`; return; }
-            if (tab === 'memory') { const rows = data.memory || []; content.innerHTML = rows.map(row => `<div class="rounded-xl bg-bgMain border border-borderCol p-3 text-[11px]"><div class="font-semibold text-textMain">${brainEsc(row.statement)}</div><p class="text-textSec mt-1">${tPlural("businessBrain.memoryObserved", row.evidence?.completed_business_days ?? 0, {name: brainEsc(row.confidence), days: brainEsc(row.evidence?.completed_business_days)})}</p></div>`).join('') || `<div class="text-[11px] text-textSec py-5 text-center">${t("businessBrain.needMoreHistoryMemory")}</div>`; return; }
-            const rows = tab === 'recommendations' ? (data.recommendations || []) : (data.attention || []);
-            content.innerHTML = rows.map(row => `<div class="rounded-xl bg-bgMain border border-borderCol p-3 text-[11px]"><div class="flex items-start justify-between gap-2"><div><div class="font-semibold text-textMain">${brainEsc(row.title)}</div><p class="text-textSec mt-1">${brainEsc(row.summary)}</p></div><span class="shrink-0 rounded-lg border px-2 py-1 text-[9px] font-bold uppercase ${brainPriorityClass(row.priority)}">${brainEsc(row.priority)}</span></div>${staff ? '' : `<div class="mt-2 flex gap-2"><button type="button" onclick="updateBusinessBrainRecommendation(${Number(row.id)},'acted')" class="text-primary hover:text-primaryHover font-semibold cursor-pointer">${t("businessBrain.markActionTaken")}</button><button type="button" onclick="updateBusinessBrainRecommendation(${Number(row.id)},'dismissed')" class="text-textSec hover:text-textMain cursor-pointer">${t("businessBrain.dismiss")}</button></div>`}</div>`).join('') || `<div class="text-[11px] text-textSec py-5 text-center">${t("businessBrain.noRecommendationsSupported")}</div>`;
+
+        function businessBriefRecommendationCard(row, staff) {
+            const isActed = row.status === 'acted';
+            const controls = staff ? '' : `<div class="business-brief-row-actions">${isActed ? '<span class="text-success"><i class="fa-solid fa-check mr-1"></i>Action recorded</span>' : `<button type="button" onclick="updateBusinessBrainRecommendation(${Number(row.id)},'acted')">${t("businessBrain.markActionTaken")}</button>`}<button type="button" class="is-muted" onclick="updateBusinessBrainRecommendation(${Number(row.id)},'dismissed')">${t("businessBrain.dismiss")}</button></div>`;
+            return `<article class="business-brief-detail-row"><div class="business-brief-detail-heading"><div><strong>${brainEsc(row.title)}</strong><p>${brainEsc(row.summary)}</p></div><span class="business-brief-priority ${brainPriorityClass(row.priority)}">${brainEsc(row.priority)}</span></div>${controls}</article>`;
         }
+
+        function renderBusinessBriefOverview(data, staff) {
+            const attentionRows = getBusinessBriefAttentionItems(data);
+            const recommendationRows = getBusinessBriefRecommendationItems(data);
+            const attentionBody = attentionRows.length ? attentionRows.slice(0, 4).map(row => row.id ? businessBriefRecommendationCard(row, staff) : businessBriefSignalRow(row)).join('') : businessBriefEmpty('fa-circle-check', t("businessBrain.healthyState"), 'text-success');
+            const comingBody = staff ? businessBriefEmpty('fa-lock', 'Forecasts are available to Admins and Managers.') : (data.coming || []).slice(0, 4).map(row => `<article class="business-brief-detail-row"><strong>${brainEsc(row.product_name)} · about ${brainEsc(row.predicted_units)} units</strong><p>${brainEsc(row.confidence)} · target ${brainEsc(formatBusinessDate(row.target_at, {dateStyle:'medium'}))}</p></article>`).join('') || businessBriefEmpty('fa-calendar-check', t("businessBrain.noComingUp"));
+            const recommendationBody = recommendationRows.length ? recommendationRows.slice(0, 4).map(row => row.id ? businessBriefRecommendationCard(row, staff) : businessBriefSignalRow(row)).join('') : businessBriefEmpty('fa-circle-check', t("businessBrain.noCurrentRecommendation"), 'text-success');
+            const learningBody = businessBriefEmpty(data.learning ? 'fa-seedling' : 'fa-chart-simple', getBusinessBriefLearningSummary(data), data.learning ? 'text-primary' : 'text-textSec');
+            return `<div class="business-brief-overview-grid">${businessBriefCard(t("businessBrain.needsYourAttention"), 'fa-bell', attentionRows.length ? 'text-warning' : 'text-success', attentionBody)}${businessBriefCard(t("businessBrain.comingUp"), 'fa-calendar-days', 'text-primary', comingBody)}${businessBriefCard(t("businessBrain.cauldraRecommends"), 'fa-lightbulb', 'text-success', recommendationBody)}${businessBriefCard(t("businessBrain.whatCauldraIsLearning"), 'fa-chart-simple', 'text-primary', learningBody)}</div>`;
+        }
+
+        function businessBriefMemoryCategory(row) {
+            const evidence = row.evidence || {};
+            if (evidence.product_a && evidence.product_b) return {key:'relationships', label:t("businessBrain.memoryProductRelationships"), icon:'fa-link'};
+            if (evidence.week_of_year || evidence.cycles_observed) return {key:'seasonal', label:t("businessBrain.memorySeasonalPatterns"), icon:'fa-calendar'};
+            if (evidence.average_daily_units != null || evidence.units_sold != null) return {key:'sales', label:t("businessBrain.memorySalesPatterns"), icon:'fa-chart-line'};
+            return {key:'other', label:t("businessBrain.memoryOther"), icon:'fa-note-sticky'};
+        }
+
+        function renderBusinessBriefMemory(data) {
+            const rows = data.memory || [];
+            if (!rows.length) return businessBriefEmpty('fa-seedling', data.learning ? (data.learning_message || t("businessBrain.stillLearning")) : t("businessBrain.needMoreHistoryMemory"));
+            const groups = new Map();
+            rows.forEach(row => {
+                const category = businessBriefMemoryCategory(row);
+                if (!groups.has(category.key)) groups.set(category.key, {category, rows:[]});
+                groups.get(category.key).rows.push(row);
+            });
+            return `<div class="business-brief-memory-groups">${Array.from(groups.values()).map(group => `<section class="business-brief-memory-group"><h4><i class="fa-solid ${group.category.icon} text-primary"></i>${brainEsc(group.category.label)}</h4>${group.rows.map(row => `<article class="business-brief-detail-row"><strong>${brainEsc(row.statement)}</strong><p>${brainEsc(row.confidence)} · last observed ${brainEsc(formatBusinessDate(row.last_observed_at, {dateStyle:'medium'}))}</p></article>`).join('')}</section>`).join('')}</div>`;
+        }
+
+        function renderBusinessBriefOutcomes(data) {
+            const o = data.outcomes || {};
+            const trendText = o.accuracy_trend === 'improving' ? t("businessBrain.accuracyImproving") : o.accuracy_trend === 'declining' ? t("businessBrain.accuracyDeclining") : '';
+            const forecastText = o.accuracy == null ? (o.message || t("businessBrain.noForecastPeriods")) : tPlural("businessBrain.forecastSummary", o.evaluated_predictions, {accuracy:o.accuracy, trend:trendText ? ` · ${trendText}` : ''});
+            const impact = [];
+            if (o.actions_taken > 0) impact.push(tPlural("businessBrain.recommendationsActedOn", o.actions_taken));
+            if (o.revenue_at_risk != null && o.revenue_at_risk > 0) impact.push(t("businessBrain.revenueAtRisk", {amount:formatCurrency(o.revenue_at_risk)}));
+            return `<section class="business-brief-outcomes"><h4><i class="fa-solid fa-bullseye text-primary"></i>${brainEsc(t("businessBrain.tabOutcomes"))}</h4><p>${brainEsc(forecastText)}</p>${impact.length ? `<p>${brainEsc(impact.join(' '))}</p>` : ''}</section>`;
+        }
+
+        function setBusinessBriefHistoryFilter(filter) {
+            businessBriefHistoryFilter = ['all','recommendation','forecast'].includes(filter) ? filter : 'all';
+            if (businessBrainData) renderBusinessBrain(businessBrainData, 'history');
+        }
+
+        function renderBusinessBriefHistory(data, staff) {
+            const filters = [{id:'all', label:t("businessBrain.historyAll")}, {id:'recommendation', label:t("businessBrain.historyRecommendations")}, ...(staff ? [] : [{id:'forecast', label:t("businessBrain.historyForecasts")}])];
+            const rows = (data.history || []).filter(row => businessBriefHistoryFilter === 'all' || row.type === businessBriefHistoryFilter);
+            const filterMarkup = `<div class="business-brief-history-filters" role="group" aria-label="Filter Business Brief history">${filters.map(filter => `<button type="button" class="${businessBriefHistoryFilter === filter.id ? 'is-active' : ''}" onclick="setBusinessBriefHistoryFilter('${filter.id}')">${brainEsc(filter.label)}</button>`).join('')}</div>`;
+            const rowsMarkup = rows.map(row => `<article class="business-brief-history-row"><span class="business-brief-history-icon"><i class="fa-solid ${row.type === 'forecast' ? 'fa-chart-line' : 'fa-lightbulb'}"></i></span><div><div class="business-brief-history-meta"><span>${brainEsc(row.category || row.type)}</span><time>${brainEsc(formatBusinessDate(row.occurred_at, {dateStyle:'medium'}))}</time></div><strong>${brainEsc(row.title)}</strong><p>${brainEsc(row.summary)}</p></div></article>`).join('') || businessBriefEmpty('fa-clock-rotate-left', t("businessBrain.historyEmpty"));
+            return `${filterMarkup}<div class="business-brief-history-list">${rowsMarkup}</div>${staff ? '' : renderBusinessBriefOutcomes(data)}`;
+        }
+
+        function renderBusinessBrain(data, tab = 'overview') {
+            document.getElementById('business-brain-loading').classList.add('hidden');
+            document.getElementById('business-brain-body').classList.remove('hidden');
+            const staff = getCurrentRole() === 'staff';
+            document.querySelector('#business-brain-tabs [data-tab="memory"]')?.classList.toggle('hidden', staff);
+            if (staff && tab === 'memory') tab = 'overview';
+            document.querySelectorAll('.brain-tab-btn').forEach(btn => {
+                const active = btn.dataset.tab === tab;
+                btn.classList.toggle('is-active', active);
+                btn.setAttribute('aria-selected', String(active));
+            });
+            const content = document.getElementById('business-brain-content');
+            content.innerHTML = tab === 'memory' ? renderBusinessBriefMemory(data) : tab === 'history' ? renderBusinessBriefHistory(data, staff) : renderBusinessBriefOverview(data, staff);
+        }
+
         async function updateBusinessBrainRecommendation(id, action) {
-            try { const res = await fetch(`${API_URL}/business-brain/recommendations/${id}/action`, {method:'POST', credentials:'include', headers:{'Authorization':`Bearer ${authToken}`, 'Content-Type':'application/json'}, body:JSON.stringify({action})}); if (!res.ok) throw new Error(); renderBusinessBrain(await fetchBusinessBrain(), 'recommendations'); await loadBusinessBrainDashboard(); }
-            catch (_) { showToast(t("businessBrain.updateRecommendationFailed"), 'error'); }
+            try {
+                const res = await fetch(`${API_URL}/business-brain/recommendations/${id}/action`, {method:'POST', credentials:'include', headers:{'Authorization':`Bearer ${authToken}`, 'Content-Type':'application/json'}, body:JSON.stringify({action})});
+                if (!res.ok) throw new Error();
+                renderBusinessBrain(await fetchBusinessBrain(), 'overview');
+                renderBusinessBriefDashboard();
+            } catch (_) { showToast(t("businessBrain.updateRecommendationFailed"), 'error'); }
         }
 
         // loadData() is called from many places besides page load (after
@@ -23026,7 +23081,7 @@
                 // the other. Both are started together.
                 //
                 // --- Readiness batch ---------------------------------------------
-                // Subscription usage, financial health, profit, Business Brain,
+                // Subscription usage, financial health, profit, Business Brief,
                 // pending account-action requests, notifications, and activity
                 // history (the last self-gates to admin/manager, same as the
                 // modal it backs) are each independent sections — none of them
@@ -23545,7 +23600,7 @@
                     // entire application (see performance refactor, section
                     // 12/13): a single product edit must not re-fetch
                     // products/suppliers/warehouses/financial intelligence/
-                    // profit/Business Brain/subscription/audit/everything.
+                    // profit/Business Brief/subscription/audit/everything.
                     const updated = data?.product;
                     if (updated) {
                         const idx = globalProducts.findIndex(p => p.id === id);
