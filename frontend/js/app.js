@@ -19935,8 +19935,23 @@
         const SCANNER_BUILD = "camera-v2";
         const CAMERA_DECODE_INTERVAL_MS = 100;      // ~10 detections / second
         const CAMERA_DECODE_COOLDOWN_MS = 1200;     // same code re-seen in-frame is ignored this long
-        const ZXING_VENDOR_SRC = "/assets/vendor/zxing-library-0.21.3.umd.js";
+        // Candidates: a hyphen-free canonical name first, then names a rename
+        // or upload may have produced. A slightly-misnamed vendor file must
+        // still load instead of silently 404-ing the whole fallback decoder.
+        const ZXING_VENDOR_CANDIDATES = [
+            "/assets/vendor/zxing.umd.js",
+            "/assets/vendor/zxinglibrary0.21.3.umd.js",
+            "/assets/vendor/zxing-library-0.21.3.umd.js",
+        ];
         const CAMERA_NATIVE_FORMATS = ["upc_a", "upc_e", "ean_13", "ean_8", "code_128", "code_39", "itf"];
+        // If the native BarcodeDetector is selected but produces ZERO decodes
+        // this long while the camera is clearly running, quietly switch to
+        // ZXing (covers WebKit/WebView builds where BarcodeDetector exists but
+        // never actually resolves a 1D barcode and never throws).
+        const NATIVE_NO_DECODE_FALLBACK_MS = 9000;
+        let _nativeSelectedAt = 0;
+        let _anyCameraDecode = false;
+        let _decoderSwitching = false;
 
         let cameraScannerStarting = false;
         let _camStream = null;
@@ -19955,17 +19970,29 @@
         // Lazy: only browsers WITHOUT a usable native BarcodeDetector download
         // the ZXing bundle. Same-origin <script> (covered by script-src 'self')
         // and cached by the service worker like any other /assets/ file.
+        function _loadOneScript(src) {
+            return new Promise((resolve, reject) => {
+                const sc = document.createElement("script");
+                sc.src = src; sc.async = true;
+                sc.onload = () => window.ZXing ? resolve(window.ZXing) : reject(new Error("loaded but no ZXing global: " + src));
+                sc.onerror = () => reject(new Error("could not load " + src));
+                document.head.appendChild(sc);
+            });
+        }
         function _loadZXing() {
             if (window.ZXing) return Promise.resolve(window.ZXing);
             if (_zxingLoadPromise) return _zxingLoadPromise;
-            _zxingLoadPromise = new Promise((resolve, reject) => {
-                const sc = document.createElement("script");
-                sc.src = ZXING_VENDOR_SRC;
-                sc.async = true;
-                sc.onload = () => window.ZXing ? resolve(window.ZXing) : reject(new Error("ZXing global missing after load"));
-                sc.onerror = () => { _zxingLoadPromise = null; reject(new Error("ZXing script failed to load")); };
-                document.head.appendChild(sc);
-            });
+            _zxingLoadPromise = (async () => {
+                for (const src of ZXING_VENDOR_CANDIDATES) {
+                    try {
+                        const ZX = await _loadOneScript(src);
+                        console.log("[barcode] ZXing decoder loaded from", src);
+                        return ZX;
+                    } catch (e) { /* try the next candidate path */ }
+                }
+                _zxingLoadPromise = null;
+                throw new Error("ZXing bundle not found at any /assets/vendor path — re-upload zxing.umd.js");
+            })();
             return _zxingLoadPromise;
         }
 
@@ -20033,6 +20060,15 @@
                 el.textContent = SCANNER_BUILD + " \u00b7 Decoder: " + (_camDecoderName || "\u2026");
             });
         }
+        // Big, visible, phone-readable failure state inside the scanner box —
+        // so "not scanning" is never a mystery on a device with no console.
+        function _showScannerFatal(mode, msg) {
+            _camDecoderName = "UNAVAILABLE";
+            _updateScannerDecoderLabel();
+            const el = document.getElementById(_scannerViewId(mode)) &&
+                       document.getElementById(_scannerViewId(mode)).querySelector("[data-scanner-status]");
+            if (el) { el.textContent = msg; el.style.color = "#fca5a5"; }
+        }
 
         // ---- ONE camera-decode entry point (Part 5) ----
         // submitProductBarcode / submitPosBarcode already emit the LOW beep and
@@ -20053,6 +20089,7 @@
                 posLastCameraScan = { code: code, at: now };
             }
 
+            _anyCameraDecode = true;
             console.log("[barcode] CAMERA DECODE SUCCESS:", code);
             _setScannerStatus(mode, "decoded", code);
             _setScannerStatus(mode, "submitting");
@@ -20074,6 +20111,18 @@
             if (ts - _camLastAttempt < CAMERA_DECODE_INTERVAL_MS) return;
             const v = _camVideo;
             if (!v || v.readyState < 2 || !v.videoWidth) return;   // 2 = HAVE_CURRENT_DATA
+            // Native detector selected, camera running, frames flowing, but
+            // NOTHING has decoded for a long time -> quietly bring up ZXing.
+            if (_nativeDetector && !_anyCameraDecode && !_decoderSwitching &&
+                _nativeSelectedAt && (Date.now() - _nativeSelectedAt > NATIVE_NO_DECODE_FALLBACK_MS)) {
+                _decoderSwitching = true;
+                console.warn("[barcode] native BarcodeDetector: no decode in " + NATIVE_NO_DECODE_FALLBACK_MS + "ms — switching to ZXing");
+                _buildZXingReader()
+                    .then(r => { _zxingReader = r; _nativeDetector = null; _camDecoderName = "ZXing (auto)"; _updateScannerDecoderLabel(); })
+                    .catch(e => console.error("[barcode] ZXing auto-switch failed:", (e && e.message) || e))
+                    .finally(() => { _decoderSwitching = false; });
+            }
+
             _camLastAttempt = ts;
             _camDetectInFlight = true;
 
@@ -20149,17 +20198,24 @@
                     try { await _camVideo.play(); } catch (_) { /* autoplay quirk — the loop still reads frames */ }
                 }
 
+                _anyCameraDecode = false;
+                _decoderSwitching = false;
+                _nativeSelectedAt = 0;
                 _nativeDetector = await _buildNativeDetector();
                 if (_nativeDetector) {
                     _camDecoderName = "Native BarcodeDetector";
+                    _nativeSelectedAt = Date.now();
                 } else {
                     try {
                         _zxingReader = await _buildZXingReader();
                         _camDecoderName = "ZXing";
                     } catch (e) {
-                        console.error("[barcode] no usable barcode decoder (native missing + ZXing load failed):", e);
-                        showToast(t("products.cameraAccessFailed"), "error");
-                        await stopCameraScanner();
+                        console.error("[barcode] no usable barcode decoder (native missing + ZXing load failed):", (e && e.message) || e);
+                        _showScannerFatal(mode, "Barcode decoder failed to load \u2014 re-upload zxing.umd.js to /assets/vendor/");
+                        showToast("Barcode decoder failed to load. Re-upload zxing.umd.js to /assets/vendor/ (see console).", "error");
+                        _camStream && _camStream.getTracks().forEach(x => { try { x.stop(); } catch (_) {} });
+                        _camStream = null;
+                        activeCameraMode = null;   // failed to start -> next camera-button tap is a fresh retry
                         return;
                     }
                 }
@@ -20328,7 +20384,7 @@
         // => nothing was ever decoded. One reused AudioContext, unlocked on the
         // camera tap / scan-field focus; entirely best-effort — a blocked or
         // missing AudioContext must never interrupt a scan.
-        console.log("[barcode] app.js build 2026-09-03-v15 — camera-v2 (MediaStream + BarcodeDetector/ZXing) + wedge capture");
+        console.log("[barcode] app.js build 2026-09-03-v16 — camera-v2 (resilient ZXing load + native watchdog) + wedge capture");
         let _pipelineAudioCtx = null;
         function _primePipelineAudio() {
             try {

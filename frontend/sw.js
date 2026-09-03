@@ -10,7 +10,7 @@
 // data to whoever opens the browser next, so every request that isn't the
 // app shell or a known static asset is passed straight to the network.
 
-const SHELL_CACHE = "cauldra-shell-v2";
+const SHELL_CACHE = "cauldra-shell-v3";
 
 // Precached at install time. Kept small and static-only — anything dynamic
 // (products, sales, etc.) never belongs in this cache.
@@ -25,7 +25,7 @@ const SHELL_ASSETS = [
     "/assets/vendor/tailwindcss-3.4.17.js",
     "/assets/vendor/fontawesome/css/all.min.css",
     "/assets/vendor/html5-qrcode-2.3.8.min.js",
-    "/assets/vendor/zxing-library-0.21.3.umd.js",
+    "/assets/vendor/zxing.umd.js",
 ];
 
 self.addEventListener("install", (event) => {
