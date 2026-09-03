@@ -38,6 +38,7 @@ from passlib.context import CryptContext
 import jwt
 from jwt.exceptions import InvalidTokenError as JWTError
 from openpyxl import Workbook
+from supabase_client import get_supabase_client, SupabaseConfigurationError
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
@@ -5755,11 +5756,11 @@ def _recompute_seasonal_pattern(db: Session, business_id: int, product: Product,
 
     distinct_weeks = len(weekly_totals)
     if distinct_weeks < SEASONAL_MIN_TOTAL_WEEKS:
-        if existing is not None: db.delete(existing)
+        _withdraw_seasonal_pattern(db, business_id, product.id, existing)
         return
     baseline_avg = sum(weekly_totals.values()) / distinct_weeks
     if baseline_avg <= 0:
-        if existing is not None: db.delete(existing)
+        _withdraw_seasonal_pattern(db, business_id, product.id, existing)
         return
 
     by_bucket: Dict[int, List[float]] = {}
@@ -5787,7 +5788,7 @@ def _recompute_seasonal_pattern(db: Session, business_id: int, product: Product,
             best = (wk, cycles_observed, avg_in_week, lift_ratio, consistency, confidence)
 
     if best is None:
-        if existing is not None: db.delete(existing)
+        _withdraw_seasonal_pattern(db, business_id, product.id, existing)
         return
     wk, cycles_observed, avg_in_week, lift_ratio, consistency, confidence = best
     if existing is None:
@@ -5802,10 +5803,19 @@ def _recompute_seasonal_pattern(db: Session, business_id: int, product: Product,
     existing.confidence = confidence
     existing.last_computed_at = now
 
-def _apply_seasonal_pattern(db: Session, business_id: int, product: Product, now: datetime) -> None:
+def _withdraw_seasonal_pattern(db: Session, business_id: int, product_id: int, existing) -> None:
+    """One place to retire a product's seasonal pattern: drop the stored row and
+    its plain-language Memory together, so a Memory statement can never outlive
+    the evidence that produced it."""
+    if existing is not None:
+        db.delete(existing)
+    _delete_brain_memory(db, business_id, f"seasonal:{product_id}")
+
+def _apply_seasonal_pattern(db: Session, business_id: int, product: Product, now: datetime) -> set:
     """Recomputes (throttled) then, if a pattern is on file, records the plain-
     language memory and — only when the known period is actually approaching
-    and current stock looks short — a timely, actionable recommendation."""
+    and current stock looks short — a timely, actionable recommendation. Returns
+    the set of recommendation fingerprints this pass still supports."""
     if product.seasonal_checked_at is None or (now - product.seasonal_checked_at) > timedelta(hours=SEASONAL_RECOMPUTE_INTERVAL_HOURS):
         _recompute_seasonal_pattern(db, business_id, product, now)
         product.seasonal_checked_at = now
@@ -5815,7 +5825,7 @@ def _apply_seasonal_pattern(db: Session, business_id: int, product: Product, now
         BusinessBrainSeasonalPattern.product_id == product.id,
     ).first()
     if pattern is None:
-        return
+        return set()
 
     upcoming = _next_occurrence_of_week(pattern.week_of_year, now)
     days_until = (upcoming.date() - now.date()).days
@@ -5873,6 +5883,8 @@ def _apply_seasonal_pattern(db: Session, business_id: int, product: Product, now
             f"Consider replenishing before the increase.",
             {**evidence, "current_stock": product.quantity},
         )
+        return {f"seasonal-lead:{product.id}"}
+    return set()
 
 # --- Cross-product relationship detection (additive) ------------------------
 # Learns whether two products' weekly sales move together, purely from this
@@ -5938,6 +5950,7 @@ def _recompute_business_relationships(db: Session, business_id: int, now: dateti
     existing_rows = db.query(BusinessBrainRelationship).filter(BusinessBrainRelationship.business_id == business_id).all()
     for row in existing_rows:
         if (row.product_a_id, row.product_b_id) not in keep_pairs:
+            _delete_brain_memory(db, business_id, f"relationship:{row.product_a_id}:{row.product_b_id}")
             db.delete(row)  # evidence no longer supports this pairing; withdraw it
 
     for product_a, product_b, overlapping_weeks, correlation, confidence in keep:
@@ -5999,6 +6012,24 @@ def _evaluate_due_brain_predictions(db: Session, business_id: int, now: datetime
         prediction.accuracy_score = round(max(0.0, 1 - abs(float(actual) - prediction.predicted_units) / max(prediction.predicted_units, 1.0)), 3)
         prediction.evaluated_at = now
 
+# --- Business Brain lifecycle (data organisation, not new intelligence) ------
+# Recommendations, predictions and memories are STATE, not an append-only feed.
+# The engine already dedupes by fingerprint (one row per condition, updated in
+# place). These helpers add the rest of the lifecycle: an active item that the
+# engine no longer re-affirms leaves the active brief for History; an item it
+# had auto-resolved comes back if its condition returns; a Memory is withdrawn
+# when the evidence behind it is withdrawn. No item is deleted purely for age.
+RECOMMENDATION_ACTIVE_STATUSES = ("new", "opened")
+RECOMMENDATION_RESOLVED_AUTO = ("resolved", "expired")
+RECOMMENDATION_HISTORY_STATUSES = ("acted", "dismissed", "resolved", "expired")
+CONDITION_RECOMMENDATION_KINDS = ("stock_review", "forecast_stockout", "seasonal_demand")
+
+def _delete_brain_memory(db: Session, business_id: int, fingerprint: str) -> None:
+    db.query(BusinessBrainMemory).filter(
+        BusinessBrainMemory.business_id == business_id,
+        BusinessBrainMemory.fingerprint == fingerprint,
+    ).delete(synchronize_session=False)
+
 def _upsert_brain_recommendation(db: Session, business_id: int, product_id: Optional[int], fingerprint: str, kind: str, priority: str, title: str, summary: str, evidence: Dict[str, Any]):
     row = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.business_id == business_id, BusinessBrainRecommendation.fingerprint == fingerprint).first()
     if row is None:
@@ -6006,7 +6037,33 @@ def _upsert_brain_recommendation(db: Session, business_id: int, product_id: Opti
         db.add(row)
     else:
         row.priority, row.title, row.summary, row.evidence_json = priority, title, summary, json.dumps(evidence)
+        # A condition Cauldra had auto-resolved has returned: this is a genuinely
+        # new occurrence, so re-open it. A user's explicit acted/dismissed is
+        # respected and never auto-revived.
+        if row.status in RECOMMENDATION_RESOLVED_AUTO:
+            row.status = "new"
+            row.opened_at = row.acted_at = row.dismissed_at = None
     return row
+
+def _retire_stale_brain_recommendations(db: Session, business_id: int, now: datetime, affirmed: set, history_days: int, product_ids: set) -> None:
+    """Condition-based recommendations a full refresh did NOT re-affirm this pass
+    (stock replenished, demand risk gone, seasonal window passed, product
+    removed) leave the active brief and move to History. A kind is only eligible
+    when this pass actually re-checked its condition."""
+    active = db.query(BusinessBrainRecommendation).filter(
+        BusinessBrainRecommendation.business_id == business_id,
+        BusinessBrainRecommendation.status.in_(RECOMMENDATION_ACTIVE_STATUSES),
+        BusinessBrainRecommendation.kind.in_(CONDITION_RECOMMENDATION_KINDS),
+    ).all()
+    for rec in active:
+        if rec.fingerprint in affirmed:
+            continue
+        product_gone = rec.product_id is not None and rec.product_id not in product_ids
+        if not product_gone and rec.kind in ("forecast_stockout", "seasonal_demand") and history_days < BUSINESS_BRAIN_HISTORY_DAYS:
+            # The velocity/seasonal loop is skipped below this history threshold,
+            # so a missing re-affirmation is not evidence the condition cleared.
+            continue
+        rec.status = "resolved"  # updated_at auto-bumps and is the resolution time History shows
 
 def _upsert_brain_memory(db: Session, business_id: int, product_id: int, fingerprint: str, statement: str, evidence: Dict[str, Any], confidence: float, observed_at: datetime):
     row = db.query(BusinessBrainMemory).filter(BusinessBrainMemory.business_id == business_id, BusinessBrainMemory.fingerprint == fingerprint).first()
@@ -6046,7 +6103,7 @@ def _brain_revenue_at_risk(db: Session, business_id: int) -> Optional[float]:
     rows = db.query(BusinessBrainRecommendation).filter(
         BusinessBrainRecommendation.business_id == business_id,
         BusinessBrainRecommendation.kind.in_(["forecast_stockout", "seasonal_demand"]),
-        BusinessBrainRecommendation.status != "dismissed",
+        BusinessBrainRecommendation.status.in_(RECOMMENDATION_ACTIVE_STATUSES),
     ).all()
     if not rows:
         return None
@@ -6123,6 +6180,8 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
     meta = _business_brain_meta(db, business_id)
     history_days, confidence, prior_accuracy = meta["history_days"], meta["confidence"], meta["prior_accuracy"]
     products = db.query(Product).filter(Product.business_id == business_id).all()
+    product_ids = {p.id for p in products}
+    affirmed: set = set()  # recommendation fingerprints this pass still supports
     # Grouped once instead of one SUM query per product (see the identical
     # fix in /products/financial-intelligence) — query count no longer
     # scales with catalog size.
@@ -6133,10 +6192,15 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
     for product in products:
         if product.quantity <= product.min_stock_level:
             _upsert_brain_recommendation(db, business_id, product.id, f"low-stock:{product.id}", "stock_review", "critical", f"Review stock for {product.name}", f"Current stock is {product.quantity} units, at or below this product's minimum level of {product.min_stock_level}.", {"current_stock": product.quantity, "minimum_stock": product.min_stock_level, "source": "current_inventory"})
+            affirmed.add(f"low-stock:{product.id}")
         if history_days < BUSINESS_BRAIN_HISTORY_DAYS: continue
         total_sold = total_sold_map.get(product.id, 0)
         daily_velocity = float(total_sold) / history_days
-        if daily_velocity <= 0: continue
+        if daily_velocity <= 0:
+            # No longer selling: an "averages X units/day" Memory is stale, so
+            # withdraw it rather than keep presenting an out-of-date figure.
+            _delete_brain_memory(db, business_id, f"velocity-28:{product.id}")
+            continue
         raw_expected_units = round(daily_velocity * BUSINESS_BRAIN_FORECAST_HORIZON_DAYS, 2)
         calibration_factor = _prediction_bias_factor(db, business_id, product.id, "velocity")
         expected_units = round(raw_expected_units * (calibration_factor or 1.0), 2)
@@ -6150,10 +6214,12 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
         if product.quantity < expected_units:
             days_to_stockout = round(product.quantity / daily_velocity, 1)
             _upsert_brain_recommendation(db, business_id, product.id, f"forecast-stockout:{product.id}", "forecast_stockout", "critical" if days_to_stockout <= 3 else "important", f"Prepare for demand on {product.name}", f"Based on {history_days} completed business days, expected demand for the next 7 days is about {expected_units:g} units while current stock is {product.quantity}.", {**evidence, "current_stock": product.quantity, "days_to_stockout": days_to_stockout, "expected_units": expected_units})
+            affirmed.add(f"forecast-stockout:{product.id}")
         if history_days >= 28:
             _upsert_brain_memory(db, business_id, product.id, f"velocity-28:{product.id}", f"{product.name} has averaged about {daily_velocity:.1f} units per completed business day across {history_days} recorded days.", evidence, confidence, now)
-        _apply_seasonal_pattern(db, business_id, product, now)
+        affirmed |= _apply_seasonal_pattern(db, business_id, product, now)
     _apply_business_relationships(db, business_id, now)
+    _retire_stale_brain_recommendations(db, business_id, now, affirmed, history_days, product_ids)
     db.commit()
     # Re-read: _evaluate_due_brain_predictions()/the loop above may have
     # changed accuracy_score/prediction rows since meta was first computed.
@@ -6182,67 +6248,44 @@ def business_brain(user: User = Depends(require_ai_access), db: Session = Depend
         # performing (or just performed) the refresh — read whatever is
         # currently stored rather than double-computing.
     meta = _business_brain_meta(db, user.business_id)
-    # Overview is current-state only. Once an item is acted on or dismissed it
-    # leaves the active brief and remains available through History below.
-    rows = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.business_id == user.business_id, BusinessBrainRecommendation.status.in_(["new", "opened"])).order_by(BusinessBrainRecommendation.updated_at.desc()).limit(30).all()
+    now = datetime.utcnow()
+    # Quiet business: no dirty trigger for a while, but a forecast window has
+    # closed. Evaluate only genuinely-due rows so their Outcome becomes known
+    # and they leave "Coming Up". Skipped when we just refreshed above.
+    if business and not business.business_brain_dirty:
+        due_exists = db.query(BusinessBrainPrediction.id).filter(
+            BusinessBrainPrediction.business_id == user.business_id,
+            BusinessBrainPrediction.actual_units.is_(None),
+            BusinessBrainPrediction.target_at <= now,
+        ).first()
+        if due_exists is not None:
+            _evaluate_due_brain_predictions(db, user.business_id, now)
+            db.commit()
+            meta = _business_brain_meta(db, user.business_id)
+    # ACTIVE brief only — current, unresolved items. Acted / dismissed / auto-
+    # resolved items are never here; they live in History, which is paginated
+    # via GET /business-brain/history and never shipped whole to the dashboard.
+    rows = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.business_id == user.business_id, BusinessBrainRecommendation.status.in_(RECOMMENDATION_ACTIVE_STATUSES)).order_by(BusinessBrainRecommendation.updated_at.desc()).limit(30).all()
     rows.sort(key=lambda row: {"critical": 0, "important": 1, "opportunity": 2}.get(row.priority, 3))
     if user.role == "staff": rows = [r for r in rows if r.kind == "stock_review"]
     def rec_out(r): return {"id": r.id, "kind": r.kind, "priority": r.priority, "title": r.title, "summary": r.summary, "evidence": json.loads(r.evidence_json or "{}"), "status": r.status, "updated_at": to_utc_iso(r.updated_at)}
-    # Business Brain History is a bounded read over records this engine already
-    # stores. It does not invent a second intelligence system or persist a new
-    # copy of the same insight: resolved recommendations and evaluated forecasts
-    # are projected into a small, consistently-shaped timeline for the UI.
-    history_recommendations_query = db.query(BusinessBrainRecommendation).filter(
-        BusinessBrainRecommendation.business_id == user.business_id,
-        BusinessBrainRecommendation.status.in_(["acted", "dismissed"]),
-    )
-    if user.role == "staff":
-        history_recommendations_query = history_recommendations_query.filter(BusinessBrainRecommendation.kind == "stock_review")
-    history_recommendations = history_recommendations_query.order_by(BusinessBrainRecommendation.updated_at.desc()).limit(40).all()
-    history_events = []
-    for row in history_recommendations:
-        occurred_at = row.acted_at if row.status == "acted" else row.dismissed_at
-        occurred_at = occurred_at or row.updated_at
-        category = "Completed action" if row.status == "acted" else ("Resolved warning" if row.kind == "stock_review" else "Earlier recommendation")
-        history_events.append({
-            "type": "recommendation", "category": category, "title": row.title,
-            "summary": row.summary, "status": row.status, "priority": row.priority,
-            "occurred_at": to_utc_iso(occurred_at), "_sort_at": occurred_at,
-        })
-    if user.role != "staff":
-        evaluated_predictions = (
-            db.query(BusinessBrainPrediction, Product.name)
-            .join(Product, Product.id == BusinessBrainPrediction.product_id)
-            .filter(
-                BusinessBrainPrediction.business_id == user.business_id,
-                Product.business_id == user.business_id,
-                BusinessBrainPrediction.actual_units.isnot(None),
-            )
-            .order_by(BusinessBrainPrediction.evaluated_at.desc())
-            .limit(40)
-            .all()
-        )
-        for prediction, product_name in evaluated_predictions:
-            occurred_at = prediction.evaluated_at or prediction.target_at
-            accuracy = round(prediction.accuracy_score * 100, 1) if prediction.accuracy_score is not None else None
-            accuracy_text = f" Accuracy: {accuracy:g}%." if accuracy is not None else ""
-            history_events.append({
-                "type": "forecast",
-                "category": "Seasonal forecast" if prediction.kind == "seasonal" else "Demand forecast",
-                "title": f"{product_name} forecast evaluated",
-                "summary": f"Forecast {prediction.predicted_units:g} units; actual sales were {prediction.actual_units:g} units.{accuracy_text}",
-                "status": "evaluated", "occurred_at": to_utc_iso(occurred_at), "_sort_at": occurred_at,
-            })
-    history_events.sort(key=lambda event: event["_sort_at"] or datetime.min, reverse=True)
-    for event in history_events:
-        event.pop("_sort_at", None)
-    output = {"learning": meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS, "history_days": meta["history_days"], "currency": business.currency if business else "USD ($)", "attention": [rec_out(r) for r in rows], "recommendations": [rec_out(r) for r in rows], "history": history_events[:60], "learning_message": "Cauldra is still learning this part of your business. Continue recording sales and closing business days to build reliable predictions." if meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS else None}
+    output = {"learning": meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS, "history_days": meta["history_days"], "currency": business.currency if business else "USD ($)", "attention": [rec_out(r) for r in rows], "recommendations": [rec_out(r) for r in rows], "history_available": True, "learning_message": "Cauldra is still learning this part of your business. Continue recording sales and closing business days to build reliable predictions." if meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS else None}
     if user.role != "staff":
         memories = db.query(BusinessBrainMemory).filter(BusinessBrainMemory.business_id == user.business_id).order_by(BusinessBrainMemory.last_observed_at.desc()).limit(20).all()
-        predictions = db.query(BusinessBrainPrediction, Product.name).join(Product, Product.id == BusinessBrainPrediction.product_id).filter(BusinessBrainPrediction.business_id == user.business_id, BusinessBrainPrediction.actual_units.is_(None)).order_by(BusinessBrainPrediction.forecast_at.desc()).limit(20).all()
+        # COMING UP = what is likely to matter next: only forecasts whose window
+        # is still open, and only the newest one per product per kind so a
+        # standing condition never stacks near-identical rows.
+        open_predictions = db.query(BusinessBrainPrediction, Product.name).join(Product, Product.id == BusinessBrainPrediction.product_id).filter(BusinessBrainPrediction.business_id == user.business_id, Product.business_id == user.business_id, BusinessBrainPrediction.actual_units.is_(None), BusinessBrainPrediction.target_at >= now).order_by(BusinessBrainPrediction.forecast_at.desc()).all()
+        seen_pred: set = set(); coming = []
+        for p, name in open_predictions:
+            key = (p.product_id, p.kind)
+            if key in seen_pred: continue
+            seen_pred.add(key)
+            coming.append({"product_name": name, "predicted_units": p.predicted_units, "target_at": to_utc_iso(p.target_at), "confidence": _brain_confidence_label(p.confidence), "evidence": json.loads(p.evidence_json or "{}")})
+            if len(coming) >= 8: break
         actions_taken = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.business_id == user.business_id, BusinessBrainRecommendation.status == "acted").count()
         revenue_at_risk = _brain_revenue_at_risk(db, user.business_id)
-        output.update({"memory": [{"statement": m.statement, "evidence": json.loads(m.evidence_json or "{}"), "confidence": _brain_confidence_label(m.confidence), "last_observed_at": to_utc_iso(m.last_observed_at)} for m in memories], "coming": [{"product_name": name, "predicted_units": p.predicted_units, "target_at": to_utc_iso(p.target_at), "confidence": _brain_confidence_label(p.confidence), "evidence": json.loads(p.evidence_json or "{}")} for p, name in predictions], "outcomes": {"evaluated_predictions": meta["evaluated_predictions"], "accuracy": round(meta["prior_accuracy"] * 100, 1) if meta["prior_accuracy"] is not None else None, "accuracy_trend": meta["accuracy_trend"], "actions_taken": actions_taken, "revenue_at_risk": revenue_at_risk, "message": "Prediction outcomes will appear after forecast periods complete." if not meta["evaluated_predictions"] else None}})
+        output.update({"memory": [{"statement": m.statement, "evidence": json.loads(m.evidence_json or "{}"), "confidence": _brain_confidence_label(m.confidence), "last_observed_at": to_utc_iso(m.last_observed_at), "first_seen": to_utc_iso(m.created_at), "reinforced": bool(m.last_observed_at and m.created_at and (m.last_observed_at - m.created_at) > timedelta(days=1))} for m in memories], "coming": coming, "outcomes": {"evaluated_predictions": meta["evaluated_predictions"], "accuracy": round(meta["prior_accuracy"] * 100, 1) if meta["prior_accuracy"] is not None else None, "accuracy_trend": meta["accuracy_trend"], "actions_taken": actions_taken, "revenue_at_risk": revenue_at_risk, "message": "Prediction outcomes will appear after forecast periods complete." if not meta["evaluated_predictions"] else None}})
     return output
 
 @app.post("/business-brain/recommendations/{recommendation_id}/action")
@@ -6258,6 +6301,117 @@ def action_business_brain_recommendation(recommendation_id: int, payload: Busine
     else: row.dismissed_at = now
     add_audit(db, user, "BUSINESS_BRAIN_RECOMMENDATION_" + action.upper(), f"Updated Business Brain recommendation #{row.id} to {action}."); db.commit()
     return {"id": row.id, "status": row.status}
+
+# --- Business Brain History (long-term archive, paginated at the database) ---
+BRAIN_HISTORY_RANGE_DAYS = {"week": 7, "month": 31, "quarter": 92, "3months": 92, "year": 366}
+
+def _brain_history_window(range_key: str, date_from: Optional[str], date_to: Optional[str], now: datetime):
+    """Resolve a range keyword (or an explicit custom YYYY-MM-DD span) into a
+    (start, end) datetime pair for the History filter. 'all'/unknown => no bound."""
+    if range_key == "custom":
+        try:
+            start = datetime.fromisoformat(date_from) if date_from else None
+            end = (datetime.fromisoformat(date_to) + timedelta(days=1)) if date_to else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Custom History dates must be YYYY-MM-DD.")
+        return start, end
+    days = BRAIN_HISTORY_RANGE_DAYS.get(range_key)
+    return (now - timedelta(days=days), None) if days else (None, None)
+
+def _brain_prediction_outcome(accuracy_score: Optional[float]) -> Optional[str]:
+    """A plain outcome label derived only from the already-measured accuracy of
+    a completed forecast — never a fabricated confidence."""
+    if accuracy_score is None:
+        return None
+    if accuracy_score >= 0.7:
+        return "Confirmed"
+    if accuracy_score >= 0.4:
+        return "Partly confirmed"
+    return "Missed"
+
+@app.get("/business-brain/history")
+def business_brain_history(
+    type: str = Query("all"),
+    range: str = Query("all"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=50),
+    user: User = Depends(require_ai_access), db: Session = Depends(get_db),
+):
+    """Paginated long-term Business Brain archive. Filtering and pagination
+    happen in the database — the browser never downloads a whole multi-year
+    history to filter it locally. Every row is a record this engine already
+    stores (resolved/acted/dismissed recommendations, evaluated forecasts);
+    no separate history ledger is written."""
+    now = datetime.utcnow()
+    staff = user.role == "staff"
+    want = (type or "all").strip().lower()
+    range_key = (range or "all").strip().lower()
+    start, end = _brain_history_window(range_key, date_from, date_to, now)
+    want_recs = want in ("all", "attention", "recommendations")
+    want_preds = (want in ("all", "predictions", "outcomes")) and not staff
+    # Over-fetch bound per source: enough to serve this page after the merge,
+    # never the whole table. Each source is independently ordered newest-first,
+    # so the merged slice [offset:offset+limit] is exact once each source has at
+    # least offset+limit+1 rows (or is fully exhausted).
+    take = offset + limit + 1
+    events: List[Dict[str, Any]] = []
+
+    if want_recs:
+        rq = db.query(BusinessBrainRecommendation).filter(
+            BusinessBrainRecommendation.business_id == user.business_id,
+            BusinessBrainRecommendation.status.in_(RECOMMENDATION_HISTORY_STATUSES),
+        )
+        if staff or want == "attention":
+            rq = rq.filter(BusinessBrainRecommendation.kind == "stock_review")
+        elif want == "recommendations":
+            rq = rq.filter(BusinessBrainRecommendation.kind != "stock_review")
+        if start is not None:
+            rq = rq.filter(BusinessBrainRecommendation.updated_at >= start)
+        if end is not None:
+            rq = rq.filter(BusinessBrainRecommendation.updated_at < end)
+        for row in rq.order_by(BusinessBrainRecommendation.updated_at.desc()).limit(take).all():
+            occurred_at = row.acted_at if row.status == "acted" else (row.dismissed_at if row.status == "dismissed" else None)
+            occurred_at = occurred_at or row.updated_at
+            category = ("Completed action" if row.status == "acted"
+                        else "Dismissed" if row.status == "dismissed"
+                        else "Resolved warning" if row.kind == "stock_review"
+                        else "Resolved automatically")
+            events.append({"type": "recommendation", "category": category, "title": row.title,
+                           "summary": row.summary, "status": row.status, "priority": row.priority,
+                           "occurred_at": to_utc_iso(occurred_at), "_sort": occurred_at})
+
+    if want_preds:
+        pq = (db.query(BusinessBrainPrediction, Product.name)
+              .join(Product, Product.id == BusinessBrainPrediction.product_id)
+              .filter(BusinessBrainPrediction.business_id == user.business_id,
+                      Product.business_id == user.business_id,
+                      BusinessBrainPrediction.actual_units.isnot(None)))
+        if start is not None:
+            pq = pq.filter(func.coalesce(BusinessBrainPrediction.evaluated_at, BusinessBrainPrediction.target_at) >= start)
+        if end is not None:
+            pq = pq.filter(func.coalesce(BusinessBrainPrediction.evaluated_at, BusinessBrainPrediction.target_at) < end)
+        for prediction, product_name in pq.order_by(BusinessBrainPrediction.evaluated_at.desc()).limit(take).all():
+            occurred_at = prediction.evaluated_at or prediction.target_at
+            outcome = _brain_prediction_outcome(prediction.accuracy_score)
+            accuracy = round(prediction.accuracy_score * 100, 1) if prediction.accuracy_score is not None else None
+            acc_text = f" Accuracy {accuracy:g}%." if accuracy is not None else ""
+            events.append({"type": "forecast",
+                           "category": "Seasonal forecast" if prediction.kind == "seasonal" else "Demand forecast",
+                           "title": f"{product_name} forecast evaluated",
+                           "summary": f"Forecast {prediction.predicted_units:g} units; actual {prediction.actual_units:g} units.{acc_text}",
+                           "status": "evaluated", "outcome": outcome,
+                           "occurred_at": to_utc_iso(occurred_at), "_sort": occurred_at})
+
+    events.sort(key=lambda e: e["_sort"] or datetime.min, reverse=True)
+    window = events[offset:offset + limit + 1]
+    has_more = len(window) > limit
+    window = window[:limit]
+    for e in window:
+        e.pop("_sort", None)
+    return {"events": window, "offset": offset, "limit": limit, "has_more": has_more,
+            "type": want, "range": range_key}
 
 # -----------------------------------------------------------------------------
 # EXPENSES
@@ -8679,6 +8833,149 @@ def ensure_verification_refund(db: Session, row, transaction_reference: str, pro
 
 
 # -----------------------------------------------------------------------------
+# EMAIL VERIFICATION BEFORE PAYSTACK (new-business onboarding)
+#
+# The person registering a business must prove they control the email address
+# BEFORE Cauldra initialises any Paystack transaction for them. This reuses the
+# project's already-configured Supabase project (SUPABASE_URL / SUPABASE_SECRET_KEY
+# via supabase_client.py) and Supabase Auth's own magic-link email plus its
+# user.email_confirmed_at state. No new table, no new column, no second email
+# provider, no custom verification codes: Supabase sends the email and Supabase
+# is the ONLY source of truth this code trusts. It sits strictly between the
+# "enter email" step and /onboarding/payment/init — the rest of onboarding,
+# Paystack, payment verification and business creation are untouched.
+# -----------------------------------------------------------------------------
+# Where Supabase should send the guest after they click the verification link.
+# Must also be added to the Supabase project's Auth "Redirect URLs" allow-list.
+SUPABASE_EMAIL_REDIRECT_URL = os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "").strip().rstrip("/")
+ONBOARDING_EMAIL_RESEND_SECONDS = int(os.getenv("ONBOARDING_EMAIL_RESEND_SECONDS", "60"))
+
+def _supabase_auth_or_503():
+    """The trusted server-side Supabase Auth client. 503 (never a silent pass)
+    when Supabase is not configured — email verification is a hard requirement."""
+    try:
+        client = get_supabase_client(required=False)
+    except SupabaseConfigurationError as exc:
+        raise HTTPException(status_code=503, detail="Email verification is not available right now. Please contact support.") from exc
+    if client is None:
+        raise HTTPException(status_code=503, detail="Email verification is not available right now. Please contact support.")
+    return client.auth
+
+def _supabase_email_verify_redirect(request: Request, plan: str, interval: str) -> str:
+    base = (SUPABASE_EMAIL_REDIRECT_URL or SUPPLY_AI_FRONTEND_URL
+            or str(paystack_callback_url(request)).rstrip("/"))
+    from urllib.parse import urlencode
+    # plan/interval are public catalogue values, never sensitive data.
+    return base.rstrip("/") + "/?" + urlencode({"cauldra_email_verify": "1", "ev_plan": plan, "ev_interval": interval})
+
+def _supabase_email_confirmed(email: str) -> Optional[bool]:
+    """True / False from Supabase's own user record for this email; None if
+    Supabase has never seen it. Uses admin.generate_link purely as an O(1)
+    lookup-by-email — it returns the user record and does NOT send an email."""
+    email_l = (email or "").strip().lower()
+    if not email_l:
+        return None
+    auth = _supabase_auth_or_503()
+    try:
+        resp = auth.admin.generate_link({"type": "magiclink", "email": email_l})
+    except Exception as exc:
+        msg = str(getattr(exc, "message", "") or exc).lower()
+        if any(m in msg for m in ("not found", "user_not_found", "no user", "does not exist")):
+            return None
+        raise HTTPException(status_code=502, detail="We couldn't check your verification status right now. Please try again.") from exc
+    user = getattr(resp, "user", None)
+    if user is None:
+        return None
+    return bool(getattr(user, "email_confirmed_at", None) or getattr(user, "confirmed_at", None))
+
+def _validated_onboarding_plan_interval(plan, interval):
+    p = str(plan or "").strip().lower()
+    if p not in PLAN_CONFIG:
+        raise HTTPException(status_code=400, detail="Please choose a valid subscription plan.")
+    i = str(interval or "monthly").strip().lower()
+    return p, (i if i in ("monthly", "annual") else "monthly")
+
+class OnboardingEmailVerifyRequest(BaseModel):
+    email: EmailStr
+    plan: str
+    billing_interval: str = "monthly"
+
+@app.post("/onboarding/email/verify")
+def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request, db: Session = Depends(get_db)):
+    """Send (or resend) a Supabase magic-link verification email to the address
+    the guest wants to register/pay with. This NEVER claims the email is
+    verified — it only asks Supabase to send its own email. Calling it again is
+    a resend; Supabase enforces its own per-email cooldown and that error is
+    surfaced as a friendly 'please wait' message."""
+    client_ip = request.client.host if request and request.client else "unknown"
+    check_rate_limit(db, "onboarding-email-verify-ip", client_ip)
+    email_l = str(data.email).strip().lower()
+    check_rate_limit(db, "onboarding-email-verify-email", email_l)
+    plan, interval = _validated_onboarding_plan_interval(data.plan, data.billing_interval)
+
+    # Already verified in Supabase -> do not send another email; let them continue.
+    if _supabase_email_confirmed(email_l) is True:
+        return {"status": "verified", "email": email_l, "plan": plan, "billing_interval": interval}
+
+    auth = _supabase_auth_or_503()
+    redirect = _supabase_email_verify_redirect(request, plan, interval)
+    try:
+        auth.sign_in_with_otp({
+            "email": email_l,
+            "options": {"email_redirect_to": redirect, "should_create_user": True},
+        })
+    except Exception as exc:
+        detail = str(getattr(exc, "message", "") or exc).lower()
+        if any(m in detail for m in ("rate", "limit", "too many", "seconds", "429")):
+            record_failure(db, "onboarding-email-verify-email", email_l)
+            raise HTTPException(status_code=429, detail="Please wait a little before requesting another verification email.") from exc
+        raise HTTPException(status_code=502, detail="We couldn't send the verification email right now. Please try again.") from exc
+    return {"status": "sent", "email": email_l, "plan": plan, "billing_interval": interval,
+            "resend_after_seconds": ONBOARDING_EMAIL_RESEND_SECONDS}
+
+class OnboardingEmailConfirmRequest(BaseModel):
+    access_token: str = ""
+    email: Optional[EmailStr] = None
+
+@app.post("/onboarding/email/verify/confirm")
+def onboarding_email_verify_confirm(data: OnboardingEmailConfirmRequest, request: Request, db: Session = Depends(get_db)):
+    """Called when the guest returns from the Supabase link. Verification is
+    decided ONLY from trusted Supabase state:
+      * if a Supabase session access token is supplied (from the link's URL
+        fragment), it is validated WITH Supabase (auth.get_user) and the
+        confirmed email is read from the returned user record;
+      * the email is then re-checked against Supabase's stored user state.
+    A URL parameter such as ?verified=true, or a frontend boolean, is never
+    trusted. The frontend-supplied email is only ever a lookup key against
+    Supabase, never proof on its own."""
+    client_ip = request.client.host if request and request.client else "unknown"
+    check_rate_limit(db, "onboarding-email-confirm-ip", client_ip)
+    token = str(data.access_token or "").strip()
+    auth = _supabase_auth_or_503()
+
+    token_email = None
+    if token:
+        try:
+            resp = auth.get_user(token)
+            user = getattr(resp, "user", None)
+        except Exception:
+            user = None
+        if user is not None and getattr(user, "email", None):
+            confirmed = getattr(user, "email_confirmed_at", None) or getattr(user, "confirmed_at", None)
+            if confirmed:
+                token_email = str(user.email).strip().lower()
+
+    check_email = (str(data.email).strip().lower() if data.email else "") or token_email
+    if not check_email:
+        raise HTTPException(status_code=400, detail="We couldn't confirm this verification link. Please request a new verification email.")
+
+    if _supabase_email_confirmed(check_email) is not True:
+        raise HTTPException(status_code=400, detail="We couldn't confirm this verification link. It may have expired. Please request a new verification email.")
+    if token_email and token_email != check_email:
+        raise HTTPException(status_code=400, detail="The verified email does not match the email you entered. Please verify the correct address.")
+    return {"status": "verified", "email": check_email}
+
+# -----------------------------------------------------------------------------
 # NEW-BUSINESS ONBOARDING: PAY-BEFORE-REGISTER
 #
 # Flow: Choose Plan -> verify card with Paystack (no business/user exists yet)
@@ -8720,6 +9017,12 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
     interval = str(data.billing_interval or "monthly").strip().lower()
     if interval not in ("monthly", "annual"):
         interval = "monthly"
+
+    # GATE: the email must be verified through Supabase BEFORE any Paystack
+    # transaction is initialised. Checked against Supabase's own user state on
+    # every call, so this also blocks a direct API request that skips the UI.
+    if _supabase_email_confirmed(str(data.email).strip().lower()) is not True:
+        raise HTTPException(status_code=403, detail="Please verify your email address before continuing to payment.")
 
     amount_kobo = PAYSTACK_TRIAL_VERIFICATION_AMOUNT_KOBO
     reference = f"cauldra_onboard_{secrets.token_hex(10)}"

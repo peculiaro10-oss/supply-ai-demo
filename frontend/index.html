@@ -737,26 +737,69 @@
             <!-- VIEW 1.75: EMAIL FOR PAYSTACK CARD VERIFICATION (new business only) -->
             <div id="biz-auth-view-payment-email" class="space-y-4 text-xs hidden">
                 <div class="flex items-center justify-between text-xs pb-2 border-b border-borderCol">
-                    <span class="font-bold text-textMain">Verify Payment Method</span>
-                    <button type="button" onclick="switchBizAuthView('plan')" class="text-primary hover:underline cursor-pointer"><i class="fa-solid fa-arrow-left mr-1"></i> Back</button>
+                    <span class="font-bold text-textMain">Verify Your Email</span>
+                    <button type="button" onclick="changeSelectedPlan()" class="text-primary hover:underline cursor-pointer"><i class="fa-solid fa-arrow-left mr-1"></i> Back</button>
                 </div>
 
                 <div class="flex items-center justify-between gap-2 rounded-xl border border-primary/30 bg-primary/10 px-3 py-2">
                     <span class="text-textMain font-semibold flex items-center gap-1.5"><i class="fa-solid fa-circle-check text-primary"></i> <span id="payment-email-plan-text">No plan selected</span></span>
                 </div>
 
-                <p class="text-textSec leading-relaxed">Enter your email to continue to secure card verification. Paystack will temporarily authorize ₦50 to verify your card. This is not your subscription payment; a refund is initiated after successful verification and tracked until Paystack confirms completion. Your selected plan price is billed only after the 14-day free trial.</p>
-
-                <div>
-                    <label class="block font-medium text-textSec mb-1">Email Address <span class="text-danger">*</span></label>
-                    <input type="email" id="payment-email-input" required placeholder="you@business.com" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-medium">
+                <!-- STATE 1: enter the subscription email -->
+                <div id="ev-state-1" class="space-y-3">
+                    <p class="text-textSec leading-relaxed">Enter the email you'll use for this subscription. We'll send a verification link to confirm you control it before continuing to payment.</p>
+                    <div>
+                        <label class="block font-medium text-textSec mb-1">Email Address <span class="text-danger">*</span></label>
+                        <input type="email" id="payment-email-input" required placeholder="you@business.com" oninput="onPaymentEmailInputChanged()" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-medium">
+                    </div>
+                    <button type="button" id="ev-verify-btn" onclick="startEmailVerification()" class="w-full bg-primary hover:bg-primaryHover text-white py-3 rounded-xl font-semibold transition shadow-md cursor-pointer flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-envelope-circle-check"></i> Verify Email
+                    </button>
                 </div>
 
-                <div class="pt-1">
-                    <button type="button" id="payment-email-continue-btn" onclick="startOnboardingPaymentVerification()" class="w-full bg-primary hover:bg-primaryHover text-white py-3 rounded-xl font-semibold transition shadow-md cursor-pointer flex items-center justify-center gap-2">
-                        <i class="fa-solid fa-lock"></i> Continue to Secure Payment
+                <!-- STATE 2: verification email sent, waiting for Supabase confirmation -->
+                <div id="ev-state-2" class="space-y-3 hidden">
+                    <div class="rounded-xl border border-borderCol bg-bgMain p-4 text-center space-y-2">
+                        <i class="fa-solid fa-envelope-open-text text-2xl text-primary"></i>
+                        <p class="text-textMain font-semibold">Verify your email</p>
+                        <p class="text-textSec leading-relaxed">We've sent a verification link to<br><span id="ev-email" class="text-textMain font-semibold break-all"></span></p>
+                        <p class="text-textSec leading-relaxed">Open the email and verify your address to continue with your subscription.</p>
+                        <p class="text-textSec text-[11px] flex items-center justify-center gap-1.5 pt-1"><i class="fa-solid fa-spinner fa-spin"></i> Waiting for verification&hellip;</p>
+                    </div>
+                    <button type="button" id="ev-check-btn" onclick="checkEmailVerification(true)" class="w-full bg-primary hover:bg-primaryHover text-white py-2.5 rounded-xl font-semibold transition cursor-pointer flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-rotate-right"></i> I've verified &mdash; check now
                     </button>
-                    <p class="text-center text-textSec text-[10px] mt-2"><i class="fa-solid fa-shield-halved mr-1"></i> Payments are securely processed by Paystack. We never see or store your full card details.</p>
+                    <button type="button" id="ev-resend-btn" onclick="resendEmailVerification()" class="w-full bg-bgMain border border-borderCol hover:border-primary text-textMain py-2.5 rounded-xl font-semibold transition cursor-pointer flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed">
+                        <i class="fa-solid fa-paper-plane"></i> <span id="ev-resend-label">Resend verification email</span>
+                    </button>
+                    <button type="button" onclick="evBackToState1()" class="w-full text-textSec hover:text-textMain text-[11px] cursor-pointer">Use a different email</button>
+                </div>
+
+                <!-- STATE 3: email verified by Supabase -->
+                <div id="ev-state-3" class="space-y-3 hidden">
+                    <div class="rounded-xl border border-success/40 bg-success/10 p-4 text-center space-y-2">
+                        <i class="fa-solid fa-circle-check text-2xl text-success"></i>
+                        <p class="text-textMain font-semibold">Email verified <span class="text-success">&check;</span></p>
+                        <p class="text-textSec">Your email has been verified successfully.<br><span id="ev-email-verified" class="text-textMain font-semibold break-all"></span></p>
+                    </div>
+                    <p class="text-textSec leading-relaxed">Paystack will temporarily authorize ₦50 to verify your card. This is not your subscription payment; a refund is initiated after successful verification and tracked until Paystack confirms completion. Your selected plan price is billed only after the 14-day free trial.</p>
+                    <button type="button" id="ev-continue-paystack-btn" onclick="continueToPaystackAfterVerify()" class="w-full bg-primary hover:bg-primaryHover text-white py-3 rounded-xl font-semibold transition shadow-md cursor-pointer flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed">
+                        <i class="fa-solid fa-lock"></i> Continue to Paystack
+                    </button>
+                    <p class="text-center text-textSec text-[10px]"><i class="fa-solid fa-shield-halved mr-1"></i> Payments are securely processed by Paystack. We never see or store your full card details.</p>
+                    <button type="button" onclick="evBackToState1()" class="w-full text-textSec hover:text-textMain text-[11px] cursor-pointer">Use a different email</button>
+                </div>
+
+                <!-- STATE 4: verification link expired / invalid / already used -->
+                <div id="ev-state-4" class="space-y-3 hidden">
+                    <div class="rounded-xl border border-danger/40 bg-danger/10 p-4 text-center space-y-2">
+                        <i class="fa-solid fa-triangle-exclamation text-2xl text-danger"></i>
+                        <p class="text-textMain font-semibold">Verification expired or failed</p>
+                        <p id="ev-state-4-msg" class="text-textSec leading-relaxed">We couldn't confirm this verification link.</p>
+                    </div>
+                    <button type="button" onclick="evBackToState1(true)" class="w-full bg-primary hover:bg-primaryHover text-white py-3 rounded-xl font-semibold transition shadow-md cursor-pointer flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-paper-plane"></i> Send New Verification Email
+                    </button>
                 </div>
             </div>
 

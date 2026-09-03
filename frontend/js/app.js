@@ -1364,6 +1364,9 @@
                     markActionTaken: "Mark action taken", dismiss: "Dismiss",
                     noRecommendationsSupported: "No recommendations are currently supported by the available data.",
                     updateRecommendationFailed: "Unable to update this recommendation right now.",
+                    historyPeriod: "Period", historyLoading: "Loading history…", loadOlder: "Load older", historyLoadFailed: "Unable to load more history right now.",
+                    rangeAll: "All time", rangeWeek: "This week", rangeMonth: "This month", rangeQuarter: "Last 3 months", rangeYear: "Last year",
+                    historyAttention: "Attention", historyPredictions: "Predictions", memoryReinforced: "Reinforced", memoryUpdated: "Updated as the pattern changed",
                     dashboardTitle: "What Cauldra sees", dashboardDefaultCopy: "Review the business priorities that deserve attention.",
                     viewAll: "View all →",
                 },
@@ -17317,8 +17320,9 @@
             } else if (viewName === 'payment-email') {
                 if (!onboardingSelectedPlan) { switchBizAuthView('plan'); return; }
                 document.getElementById("biz-auth-view-payment-email").classList.remove("hidden");
-                titleEl.innerHTML = `<i class="fa-solid fa-credit-card text-primary"></i> Verify Payment Method`;
+                titleEl.innerHTML = `<i class="fa-solid fa-envelope-circle-check text-primary"></i> Verify Your Email`;
                 renderPaymentEmailPlanBanner();
+                evShowState(evVerifiedEmail ? 3 : 1);
             } else if (viewName === 'payment-verifying') {
                 document.getElementById("biz-auth-view-payment-verifying").classList.remove("hidden");
                 titleEl.innerHTML = `<i class="fa-solid fa-shield-halved text-primary"></i> Verifying Payment`;
@@ -17352,6 +17356,12 @@
         let onboardingSelectedInterval = "monthly"; // "monthly" | "annual" — matches backend's existing values exactly
         let publicPlanCatalog = null;           // cached response from GET /plans (server-authoritative pricing)
         let verifiedOnboardingReference = null; // set only after the backend independently confirms Paystack card verification; required to reach/submit registration
+        // --- Supabase email verification (gate BEFORE Paystack) ---
+        let evVerifiedEmail = null;        // the Supabase-verified email; the backend re-checks Supabase before Paystack regardless
+        let evResendCooldownUntil = 0;     // epoch ms (frontend guard; Supabase enforces its own per-email cooldown too)
+        let evResendTimer = null;
+        let evPollTimer = null;
+        let evVerifyChannel = null;        // BroadcastChannel: a verify completed in another tab updates this one
 
         function formatNaira(amount) {
             return "₦" + Number(amount || 0).toLocaleString("en-NG");
@@ -17549,12 +17559,14 @@
         function selectPlanAndContinue(planId) {
             onboardingSelectedPlan = planId;
             verifiedOnboardingReference = null; // changing plan always requires a fresh card verification
+            evResetVerification();
             switchBizAuthView('payment-email');
         }
 
         function changeSelectedPlan() {
             onboardingSelectedPlan = null;
             verifiedOnboardingReference = null;
+            evResetVerification();
             switchBizAuthView('plan');
         }
 
@@ -17566,15 +17578,15 @@
             el.textContent = `${p.label} • ${onboardingSelectedInterval === 'annual' ? 'Annual' : 'Monthly'} • ${formatNaira(price)}/${onboardingSelectedInterval === 'annual' ? 'year' : 'month'} after trial`;
         }
 
+        // Reached only from STATE 3 (email already verified through Supabase). The
+        // backend independently re-checks Supabase before it initialises Paystack,
+        // so this can never actually proceed for an unverified email.
         async function startOnboardingPaymentVerification() {
-            const email = document.getElementById("payment-email-input").value.trim();
-            if (!email || !email.includes('@')) {
-                showToast(t("common.enterValidEmail"), "error");
-                return;
-            }
+            const email = (evVerifiedEmail || '').trim();
+            if (!email) { evShowState(1); return; }
             if (!onboardingSelectedPlan) { switchBizAuthView('plan'); return; }
-            const btn = document.getElementById("payment-email-continue-btn");
-            btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Starting secure payment…`;
+            const btn = document.getElementById("ev-continue-paystack-btn");
+            if (btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Starting secure payment…`; }
             try {
                 const res = await fetch(`${API_URL}/onboarding/payment/init`, {
                     method: 'POST',
@@ -17590,7 +17602,172 @@
                 window.location.href = data.authorization_url;
             } catch (err) {
                 showToast(friendlyErrorMessage(err?.message || err, t("subscription.couldNotStartVerification")), "error");
-                btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-lock"></i> Continue to Secure Payment`;
+                if (btn) { btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-lock"></i> Continue to Paystack`; }
+            }
+        }
+        const continueToPaystackAfterVerify = startOnboardingPaymentVerification;
+
+        function evShowState(n) {
+            for (let i = 1; i <= 4; i++) document.getElementById('ev-state-' + i)?.classList.toggle('hidden', i !== n);
+            if (evPollTimer) { clearInterval(evPollTimer); evPollTimer = null; }
+            if (n === 3 && evVerifiedEmail) {
+                const e = document.getElementById('ev-email-verified'); if (e) e.textContent = evVerifiedEmail;
+            }
+            if (n === 2) evPollTimer = setInterval(() => checkEmailVerification(false), 5000);
+        }
+        function evResetVerification() {
+            evVerifiedEmail = null;
+            evResendCooldownUntil = 0;
+            if (evResendTimer) { clearInterval(evResendTimer); evResendTimer = null; }
+            if (evPollTimer) { clearInterval(evPollTimer); evPollTimer = null; }
+        }
+        function evBackToState1(focus) {
+            evResetVerification();
+            evShowState(1);
+            if (focus) document.getElementById('payment-email-input')?.focus();
+        }
+        function onPaymentEmailInputChanged() {
+            // Per spec: changing the email after verifying makes it unverified again.
+            if (evVerifiedEmail !== null || evResendTimer || evPollTimer) { evResetVerification(); evShowState(1); }
+        }
+        function evEnsureChannel() {
+            if (evVerifyChannel || typeof BroadcastChannel === 'undefined') return;
+            try {
+                evVerifyChannel = new BroadcastChannel('cauldra-email-verify');
+                evVerifyChannel.onmessage = (m) => {
+                    const d = (m && m.data) || {};
+                    if (!d.verified || !d.email) return;
+                    const want = (document.getElementById('payment-email-input')?.value || '').trim().toLowerCase();
+                    if (want && d.email.toLowerCase() !== want) return;
+                    evVerifiedEmail = d.email;
+                    if (d.plan && publicPlanCatalog && publicPlanCatalog[d.plan]) onboardingSelectedPlan = d.plan;
+                    if (d.interval === 'annual' || d.interval === 'monthly') onboardingSelectedInterval = d.interval;
+                    if (!document.getElementById('biz-auth-view-payment-email')?.classList.contains('hidden')) evShowState(3);
+                };
+            } catch (_) {}
+        }
+        function evBroadcastVerified() {
+            try {
+                evEnsureChannel();
+                evVerifyChannel?.postMessage({ verified: true, email: evVerifiedEmail, plan: onboardingSelectedPlan, interval: onboardingSelectedInterval });
+            } catch (_) {}
+        }
+        function evStartResendCooldown(ms) {
+            evResendCooldownUntil = Date.now() + Math.max(1000, ms || 60000);
+            const btn = document.getElementById('ev-resend-btn');
+            const label = document.getElementById('ev-resend-label');
+            if (evResendTimer) clearInterval(evResendTimer);
+            const tick = () => {
+                const left = Math.ceil((evResendCooldownUntil - Date.now()) / 1000);
+                if (left > 0) { if (btn) btn.disabled = true; if (label) label.textContent = `Resend in ${left}s`; }
+                else { clearInterval(evResendTimer); evResendTimer = null; if (btn) btn.disabled = false; if (label) label.textContent = 'Resend verification email'; }
+            };
+            tick();
+            evResendTimer = setInterval(tick, 1000);
+        }
+        async function evPostVerify(email) {
+            const res = await fetch(`${API_URL}/onboarding/email/verify`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, plan: onboardingSelectedPlan, billing_interval: onboardingSelectedInterval })
+            });
+            const data = await res.json().catch(() => ({}));
+            return { res, data };
+        }
+        async function startEmailVerification() {
+            const email = (document.getElementById('payment-email-input')?.value || '').trim();
+            if (!email || !email.includes('@')) { showToast(t("common.enterValidEmail"), "error"); return; }
+            if (!onboardingSelectedPlan) { switchBizAuthView('plan'); return; }
+            const btn = document.getElementById('ev-verify-btn');
+            if (btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Sending verification email…`; }
+            try {
+                const { res, data } = await evPostVerify(email);
+                if (!res.ok) throw new Error(showApiError(res, data, "We couldn't send the verification email. Please try again."));
+                if (data.status === 'verified') { evVerifiedEmail = data.email || email; evShowState(3); return; }
+                const e = document.getElementById('ev-email'); if (e) e.textContent = data.email || email;
+                evEnsureChannel();
+                evStartResendCooldown((data.resend_after_seconds || 60) * 1000);
+                evShowState(2);
+                showToast("Verification email sent.", "success");
+            } catch (err) {
+                showToast(friendlyErrorMessage(err?.message || err, "We couldn't send the verification email. Please try again."), "error");
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-envelope-circle-check"></i> Verify Email`; }
+            }
+        }
+        async function resendEmailVerification() {
+            if (Date.now() < evResendCooldownUntil) { showToast("Please wait before requesting another verification email.", "info"); return; }
+            const email = (document.getElementById('payment-email-input')?.value || '').trim();
+            if (!email) { evShowState(1); return; }
+            try {
+                const { res, data } = await evPostVerify(email);
+                if (res.status === 429) { evStartResendCooldown(60000); showToast(data.detail || "Please wait before requesting another verification email.", "info"); return; }
+                if (!res.ok) throw new Error(showApiError(res, data, "We couldn't resend the verification email."));
+                if (data.status === 'verified') { evVerifiedEmail = data.email || email; evShowState(3); return; }
+                evStartResendCooldown((data.resend_after_seconds || 60) * 1000);
+                showToast("Verification email sent.", "success");
+            } catch (err) {
+                showToast(friendlyErrorMessage(err?.message || err, "We couldn't resend the verification email."), "error");
+            }
+        }
+        async function checkEmailVerification(manual) {
+            const email = (evVerifiedEmail || document.getElementById('payment-email-input')?.value || '').trim();
+            if (!email) return;
+            const btn = document.getElementById('ev-check-btn');
+            if (manual && btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Checking…`; }
+            try {
+                const res = await fetch(`${API_URL}/onboarding/email/verify/confirm`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok && data.status === 'verified') {
+                    evVerifiedEmail = data.email || email;
+                    evBroadcastVerified();
+                    evShowState(3);
+                } else if (manual) {
+                    showToast(data.detail || "Not verified yet. Open the link in your email, then check again.", "info");
+                }
+            } catch (_) {
+                if (manual) showToast("We couldn't check verification just now. Please try again.", "error");
+            } finally {
+                if (manual && btn) { btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-rotate-right"></i> I've verified &mdash; check now`; }
+            }
+        }
+        // Return from the Supabase verification link: ?cauldra_email_verify=1 plus
+        // the session token in the URL fragment. The token is validated WITH
+        // Supabase server-side; a URL flag alone never counts as verified.
+        async function handleEmailVerifyReturn() {
+            const params = new URLSearchParams(window.location.search);
+            const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+            const accessToken = hashParams.get('access_token') || '';
+            const evPlan = params.get('ev_plan') || '';
+            const evInterval = params.get('ev_interval') || '';
+            window.history.replaceState({}, document.title, window.location.pathname);
+            if (!publicPlanCatalog) { try { await loadPublicPlanCatalog(); } catch (_) {} }
+            if (evPlan && publicPlanCatalog && publicPlanCatalog[evPlan]) onboardingSelectedPlan = evPlan;
+            if (evInterval === 'annual' || evInterval === 'monthly') onboardingSelectedInterval = evInterval;
+            openBusinessAuthModal();
+            if (!onboardingSelectedPlan) { switchBizAuthView('plan'); return; }
+            switchBizAuthView('payment-email');
+            try {
+                const res = await fetch(`${API_URL}/onboarding/email/verify/confirm`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ access_token: accessToken })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok && data.status === 'verified') {
+                    evVerifiedEmail = data.email;
+                    const inp = document.getElementById('payment-email-input'); if (inp) inp.value = data.email;
+                    evBroadcastVerified();
+                    evShowState(3);
+                    showToast("Email verified successfully.", "success");
+                } else {
+                    const msg = document.getElementById('ev-state-4-msg');
+                    if (msg) msg.textContent = data.detail || "We couldn't confirm this verification link. It may have expired.";
+                    evShowState(4);
+                }
+            } catch (_) {
+                evShowState(4);
             }
         }
 
@@ -22671,6 +22848,9 @@
 
         let businessBrainData = null;
         let businessBriefHistoryFilter = 'all';
+        // Long-term History is paginated at the backend (GET /business-brain/history).
+        // The browser holds only the page(s) the user has scrolled to — never years of rows.
+        let businessBriefHistory = { type: 'all', range: 'all', items: [], offset: 0, hasMore: false, loading: false, loaded: false };
         const brainEsc = value => escapeEmployeeHtml(String(value ?? ''));
         const brainPriorityClass = priority => priority === 'critical'
             ? 'border-danger/35 bg-danger/10 text-danger'
@@ -22852,12 +23032,17 @@
             document.getElementById('business-brain-loading').classList.remove('hidden');
             document.getElementById('business-brain-body').classList.add('hidden');
             businessBriefHistoryFilter = 'all';
+            businessBriefHistory = { type: 'all', range: 'all', items: [], offset: 0, hasMore: false, loading: false, loaded: false };
             try { renderBusinessBrain(await fetchBusinessBrain(), 'overview'); }
             catch (err) { document.getElementById('business-brain-loading').textContent = err.message || t("businessBrain.temporarilyUnavailable"); }
         }
 
         function closeBusinessBrainModal() { document.getElementById('business-brain-modal').classList.add('hidden'); }
-        function switchBusinessBrainTab(tab) { if (businessBrainData) renderBusinessBrain(businessBrainData, tab); }
+        function switchBusinessBrainTab(tab) {
+            if (!businessBrainData) return;
+            if (tab === 'history' && !businessBriefHistory.loaded && !businessBriefHistory.loading) { loadBusinessBriefHistory(true); return; }
+            renderBusinessBrain(businessBrainData, tab);
+        }
 
         function businessBriefRecommendationCard(row, staff) {
             const isActed = row.status === 'acted';
@@ -22875,10 +23060,14 @@
             return `<div class="business-brief-overview-grid">${businessBriefCard(t("businessBrain.needsYourAttention"), 'fa-bell', attentionRows.length ? 'text-warning' : 'text-success', attentionBody)}${businessBriefCard(t("businessBrain.comingUp"), 'fa-calendar-days', 'text-primary', comingBody)}${businessBriefCard(t("businessBrain.cauldraRecommends"), 'fa-lightbulb', 'text-success', recommendationBody)}${businessBriefCard(t("businessBrain.whatCauldraIsLearning"), 'fa-chart-simple', 'text-primary', learningBody)}</div>`;
         }
 
+        // Durable, reusable business knowledge — never an archive of every message.
+        // The engine dedupes by fingerprint (one row per pattern, reinforced in
+        // place), and withdraws a memory when its evidence is withdrawn, so this
+        // only has to present what is currently on file.
         function businessBriefMemoryCategory(row) {
             const evidence = row.evidence || {};
-            if (evidence.product_a && evidence.product_b) return {key:'relationships', label:t("businessBrain.memoryProductRelationships"), icon:'fa-link'};
-            if (evidence.week_of_year || evidence.cycles_observed) return {key:'seasonal', label:t("businessBrain.memorySeasonalPatterns"), icon:'fa-calendar'};
+            if (evidence.product_a && evidence.product_b) return {key:'products', label:t("businessBrain.memoryProductRelationships"), icon:'fa-link'};
+            if (evidence.week_of_year || evidence.cycles_observed) return {key:'seasonality', label:t("businessBrain.memorySeasonalPatterns"), icon:'fa-calendar'};
             if (evidence.average_daily_units != null || evidence.units_sold != null) return {key:'sales', label:t("businessBrain.memorySalesPatterns"), icon:'fa-chart-line'};
             return {key:'other', label:t("businessBrain.memoryOther"), icon:'fa-note-sticky'};
         }
@@ -22892,7 +23081,11 @@
                 if (!groups.has(category.key)) groups.set(category.key, {category, rows:[]});
                 groups.get(category.key).rows.push(row);
             });
-            return `<div class="business-brief-memory-groups">${Array.from(groups.values()).map(group => `<section class="business-brief-memory-group"><h4><i class="fa-solid ${group.category.icon} text-primary"></i>${brainEsc(group.category.label)}</h4>${group.rows.map(row => `<article class="business-brief-detail-row"><strong>${brainEsc(row.statement)}</strong><p>${brainEsc(row.confidence)} · last observed ${brainEsc(formatBusinessDate(row.last_observed_at, {dateStyle:'medium'}))}</p></article>`).join('')}</section>`).join('')}</div>`;
+            const memRow = row => {
+                const badge = row.reinforced ? `<span class="business-brief-mem-badge" title="${brainEsc(t("businessBrain.memoryUpdated"))}">${brainEsc(t("businessBrain.memoryReinforced"))}</span>` : '';
+                return `<article class="business-brief-detail-row"><div class="business-brief-detail-heading"><strong>${brainEsc(row.statement)}</strong>${badge}</div><p>${brainEsc(row.confidence)} · last observed ${brainEsc(formatBusinessDate(row.last_observed_at, {dateStyle:'medium'}))}</p></article>`;
+            };
+            return `<div class="business-brief-memory-groups">${Array.from(groups.values()).map(group => `<section class="business-brief-memory-group"><h4><i class="fa-solid ${group.category.icon} text-primary"></i>${brainEsc(group.category.label)}</h4>${group.rows.map(memRow).join('')}</section>`).join('')}</div>`;
         }
 
         function renderBusinessBriefOutcomes(data) {
@@ -22905,17 +23098,64 @@
             return `<section class="business-brief-outcomes"><h4><i class="fa-solid fa-bullseye text-primary"></i>${brainEsc(t("businessBrain.tabOutcomes"))}</h4><p>${brainEsc(forecastText)}</p>${impact.length ? `<p>${brainEsc(impact.join(' '))}</p>` : ''}</section>`;
         }
 
-        function setBusinessBriefHistoryFilter(filter) {
-            businessBriefHistoryFilter = ['all','recommendation','forecast'].includes(filter) ? filter : 'all';
+        async function loadBusinessBriefHistory(reset) {
+            if (businessBriefHistory.loading) return;
+            businessBriefHistory.loading = true;
+            if (reset) { businessBriefHistory.offset = 0; businessBriefHistory.items = []; businessBriefHistory.hasMore = false; }
             if (businessBrainData) renderBusinessBrain(businessBrainData, 'history');
+            try {
+                const p = new URLSearchParams({ type: businessBriefHistory.type, range: businessBriefHistory.range, offset: String(businessBriefHistory.offset), limit: '20' });
+                const res = await fetch(`${API_URL}/business-brain/history?${p.toString()}`, { credentials:'include', headers:{ 'Authorization':`Bearer ${authToken}`, 'Accept':'application/json' } });
+                if (!res.ok) throw new Error();
+                const d = await res.json();
+                const batch = Array.isArray(d.events) ? d.events : [];
+                businessBriefHistory.items = businessBriefHistory.items.concat(batch);
+                businessBriefHistory.offset += batch.length;
+                businessBriefHistory.hasMore = !!d.has_more;
+                businessBriefHistory.loaded = true;
+            } catch (_) { showToast(t("businessBrain.historyLoadFailed"), 'error'); }
+            finally { businessBriefHistory.loading = false; if (businessBrainData) renderBusinessBrain(businessBrainData, 'history'); }
+        }
+
+        function setBusinessBriefHistoryFilter(type) {
+            businessBriefHistory.type = ['all','attention','recommendations','predictions'].includes(type) ? type : 'all';
+            loadBusinessBriefHistory(true);
+        }
+        function setBusinessBriefHistoryRange(range) {
+            businessBriefHistory.range = ['all','week','month','quarter','year'].includes(range) ? range : 'all';
+            loadBusinessBriefHistory(true);
+        }
+
+        function businessBriefHistoryRowMarkup(row) {
+            const icon = row.type === 'forecast' ? 'fa-chart-line' : 'fa-lightbulb';
+            const outcome = row.outcome ? `<span class="business-brief-history-outcome outcome-${String(row.outcome).toLowerCase().replace(/[^a-z]+/g,'-')}">${brainEsc(row.outcome)}</span>` : '';
+            return `<article class="business-brief-history-row"><span class="business-brief-history-icon"><i class="fa-solid ${icon}"></i></span><div><div class="business-brief-history-meta"><span>${brainEsc(row.category || row.type)}</span><time>${brainEsc(formatBusinessDate(row.occurred_at, {dateStyle:'medium'}))}</time></div><strong>${brainEsc(row.title)}</strong><p>${brainEsc(row.summary)}</p>${outcome}</div></article>`;
         }
 
         function renderBusinessBriefHistory(data, staff) {
-            const filters = [{id:'all', label:t("businessBrain.historyAll")}, {id:'recommendation', label:t("businessBrain.historyRecommendations")}, ...(staff ? [] : [{id:'forecast', label:t("businessBrain.historyForecasts")}])];
-            const rows = (data.history || []).filter(row => businessBriefHistoryFilter === 'all' || row.type === businessBriefHistoryFilter);
-            const filterMarkup = `<div class="business-brief-history-filters" role="group" aria-label="Filter Business Brain history">${filters.map(filter => `<button type="button" class="${businessBriefHistoryFilter === filter.id ? 'is-active' : ''}" onclick="setBusinessBriefHistoryFilter('${filter.id}')">${brainEsc(filter.label)}</button>`).join('')}</div>`;
-            const rowsMarkup = rows.map(row => `<article class="business-brief-history-row"><span class="business-brief-history-icon"><i class="fa-solid ${row.type === 'forecast' ? 'fa-chart-line' : 'fa-lightbulb'}"></i></span><div><div class="business-brief-history-meta"><span>${brainEsc(row.category || row.type)}</span><time>${brainEsc(formatBusinessDate(row.occurred_at, {dateStyle:'medium'}))}</time></div><strong>${brainEsc(row.title)}</strong><p>${brainEsc(row.summary)}</p></div></article>`).join('') || businessBriefEmpty('fa-clock-rotate-left', t("businessBrain.historyEmpty"));
-            return `${filterMarkup}<div class="business-brief-history-list">${rowsMarkup}</div>${staff ? '' : renderBusinessBriefOutcomes(data)}`;
+            const typeFilters = [
+                {id:'all', label:t("businessBrain.historyAll")},
+                {id:'attention', label:t("businessBrain.historyAttention")},
+                ...(staff ? [] : [{id:'recommendations', label:t("businessBrain.historyRecommendations")}, {id:'predictions', label:t("businessBrain.historyPredictions")}]),
+            ];
+            const ranges = [
+                {id:'all', label:t("businessBrain.rangeAll")}, {id:'week', label:t("businessBrain.rangeWeek")},
+                {id:'month', label:t("businessBrain.rangeMonth")}, {id:'quarter', label:t("businessBrain.rangeQuarter")},
+                {id:'year', label:t("businessBrain.rangeYear")},
+            ];
+            const chips = `<div class="business-brief-history-filters" role="group" aria-label="Filter Business Brain history">${typeFilters.map(f => `<button type="button" class="${businessBriefHistory.type === f.id ? 'is-active' : ''}" onclick="setBusinessBriefHistoryFilter('${f.id}')">${brainEsc(f.label)}</button>`).join('')}</div>`;
+            const rangeSel = `<label class="business-brief-history-range"><span>${brainEsc(t("businessBrain.historyPeriod"))}</span><select onchange="setBusinessBriefHistoryRange(this.value)">${ranges.map(r => `<option value="${r.id}"${businessBriefHistory.range === r.id ? ' selected' : ''}>${brainEsc(r.label)}</option>`).join('')}</select></label>`;
+            const items = businessBriefHistory.items;
+            let body;
+            if (businessBriefHistory.loading && !items.length) body = businessBriefEmpty('fa-spinner fa-spin', t("businessBrain.historyLoading"));
+            else if (!items.length) body = businessBriefEmpty('fa-clock-rotate-left', t("businessBrain.historyEmpty"));
+            else {
+                const older = businessBriefHistory.hasMore
+                    ? `<button type="button" class="business-brief-more" onclick="loadBusinessBriefHistory(false)"${businessBriefHistory.loading ? ' disabled' : ''}>${brainEsc(businessBriefHistory.loading ? t("businessBrain.historyLoading") : t("businessBrain.loadOlder"))} <span aria-hidden="true">↓</span></button>`
+                    : '';
+                body = `<div class="business-brief-history-list">${items.map(businessBriefHistoryRowMarkup).join('')}</div>${older}`;
+            }
+            return `<div class="business-brief-history-controls">${chips}${rangeSel}</div>${body}${staff ? '' : renderBusinessBriefOutcomes(data)}`;
         }
 
         function renderBusinessBrain(data, tab = 'overview') {
@@ -25040,6 +25280,10 @@
         // finish before deciding whether a direct Hub/onboarding URL may open.
         loadData().then(async () => {
             const params = new URLSearchParams(window.location.search);
+            if (params.get('cauldra_email_verify') === '1') {
+                await handleEmailVerifyReturn();
+                return;
+            }
             const hasPaymentReturn = !!(params.get('reference') || params.get('trxref'));
             if (hasPaymentReturn) {
                 await handlePaystackReturn();
