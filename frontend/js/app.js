@@ -19923,48 +19923,53 @@
         }
 
         // ============================================================
-        // CAMERA SCANNER - ZXing ONLY   (Scanner build: zxing-only-v1)
+        // CAMERA SCANNER - ZXing only   (Scanner build: zxing-stable-v1)
         //
-        // Camera frame -> barcode STRING -> submitProductBarcode /
-        // submitPosBarcode (downstream flow unchanged). Deliberately minimal:
-        // no native BarcodeDetector, no html5-qrcode, no rAF loop, no decoder
-        // switching, no frame counters, no timeout races, no error streaks.
+        // PERFORMANCE ROLLBACK of V20. Camera frame -> barcode STRING ->
+        // submitProductBarcode / submitPosBarcode (downstream unchanged).
+        //   - rear camera at width/height { ideal: 1920 / 1080 } only; a lower
+        //     resolution from the UA is accepted. NO max-sensor request.
+        //   - decode canvas capped at 1280px wide, source aspect kept; ONE
+        //     reusable canvas + ONE reusable 2D context for the app lifetime.
+        //   - ONE BrowserMultiFormatReader per camera session.
+        //   - 350ms tick; _zxDecodeBusy lock so two decodes never overlap.
+        //   - the scan loop does ONLY: draw -> decode -> route. No
+        //     getSettings()/getCapabilities()/diagnostic-DOM in the hot path.
         //
         // window.ZXing is loaded by <script src="/assets/vendor/zxing.umd.js">
-        // in index.html BEFORE app.js.
-        //
-        // We open the camera ourselves (getUserMedia) and pass each frame to
-        // ZXing's BrowserMultiFormatReader.decode() via ONE intermediate
-        // <canvas>. Reason: this ZXing 0.21.3 build's decode(<video>) /
-        // decodeFromVideoDevice() return a blank frame on this browser
-        // (perpetual NotFoundException) whereas decode(<canvas>) of the exact
-        // same frame decodes reliably - verified. A single ~180ms setTimeout
-        // tick drives it (NOT requestAnimationFrame).
+        // in index.html BEFORE app.js. We hand ZXing a <canvas> (not the
+        // <video>) - this 0.21.3 build's decode(<video>) returns a blank frame
+        // on Chrome.
         // ============================================================
-        const SCANNER_BUILD = "zxing-only-v1";
-        const ZX_SCAN_INTERVAL_MS = 180;
+        const SCANNER_BUILD = "zxing-stable-v2";
+        const ZX_SCAN_INTERVAL_MS = 350;
+        const ZX_DECODE_CANVAS_MAX_W = 1280;
         const ZX_DECODE_COOLDOWN_MS = 1200;   // same code re-read while still in frame is ignored this long
-        // V20: ask the rear camera for at least Full-HD; after the stream is
-        // live we bump to the sensor's max via getCapabilities() (below).
         const CAM_IDEAL_W = 1920, CAM_IDEAL_H = 1080;
+
         function _camVideoConstraints(deviceId) {
             const v = deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: "environment" } };
-            v.width = { ideal: CAM_IDEAL_W };
+            v.width = { ideal: CAM_IDEAL_W };     // V21: ideal only - never a min/max/exact, never higher than 1080p
             v.height = { ideal: CAM_IDEAL_H };
             return { video: v, audio: false };
         }
 
-        let _zxReader = null;
+        let _zxReader = null;          // ONE BrowserMultiFormatReader per camera session
         let _camVideo = null;
         let _camStream = null;
         let _zxTimer = null;
         let _zxScanning = false;
-        let _zxGrab = null;
+        let _zxDecodeBusy = false;     // guarantees no two decode ops overlap
+        let _zxStartLogged = false;
+        let _zxGrab = null;            // ONE reusable decode canvas (app lifetime)
+        let _zxCtx = null;             // ONE reusable 2D context
+        let _frozenCanvas = null;      // V22: ONE reusable frozen-frame canvas
+        let _frozenCtx = null;
         let _zxLastDecode = { code: null, at: 0 };
-        // --- V19 camera diagnostic state (does not affect decoding) ---
-        let _camTrack = null;      // active MediaStreamTrack (video)
-        let _camDevices = [];      // enumerateDevices() -> kind === "videoinput"
-        let _camDeviceId = null;   // deviceId currently in use
+        // --- camera diagnostic state (read only at start / switch) ---
+        let _camTrack = null;
+        let _camDevices = [];
+        let _camDeviceId = null;
 
         function _zxHints() {
             const ZX = window.ZXing, BF = ZX.BarcodeFormat, H = new Map();
@@ -19990,8 +19995,7 @@
             const video = document.createElement("video");
             video.setAttribute("autoplay", ""); video.setAttribute("muted", ""); video.setAttribute("playsinline", "");
             video.muted = true; video.autoplay = true; video.playsInline = true;
-            // Full frame, NOT cropped into a scan box - ZXing decodes the whole
-            // picture, so the barcode just has to be somewhere in view.
+            // Full-quality preview, NOT cropped. Only the decode canvas is capped.
             video.style.cssText = "width:100%;max-height:62vh;display:block;background:#000;border-radius:8px;object-fit:contain";
             const line = document.createElement("div");
             line.setAttribute("data-scanner-line", "");
@@ -20006,9 +20010,8 @@
             _camVideo = video;
         }
 
-        // ===================== V19 CAMERA DIAGNOSTICS =====================
-        // Additive. Never called by _zxScanTick / handleCameraBarcodeDecoded /
-        // any downstream barcode path.
+        // ===== CAMERA DIAGNOSTICS - run ONLY at camera start / camera switch,
+        //       never inside the scan loop. =====
 
         async function _enumerateCameras() {
             try {
@@ -20066,56 +20069,6 @@
             catch (err) { console.warn("[camera-diag] applyConstraints(zoom) failed:", (err && err.message) || err); }
         }
 
-        // V20: if the sensor exposes a higher width/height than the current
-        // stream, request the max. Best-effort - a failure just leaves the
-        // >=1080p stream from getUserMedia() in place.
-        async function _applyMaxResolution() {
-            const trk = _camTrack;
-            if (!trk || !trk.getCapabilities || !trk.applyConstraints) return;
-            let caps = {}, cur = {};
-            try { caps = trk.getCapabilities() || {}; } catch (err) { return; }
-            try { cur = trk.getSettings() || {}; } catch (err) {}
-            const wMax = caps.width && caps.width.max;
-            const hMax = caps.height && caps.height.max;
-            if (wMax && hMax && (wMax > (cur.width || 0) || hMax > (cur.height || 0))) {
-                try {
-                    await trk.applyConstraints({ advanced: [{ width: wMax, height: hMax }] });
-                    let now = {};
-                    try { now = trk.getSettings() || {}; } catch (e) {}
-                    console.log("[camera-diag] requested max capture resolution " + wMax + "x" + hMax +
-                                " -> settings now " + (now.width || "?") + "x" + (now.height || "?"));
-                } catch (err) {
-                    console.warn("[camera-diag] applyConstraints(max width/height) failed:", (err && err.message) || err);
-                }
-            } else {
-                console.log("[camera-diag] no higher resolution to request (caps max " +
-                            (wMax || "?") + "x" + (hMax || "?") + ", current " + (cur.width || "?") + "x" + (cur.height || "?") + ")");
-            }
-        }
-
-        // The one required diagnostic line. The ZXing decode canvas is sized
-        // ONLY from video.videoWidth / video.videoHeight (see _zxScanTick) -
-        // never CSS, clientWidth, or the preview container. Also keeps the
-        // panel's live "capture:" line (getSettings + video element + canvas)
-        // in sync. Throttled: console logs only when the source resolution
-        // actually changes.
-        let _lastLoggedRes = "";
-        function _logDecodeResolution(reason) {
-            const v = _camVideo;
-            const vw = (v && v.videoWidth) || 0, vh = (v && v.videoHeight) || 0;
-            const cw = (_zxGrab && _zxGrab.width) || 0, ch = (_zxGrab && _zxGrab.height) || 0;
-            let sw = "?", sh = "?";
-            try { const s = _camTrack && _camTrack.getSettings && _camTrack.getSettings(); if (s) { sw = s.width || "?"; sh = s.height || "?"; } } catch (e) {}
-            const span = document.querySelector("[data-decode-res]");
-            if (span) span.textContent = "getSettings " + sw + "\u00d7" + sh + "  \u00b7  video " + vw + "\u00d7" + vh + "  \u00b7  canvas " + cw + "\u00d7" + ch;
-            const line = "decode source: " + vw + "x" + vh + " canvas: " + cw + "x" + ch;
-            if (line === _lastLoggedRes) return;
-            _lastLoggedRes = line;
-            console.log("[camera-diag] " + line + (reason ? "  (" + reason + ")" : ""));
-        }
-
-        // Rear-camera cycle list: prefer devices whose label reads back/rear/
-        // environment (phones expose wide + ultrawide + tele); fall back to all.
         function _rearCycleList() {
             const rear = _camDevices.filter(d => /back|rear|environment|world/i.test(d.label || ""));
             return rear.length >= 2 ? rear : _camDevices;
@@ -20143,9 +20096,8 @@
                 try { await _camVideo.play(); } catch (_) {}
             }
             await _applyContinuousFocus();
-            await _applyMaxResolution();
             _renderCameraDiagnostics(mode);
-            _logDecodeResolution("camera switch");
+            _zxStartLogged = false;   // re-log decode canvas once for the new source
             console.log("[camera-diag] switched to deviceId:", _camDeviceId);
         }
 
@@ -20172,31 +20124,24 @@
             }
             const cap = _readTrackCapabilities();
             const rep = cap ? cap.report : { focusMode: "?", zoom: "?", width: "?", height: "?" };
-            const sW = (cap && cap.settings && cap.settings.width) || "?";
-            const sH = (cap && cap.settings && cap.settings.height) || "?";
-            const vW = (_camVideo && _camVideo.videoWidth) || 0;
-            const vH = (_camVideo && _camVideo.videoHeight) || 0;
-            const cW = (_zxGrab && _zxGrab.width) || 0;
-            const cH = (_zxGrab && _zxGrab.height) || 0;
             const list = _camDevices;
             const curIdx = list.findIndex(d => d.deviceId && d.deviceId === _camDeviceId);
             const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
             const rows = list.map((d, i) =>
-                (i === curIdx ? "→ " : "  ") + "[" + i + "] " +
-                esc(d.label || ("camera " + (i + 1))) + " · " +
-                (d.deviceId ? esc(d.deviceId.slice(0, 10)) + "…" : "(id hidden)")
+                (i === curIdx ? "\u2192 " : "\u00a0\u00a0") + "[" + i + "] " +
+                esc(d.label || ("camera " + (i + 1))) + " \u00b7 " +
+                (d.deviceId ? esc(d.deviceId.slice(0, 10)) + "\u2026" : "(id hidden)")
             ).join("<br>");
 
             panel.innerHTML =
                 "<div style='opacity:.8;margin-bottom:1px'>videoinput devices (" + list.length + "):</div>" +
                 "<div>" + (rows || "(none)") + "</div>" +
                 "<div style='margin-top:3px'>active deviceId: <b style='color:#e0e7ff'>" +
-                    (_camDeviceId ? esc(_camDeviceId.slice(0, 16)) + "…" : "(unknown)") + "</b></div>" +
+                    (_camDeviceId ? esc(_camDeviceId.slice(0, 16)) + "\u2026" : "(unknown)") + "</b></div>" +
                 "<div>focusMode: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.focusMode)) + "</b></div>" +
                 "<div>zoom: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.zoom)) + "</b></div>" +
                 "<div>width: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.width)) + "</b></div>" +
-                "<div>height: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.height)) + "</b></div>" +
-                "<div style='margin-top:3px'>capture: <b style='color:#a7f3d0' data-decode-res>getSettings " + sW + "\u00d7" + sH + "  \u00b7  video " + vW + "\u00d7" + vH + "  \u00b7  canvas " + cW + "\u00d7" + cH + "</b></div>";
+                "<div>height: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.height)) + "</b></div>";
 
             if (list.length > 1) {
                 const btn = document.createElement("button");
@@ -20220,29 +20165,164 @@
                 rng.step = (zc.step || 0.1);
                 rng.value = curZoom;
                 rng.style.cssText = "flex:1";
-                const out = document.createElement("span"); out.textContent = Number(curZoom).toFixed(1) + "×";
-                rng.oninput = function () { out.textContent = Number(rng.value).toFixed(1) + "×"; _applyCameraZoom(Number(rng.value)); };
+                const out = document.createElement("span"); out.textContent = Number(curZoom).toFixed(1) + "\u00d7";
+                rng.oninput = function () { out.textContent = Number(rng.value).toFixed(1) + "\u00d7"; _applyCameraZoom(Number(rng.value)); };
                 wrap.appendChild(lab); wrap.appendChild(rng); wrap.appendChild(out);
                 panel.appendChild(wrap);
             }
+
+            // V22: frozen-frame decoder isolation test
+            const frow = document.createElement("div");
+            frow.style.cssText = "margin-top:8px;border-top:1px solid #334155;padding-top:6px";
+            const fbtn = document.createElement("button");
+            fbtn.type = "button";
+            fbtn.textContent = "\u2744 Freeze frame & test decoders";
+            fbtn.style.cssText = "padding:6px 12px;font-size:12px;border-radius:6px;border:1px solid #10b981;background:#064e3b;color:#d1fae5;cursor:pointer;display:block;width:100%";
+            fbtn.onclick = function () { _freezeFrameTest(mode); };
+            const fout = document.createElement("div");
+            fout.setAttribute("data-freeze-result", "");
+            fout.style.cssText = "margin-top:5px;white-space:pre-wrap;color:#a7f3d0;font-size:11px";
+            frow.appendChild(fbtn);
+            frow.appendChild(fout);
+            panel.appendChild(frow);
         }
-        // =================== end V19 CAMERA DIAGNOSTICS ===================
+
+        // V22: alternative 1D decoder = native BarcodeDetector (no new vendor
+        // file). Runs against the exact frozen canvas. Formats include the
+        // required UPC-A / UPC-E / EAN-13 / EAN-8.
+        async function _altDecode(canvas) {
+            if (typeof window.BarcodeDetector === "undefined") {
+                return { unavailable: true, reason: "BarcodeDetector not in this browser" };
+            }
+            const want = ["upc_a", "upc_e", "ean_13", "ean_8", "code_128", "code_39", "itf"];
+            let formats = want;
+            try {
+                const s = await window.BarcodeDetector.getSupportedFormats();
+                formats = want.filter(f => s.indexOf(f) !== -1);
+            } catch (e) { /* keep the full list */ }
+            if (!formats.length) return { unavailable: true, reason: "no supported 1D formats" };
+            try {
+                const det = new window.BarcodeDetector({ formats: formats });
+                const res = await det.detect(canvas);
+                if (res && res.length && res[0] && res[0].rawValue) {
+                    return { decoded: String(res[0].rawValue), format: res[0].format };
+                }
+                return { noResult: true };
+            } catch (err) {
+                return { name: (err && err.name) || "(no name)", message: (err && err.message) || String(err) };
+            }
+        }
+
+        async function _freezeFrameTest(mode) {
+            const host = document.getElementById(_scannerViewId(mode));
+            const out = host && host.querySelector("[data-freeze-result]");
+            const v = _camVideo;
+            if (!v || v.readyState < 2 || !v.videoWidth) {
+                if (out) out.textContent = "No live camera frame to freeze yet.";
+                return;
+            }
+
+            // Freeze into a DEDICATED reusable canvas, sized exactly like the
+            // live decode canvas (<=1280 wide, source aspect). The live loop
+            // keeps using _zxGrab; this canvas is not overwritten until the
+            // next freeze, so ZXing and the alternative decode identical
+            // pixels and repeat runs are reproducible.
+            const sw = v.videoWidth, sh = v.videoHeight;
+            const dw = Math.min(ZX_DECODE_CANVAS_MAX_W, sw);
+            const dh = Math.max(1, Math.round(dw * sh / sw));
+            if (!_frozenCanvas) _frozenCanvas = document.createElement("canvas");
+            if (_frozenCanvas.width !== dw || _frozenCanvas.height !== dh) { _frozenCanvas.width = dw; _frozenCanvas.height = dh; }
+            _frozenCtx = _frozenCanvas.getContext("2d", { willReadFrequently: true });
+            _frozenCtx.drawImage(v, 0, 0, dw, dh);
+
+            // Show the frozen frame so its sharpness / framing is visible.
+            let thumb = host.querySelector("[data-freeze-thumb]");
+            if (!thumb) {
+                thumb = document.createElement("img");
+                thumb.setAttribute("data-freeze-thumb", "");
+                thumb.style.cssText = "display:block;max-width:100%;margin-top:6px;border:1px solid #334155;border-radius:4px";
+                if (out) out.parentElement.appendChild(thumb);
+            }
+            try { thumb.src = _frozenCanvas.toDataURL("image/jpeg", 0.85); } catch (e) {}
+
+            // Build a fresh reader with the current hints/formats.
+            const reader = new window.ZXing.BrowserMultiFormatReader(_zxHints());
+
+            // 1a. EXACTLY what the live scan loop calls: reader.decode(<canvas>).
+            //     Full exception detail - never swallowed to "".
+            let zxA;
+            try {
+                const r = reader.decode(_frozenCanvas);
+                zxA = { decoded: (r && r.getText && r.getText()) || String(r || "") };
+            } catch (err) {
+                zxA = { name: (err && err.name) || "(no name)", message: (err && err.message) || String(err) };
+            }
+            console.log("[freeze-test] frozen " + dw + "x" + dh + " | ZXing decode(canvas) ->", zxA);
+
+            // 1b. ZXing decoder via HTMLCanvasElementLuminanceSource (the
+            //     canvas-correct path in this bundle). Isolates whether ZXing's
+            //     actual DECODER can read this frame, independent of 1a's
+            //     canvas-input handling.
+            let zxB;
+            try {
+                const ZX = window.ZXing;
+                const src = new ZX.HTMLCanvasElementLuminanceSource(_frozenCanvas);
+                const bmp = new ZX.BinaryBitmap(new ZX.HybridBinarizer(src));
+                const r = reader.decodeBitmap(bmp);
+                zxB = { decoded: (r && r.getText && r.getText()) || String(r || "") };
+            } catch (err) {
+                zxB = { name: (err && err.name) || "(no name)", message: (err && err.message) || String(err) };
+            }
+            console.log("[freeze-test] ZXing luminance-source ->", zxB);
+
+            // 2. ALTERNATIVE decoder against the SAME frozen canvas.
+            const alt = await _altDecode(_frozenCanvas);
+            console.log("[freeze-test] Alternative (BarcodeDetector) ->", alt);
+
+            const fmt = o => o.decoded ? ("decoded: " + o.decoded) : ("no result: " + (o.name || "?") + (o.message ? "  \u2014 " + o.message : ""));
+            const L = [];
+            L.push("Frozen frame: " + dw + "x" + dh);
+            L.push("");
+            L.push("ZXing decode(canvas)  [pre-V23 path - shows the bug]:");
+            L.push("  - " + fmt(zxA));
+            L.push("");
+            L.push("ZXing luminance-source  [= live scan loop, V23+]:");
+            L.push("  - " + fmt(zxB));
+            L.push("");
+            L.push("Alternative (BarcodeDetector):");
+            if (alt.unavailable) L.push("  - not available" + (alt.reason ? " (" + alt.reason + ")" : ""));
+            else if (alt.decoded) L.push("  - decoded: " + alt.decoded + (alt.format ? "  [" + alt.format + "]" : ""));
+            else if (alt.noResult) L.push("  - no result");
+            else L.push("  - error: " + (alt.name || "?") + (alt.message ? "  \u2014 " + alt.message : ""));
+            if (out) out.textContent = L.join("\n");
+
+            console.log("[freeze-test] RESULT | decode(canvas): " + (zxA.decoded || ("no result " + zxA.name)) +
+                " | luminance: " + (zxB.decoded || ("no result " + zxB.name)) +
+                " | BarcodeDetector: " + (alt.decoded || (alt.unavailable ? "unavailable" : (alt.noResult ? "no result" : ("error " + alt.name)))));
+
+            // 9. feed a successful result into the existing pipeline.
+            const winner = zxA.decoded || zxB.decoded || alt.decoded;
+            if (winner) {
+                console.log("[freeze-test] feeding into handleCameraBarcodeDecoded():", winner);
+                handleCameraBarcodeDecoded(winner);
+            }
+        }
+
+        // ===== end camera diagnostics =====
 
         // ONE camera success entry point. submitProductBarcode / submitPosBarcode
         // already emit the LOW capture beep + "Barcode captured" diagnostic and
-        // carry their own de-dup, so this routes each decoded string once and
-        // never beeps itself.
+        // carry their own de-dup, so this routes each decoded string once.
         function handleCameraBarcodeDecoded(rawCode) {
             const code = String(rawCode == null ? "" : rawCode).trim();
             if (!code) return;
-            const mode = activeCameraMode;              // capture BEFORE any teardown
+            const mode = activeCameraMode;
             if (!mode) return;
 
             const now = Date.now();
             if (code === _zxLastDecode.code && (now - _zxLastDecode.at) < ZX_DECODE_COOLDOWN_MS) return;
             _zxLastDecode = { code: code, at: now };
             if (mode === "pos") {
-                // unchanged POS in-frame guard: a held barcode never stacks units
                 if (code === posLastCameraScan.code && (now - posLastCameraScan.at) < POS_CAMERA_SCAN_COOLDOWN_MS) return;
                 posLastCameraScan = { code: code, at: now };
             }
@@ -20251,33 +20331,55 @@
             _setScannerLine(mode, "Barcode read: " + code);
 
             if (mode === "product") {
-                activeCameraMode = null;                // stop the scan tick from routing again
-                submitProductBarcode(code, "camera");   // acknowledge NOW, before the scanner stops
-                stopCameraScanner();                    // NOT awaited
+                activeCameraMode = null;
+                submitProductBarcode(code, "camera");
+                stopCameraScanner();
                 return;
             }
-            submitPosBarcode(code, "camera");           // POS: keep the scanner open for the next item
+            submitPosBarcode(code, "camera");
         }
 
+        // The ONLY hot path: video frame -> draw to reusable canvas -> decode
+        // -> result/no result. Nothing else.
         function _zxScanTick() {
             _zxTimer = null;
-            if (!_zxScanning || !_zxReader || !_camVideo || !activeCameraMode) return;
-            const v = _camVideo;
-            if (v.readyState >= 2 && v.videoWidth) {
-                try {
-                    if (!_zxGrab) _zxGrab = document.createElement("canvas");
-                    // V20: decode canvas dimensions come ONLY from the raw video
-                    // frame - never CSS / clientWidth / the preview container.
-                    _zxGrab.width = v.videoWidth; _zxGrab.height = v.videoHeight;
-                    _logDecodeResolution("scan tick");
-                    _zxGrab.getContext("2d", { willReadFrequently: true }).drawImage(v, 0, 0);
-                    const result = _zxReader.decode(_zxGrab);          // ZXing BrowserMultiFormatReader.decode(canvas)
-                    const code = (result && result.getText) ? result.getText() : "";
-                    if (code) { handleCameraBarcodeDecoded(code); }
-                } catch (_) {
-                    // NotFoundException / ChecksumException / FormatException:
-                    // normal "no readable barcode in this frame" - never toast,
-                    // never stop, never log.
+            if (!_zxScanning) return;
+            if (!_zxDecodeBusy && _zxReader && _camVideo && activeCameraMode) {
+                const v = _camVideo;
+                if (v.readyState >= 2 && v.videoWidth) {
+                    _zxDecodeBusy = true;
+                    try {
+                        const sw = v.videoWidth, sh = v.videoHeight;
+                        const dw = Math.min(ZX_DECODE_CANVAS_MAX_W, sw);
+                        const dh = Math.max(1, Math.round(dw * sh / sw));
+                        if (!_zxGrab) _zxGrab = document.createElement("canvas");
+                        if (!_zxCtx || _zxGrab.width !== dw || _zxGrab.height !== dh) {
+                            _zxGrab.width = dw; _zxGrab.height = dh;                       // only on a source-size change
+                            _zxCtx = _zxGrab.getContext("2d", { willReadFrequently: true });
+                        }
+                        if (!_zxStartLogged) {
+                            _zxStartLogged = true;
+                            console.log("[barcode] decode canvas: " + dw + "x" + dh);
+                            console.log("[barcode] decode interval: " + ZX_SCAN_INTERVAL_MS + "ms");
+                        }
+                        _zxCtx.drawImage(v, 0, 0, dw, dh);
+                        // V23: decode via HTMLCanvasElementLuminanceSource. This
+                        // ZXing 0.21.3 bundle's _zxReader.decode(<canvas>) throws
+                        // IndexSizeError - createCaptureCanvas() has no
+                        // HTMLCanvasElement branch, so its internal capture
+                        // canvas is 0x0 - and the catch below was silently
+                        // eating it on every frame. This path feeds the pixels
+                        // straight in, no internal canvas.
+                        const _lum = new window.ZXing.HTMLCanvasElementLuminanceSource(_zxGrab);
+                        const _bmp = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(_lum));
+                        const result = _zxReader.decodeBitmap(_bmp);
+                        const code = (result && result.getText) ? result.getText() : "";
+                        if (code) handleCameraBarcodeDecoded(code);
+                    } catch (_) {
+                        // NotFoundException / ChecksumException / FormatException -> normal, silent
+                    } finally {
+                        _zxDecodeBusy = false;
+                    }
                 }
             }
             if (_zxScanning) _zxTimer = setTimeout(_zxScanTick, ZX_SCAN_INTERVAL_MS);
@@ -20328,22 +20430,19 @@
                 try { await _camVideo.play(); } catch (_) { /* autoplay quirk - the tick still reads frames once ready */ }
             }
 
-            // --- V19 diagnostics: permission is granted here, so labels/caps
-            // are available. Purely observational + focus/zoom helpers. ---
+            // Camera settings are read ONCE here (start). Never in the scan loop.
             _camTrack = (stream.getVideoTracks && stream.getVideoTracks()[0]) || null;
             _camDeviceId = (_camTrack && _camTrack.getSettings && _camTrack.getSettings().deviceId) || null;
             try {
                 await _enumerateCameras();
                 await _applyContinuousFocus();
-                await _applyMaxResolution();
                 _renderCameraDiagnostics(mode);
-                _logDecodeResolution("stream start");
             } catch (err) {
                 console.warn("[camera-diag] setup failed (decoding unaffected):", (err && err.message) || err);
             }
 
             try {
-                _zxReader = new window.ZXing.BrowserMultiFormatReader(_zxHints(), 200);
+                _zxReader = new window.ZXing.BrowserMultiFormatReader(_zxHints(), ZX_SCAN_INTERVAL_MS);
             } catch (err) {
                 console.error("[barcode] ZXing reader init failed:", (err && (err.name || err.message)) || err);
                 _setScannerLine(mode, "Scanner library error");
@@ -20351,7 +20450,10 @@
                 await stopCameraScanner();
                 return;
             }
+            if (!_zxGrab) _zxGrab = document.createElement("canvas");   // ONE reusable canvas (kept for the app lifetime)
             _zxScanning = true;
+            _zxDecodeBusy = false;
+            _zxStartLogged = false;
             _zxLastDecode = { code: null, at: 0 };
             _zxTimer = setTimeout(_zxScanTick, ZX_SCAN_INTERVAL_MS);
             _setScannerLine(mode, "Point camera at barcode");
@@ -20363,6 +20465,8 @@
         async function stopCameraScanner() {
             activeCameraMode = null;
             _zxScanning = false;
+            _zxDecodeBusy = false;
+            _zxStartLogged = false;
             if (_zxTimer) { clearTimeout(_zxTimer); _zxTimer = null; }
             if (_zxReader) { try { _zxReader.reset(); } catch (_) {} _zxReader = null; }
             if (_camStream) {
@@ -20372,13 +20476,14 @@
             _camTrack = null;
             _camDevices = [];
             _camDeviceId = null;
-            _lastLoggedRes = "";
             if (_camVideo) {
                 try { _camVideo.pause(); } catch (_) {}
                 try { _camVideo.srcObject = null; } catch (_) {}
                 _camVideo = null;
             }
             _zxLastDecode = { code: null, at: 0 };
+            // _zxGrab / _zxCtx are intentionally KEPT - one reusable canvas +
+            // context for the whole app lifetime (no per-session allocation).
             const pv = document.getElementById("product-camera-view"); if (pv) pv.replaceChildren();
             const sv = document.getElementById("pos-camera-view");     if (sv) sv.replaceChildren();
             const pc = document.getElementById("product-camera-container"); if (pc) pc.classList.add("hidden");
@@ -20499,7 +20604,7 @@
         // => nothing was ever decoded. One reused AudioContext, unlocked on the
         // camera tap / scan-field focus; entirely best-effort — a blocked or
         // missing AudioContext must never interrupt a scan.
-        console.log("[barcode] app.js build 2026-09-03-v20 — camera capture-resolution diagnostics");
+        console.log("[barcode] app.js build 2026-09-04-v23 — decode fix: HTMLCanvasElementLuminanceSource (zxing-stable-v2)");
         let _pipelineAudioCtx = null;
         function _primePipelineAudio() {
             try {
