@@ -10,7 +10,7 @@
 // data to whoever opens the browser next, so every request that isn't the
 // app shell or a known static asset is passed straight to the network.
 
-const SHELL_CACHE = "cauldra-shell-v3";
+const SHELL_CACHE = "cauldra-shell-v4";
 
 // Precached at install time. Kept small and static-only — anything dynamic
 // (products, sales, etc.) never belongs in this cache.

@@ -19923,111 +19923,52 @@
         }
 
         // ============================================================
-        // CAMERA SCANNER v2  (Parts 1-8, 10, 12)
-        // MediaStream + a frame loop feeding the native BarcodeDetector
-        // (preferred) or a ZXing browser decoder (fallback). html5-qrcode is
-        // NO LONGER on the active camera path; its bundled file stays loaded
-        // only for any unrelated code that still references the global.
-        // The decoder's ONLY job: a camera frame -> a barcode STRING ->
-        // handleCameraBarcodeDecoded() -> submitProductBarcode /
-        // submitPosBarcode (downstream flow unchanged).
+        // CAMERA SCANNER - ZXing ONLY   (Scanner build: zxing-only-v1)
+        //
+        // Camera frame -> barcode STRING -> submitProductBarcode /
+        // submitPosBarcode (downstream flow unchanged). Deliberately minimal:
+        // no native BarcodeDetector, no html5-qrcode, no rAF loop, no decoder
+        // switching, no frame counters, no timeout races, no error streaks.
+        //
+        // window.ZXing is loaded by <script src="/assets/vendor/zxing.umd.js">
+        // in index.html BEFORE app.js.
+        //
+        // We open the camera ourselves (getUserMedia) and pass each frame to
+        // ZXing's BrowserMultiFormatReader.decode() via ONE intermediate
+        // <canvas>. Reason: this ZXing 0.21.3 build's decode(<video>) /
+        // decodeFromVideoDevice() return a blank frame on this browser
+        // (perpetual NotFoundException) whereas decode(<canvas>) of the exact
+        // same frame decodes reliably - verified. A single ~180ms setTimeout
+        // tick drives it (NOT requestAnimationFrame).
         // ============================================================
-        const SCANNER_BUILD = "camera-v2";
-        const CAMERA_DECODE_INTERVAL_MS = 100;      // ~10 detections / second
-        const CAMERA_DECODE_COOLDOWN_MS = 1200;     // same code re-seen in-frame is ignored this long
-        // Candidates: a hyphen-free canonical name first, then names a rename
-        // or upload may have produced. A slightly-misnamed vendor file must
-        // still load instead of silently 404-ing the whole fallback decoder.
-        const ZXING_VENDOR_CANDIDATES = [
-            "/assets/vendor/zxing.umd.js",
-            "/assets/vendor/zxinglibrary0.21.3.umd.js",
-            "/assets/vendor/zxing-library-0.21.3.umd.js",
-        ];
-        const CAMERA_NATIVE_FORMATS = ["upc_a", "upc_e", "ean_13", "ean_8", "code_128", "code_39", "itf"];
-        // If the native BarcodeDetector is selected but produces ZERO decodes
-        // this long while the camera is clearly running, quietly switch to
-        // ZXing (covers WebKit/WebView builds where BarcodeDetector exists but
-        // never actually resolves a 1D barcode and never throws).
-        const NATIVE_NO_DECODE_FALLBACK_MS = 5000;   // native selected but nothing decoded -> try ZXing
-        const CAMERA_DETECT_TIMEOUT_MS = 2500;       // a single detect() that never settles must not deadlock the loop
-        let _nativeSelectedAt = 0;
-        let _anyCameraDecode = false;
-        let _decoderSwitching = false;
-        let _camAttempts = 0;       // decode attempts this session (visible on screen so "nothing happening" is diagnosable)
-        let _camLastResult = "";
+        const SCANNER_BUILD = "zxing-only-v1";
+        const ZX_SCAN_INTERVAL_MS = 180;
+        const ZX_DECODE_COOLDOWN_MS = 1200;   // same code re-read while still in frame is ignored this long
 
-        let cameraScannerStarting = false;
-        let _camStream = null;
+        let _zxReader = null;
         let _camVideo = null;
-        let _camRAF = null;
-        let _camRunning = false;
-        let _camDetectInFlight = false;
-        let _camLastAttempt = 0;
-        let _camDecoderName = "";
-        let _nativeDetector = null;
-        let _zxingReader = null;
-        let _nativeErrorStreak = 0;
-        let _cameraLastDecode = { code: null, at: 0 };
-        let _zxingLoadPromise = null;
+        let _camStream = null;
+        let _zxTimer = null;
+        let _zxScanning = false;
+        let _zxGrab = null;
+        let _zxLastDecode = { code: null, at: 0 };
 
-        // Lazy: only browsers WITHOUT a usable native BarcodeDetector download
-        // the ZXing bundle. Same-origin <script> (covered by script-src 'self')
-        // and cached by the service worker like any other /assets/ file.
-        function _loadOneScript(src) {
-            return new Promise((resolve, reject) => {
-                const sc = document.createElement("script");
-                sc.src = src; sc.async = true;
-                sc.onload = () => window.ZXing ? resolve(window.ZXing) : reject(new Error("loaded but no ZXing global: " + src));
-                sc.onerror = () => reject(new Error("could not load " + src));
-                document.head.appendChild(sc);
-            });
-        }
-        function _loadZXing() {
-            if (window.ZXing) return Promise.resolve(window.ZXing);
-            if (_zxingLoadPromise) return _zxingLoadPromise;
-            _zxingLoadPromise = (async () => {
-                for (const src of ZXING_VENDOR_CANDIDATES) {
-                    try {
-                        const ZX = await _loadOneScript(src);
-                        console.log("[barcode] ZXing decoder loaded from", src);
-                        return ZX;
-                    } catch (e) { /* try the next candidate path */ }
-                }
-                _zxingLoadPromise = null;
-                throw new Error("ZXing bundle not found at any /assets/vendor path — re-upload zxing.umd.js");
-            })();
-            return _zxingLoadPromise;
-        }
-
-        async function _buildNativeDetector() {
-            if (!("BarcodeDetector" in window)) return null;
-            try {
-                let formats = CAMERA_NATIVE_FORMATS.slice();
-                if (typeof window.BarcodeDetector.getSupportedFormats === "function") {
-                    const supported = await window.BarcodeDetector.getSupportedFormats();
-                    formats = CAMERA_NATIVE_FORMATS.filter(f => supported.indexOf(f) !== -1);
-                }
-                if (!formats.length) return null;
-                return new window.BarcodeDetector({ formats });
-            } catch (e) {
-                console.warn("[barcode] native BarcodeDetector not usable:", (e && e.message) || e);
-                return null;
-            }
-        }
-
-        async function _buildZXingReader() {
-            const ZX = await _loadZXing();
-            const BF = ZX.BarcodeFormat;
-            const hints = new Map();
-            hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, [
+        function _zxHints() {
+            const ZX = window.ZXing, BF = ZX.BarcodeFormat, H = new Map();
+            H.set(ZX.DecodeHintType.POSSIBLE_FORMATS, [
                 BF.UPC_A, BF.UPC_E, BF.EAN_13, BF.EAN_8, BF.CODE_128, BF.CODE_39, BF.ITF
             ]);
-            hints.set(ZX.DecodeHintType.TRY_HARDER, true);
-            return new ZX.BrowserMultiFormatReader(hints);
+            H.set(ZX.DecodeHintType.TRY_HARDER, true);
+            return H;
         }
 
-        // ---- visible in-container status UI (Part 10) ----
         function _scannerViewId(mode) { return mode === "product" ? "product-camera-view" : "pos-camera-view"; }
+
+        function _setScannerLine(mode, text) {
+            const host = document.getElementById(_scannerViewId(mode));
+            const el = host && host.querySelector("[data-scanner-line]");
+            if (el) el.textContent = text;
+        }
 
         function _mountScannerUI(mode) {
             const host = document.getElementById(_scannerViewId(mode));
@@ -20036,269 +19977,142 @@
             const video = document.createElement("video");
             video.setAttribute("autoplay", ""); video.setAttribute("muted", ""); video.setAttribute("playsinline", "");
             video.muted = true; video.autoplay = true; video.playsInline = true;
-            video.style.cssText = "width:100%;max-height:190px;object-fit:cover;display:block;background:#000;border-radius:8px";
-            const bar = document.createElement("div");
-            bar.style.cssText = "font-size:11px;line-height:1.55;color:#c7d2fe;padding:5px 2px 1px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all";
-            bar.innerHTML = '<div data-scanner-status style="font-weight:700;color:#e0e7ff">Starting camera\u2026</div>' +
-                            '<div data-scanner-meta style="opacity:.85">' + SCANNER_BUILD + '</div>';
+            // Full frame, NOT cropped into a scan box - ZXing decodes the whole
+            // picture, so the barcode just has to be somewhere in view.
+            video.style.cssText = "width:100%;max-height:62vh;display:block;background:#000;border-radius:8px;object-fit:contain";
+            const line = document.createElement("div");
+            line.setAttribute("data-scanner-line", "");
+            line.style.cssText = "font-size:12px;font-weight:700;line-height:1.5;color:#e0e7ff;padding:6px 2px 1px;word-break:break-all";
+            line.textContent = "Camera ready";
+            const build = document.createElement("div");
+            build.style.cssText = "font-size:10px;color:#818cf8;opacity:.85;padding:0 2px 3px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace";
+            build.textContent = "Scanner build: " + SCANNER_BUILD;
             host.appendChild(video);
-            host.appendChild(bar);
+            host.appendChild(line);
+            host.appendChild(build);
             _camVideo = video;
-            _camAttempts = 0;
-            _camLastResult = "";
         }
 
-        function _setScannerStatus(mode, state, code) {
-            const el = document.getElementById(_scannerViewId(mode)) &&
-                       document.getElementById(_scannerViewId(mode)).querySelector("[data-scanner-status]");
-            if (!el) return;
-            el.textContent = ({
-                starting: "Starting camera\u2026",
-                looking: "Point the barcode at the camera\u2026",
-                scanning: "Scanning\u2026 " + _camAttempts + " frames" + (_camLastResult ? "  (last read: " + _camLastResult + ")" : ""),
-                decoded: "\u2713 DECODED: " + (code || ""),
-                submitting: "Submitting\u2026",
-                resolved: "\u2713 Product resolved",
-            })[state] || String(state);
-        }
-
-        function _updateScannerDecoderLabel() {
-            const v = _camVideo;
-            const dims = (v && v.videoWidth) ? (v.videoWidth + "\u00d7" + v.videoHeight) : "no video signal";
-            document.querySelectorAll("[data-scanner-meta]").forEach(el => {
-                el.textContent = SCANNER_BUILD + " \u00b7 " + (_camDecoderName || "\u2026") + " \u00b7 " + dims;
-            });
-        }
-        // Big, visible, phone-readable failure state inside the scanner box —
-        // so "not scanning" is never a mystery on a device with no console.
-        function _showScannerFatal(mode, msg) {
-            _camDecoderName = "UNAVAILABLE";
-            _updateScannerDecoderLabel();
-            const el = document.getElementById(_scannerViewId(mode)) &&
-                       document.getElementById(_scannerViewId(mode)).querySelector("[data-scanner-status]");
-            if (el) { el.textContent = msg; el.style.color = "#fca5a5"; }
-        }
-
-        // ---- ONE camera-decode entry point (Part 5) ----
-        // submitProductBarcode / submitPosBarcode already emit the LOW beep and
-        // the "Barcode captured" diagnostic, so this function does NOT beep
-        // again -> exactly one captured acknowledgement per barcode.
+        // ONE camera success entry point. submitProductBarcode / submitPosBarcode
+        // already emit the LOW capture beep + "Barcode captured" diagnostic and
+        // carry their own de-dup, so this routes each decoded string once and
+        // never beeps itself.
         function handleCameraBarcodeDecoded(rawCode) {
             const code = String(rawCode == null ? "" : rawCode).trim();
             if (!code) return;
-            const mode = activeCameraMode;                 // capture BEFORE any teardown
+            const mode = activeCameraMode;              // capture BEFORE any teardown
             if (!mode) return;
 
             const now = Date.now();
-            if (code === _cameraLastDecode.code && (now - _cameraLastDecode.at) < CAMERA_DECODE_COOLDOWN_MS) return;
-            _cameraLastDecode = { code: code, at: now };
+            if (code === _zxLastDecode.code && (now - _zxLastDecode.at) < ZX_DECODE_COOLDOWN_MS) return;
+            _zxLastDecode = { code: code, at: now };
             if (mode === "pos") {
                 // unchanged POS in-frame guard: a held barcode never stacks units
                 if (code === posLastCameraScan.code && (now - posLastCameraScan.at) < POS_CAMERA_SCAN_COOLDOWN_MS) return;
                 posLastCameraScan = { code: code, at: now };
             }
 
-            _anyCameraDecode = true;
-            _camLastResult = code;
-            console.log("[barcode] CAMERA DECODE SUCCESS:", code);
-            _setScannerStatus(mode, "decoded", code);
-            _setScannerStatus(mode, "submitting");
+            console.log("[barcode] ZXING DECODE SUCCESS:", code);
+            _setScannerLine(mode, "Barcode read: " + code);
 
             if (mode === "product") {
-                activeCameraMode = null;                   // sync: no further frame routes here
-                try { submitProductBarcode(code, "camera"); }
-                finally { stopCameraScanner(); }           // NOT awaited: cleanup must not gate capture (Part 6)
+                activeCameraMode = null;                // stop the scan tick from routing again
+                submitProductBarcode(code, "camera");   // acknowledge NOW, before the scanner stops
+                stopCameraScanner();                    // NOT awaited
                 return;
             }
-            submitPosBarcode(code, "camera");
-            setTimeout(() => { if (_camRunning && activeCameraMode === "pos") _setScannerStatus("pos", "looking"); }, 1200);
+            submitPosBarcode(code, "camera");           // POS: keep the scanner open for the next item
         }
 
-        // Grab the current frame onto our OWN canvas, then hand that to ZXing.
-        // More reliable across ZXing/browser builds than letting ZXing pull the
-        // frame off the <video> itself (verified: decoded every retry vs the
-        // video path occasionally missing).
-        let _zxFrameCanvas = null;
-        function _zxingDecodeFrame(v) {
-            try {
-                const w = v.videoWidth, h = v.videoHeight;
-                if (!w || !h) return "";
-                if (!_zxFrameCanvas) _zxFrameCanvas = document.createElement("canvas");
-                _zxFrameCanvas.width = w; _zxFrameCanvas.height = h;
-                _zxFrameCanvas.getContext("2d", { willReadFrequently: true }).drawImage(v, 0, 0, w, h);
-                const res = _zxingReader.decodeBitmap(_zxingReader.createBinaryBitmap(_zxFrameCanvas));
-                return (res && res.getText && res.getText()) || "";
-            } catch (_) { return ""; }   // NotFound / frame not ready — normal, silent
-        }
-
-        async function _switchToZXing(reason) {
-            if (_decoderSwitching) return;
-            _decoderSwitching = true;
-            console.warn("[barcode] switching to ZXing decoder (" + reason + ")");
-            try {
-                _zxingReader = await _buildZXingReader();
-                _nativeDetector = null;
-                _camDecoderName = "ZXing (auto)";
-                _updateScannerDecoderLabel();
-            } catch (e) {
-                console.error("[barcode] ZXing fallback failed:", (e && e.message) || e);
-                _showScannerFatal(activeCameraMode, "No barcode decoder available on this browser \u2014 check /assets/vendor/zxing.umd.js");
-                showToast("Barcode decoder unavailable. Re-check zxing.umd.js on the server.", "error");
-                stopCameraScanner();
-            } finally {
-                _decoderSwitching = false;
-            }
-        }
-
-        function _camDetectLoop(ts) {
-            if (!_camRunning) return;
-            _camRAF = requestAnimationFrame(_camDetectLoop);
-            if (_camDetectInFlight) return;
-            if (ts - _camLastAttempt < CAMERA_DECODE_INTERVAL_MS) return;
-
+        function _zxScanTick() {
+            _zxTimer = null;
+            if (!_zxScanning || !_zxReader || !_camVideo || !activeCameraMode) return;
             const v = _camVideo;
-            if (!v || v.readyState < 2 || !v.videoWidth) {
-                _setScannerStatus(activeCameraMode, "starting");
-                return;   // waiting for the camera to actually produce frames
+            if (v.readyState >= 2 && v.videoWidth) {
+                try {
+                    if (!_zxGrab) _zxGrab = document.createElement("canvas");
+                    _zxGrab.width = v.videoWidth; _zxGrab.height = v.videoHeight;
+                    _zxGrab.getContext("2d", { willReadFrequently: true }).drawImage(v, 0, 0);
+                    const result = _zxReader.decode(_zxGrab);          // ZXing BrowserMultiFormatReader.decode(canvas)
+                    const code = (result && result.getText) ? result.getText() : "";
+                    if (code) { handleCameraBarcodeDecoded(code); }
+                } catch (_) {
+                    // NotFoundException / ChecksumException / FormatException:
+                    // normal "no readable barcode in this frame" - never toast,
+                    // never stop, never log.
+                }
             }
+            if (_zxScanning) _zxTimer = setTimeout(_zxScanTick, ZX_SCAN_INTERVAL_MS);
+        }
 
-            // Native selected but producing nothing for too long -> ZXing.
-            if (_nativeDetector && !_anyCameraDecode && !_decoderSwitching &&
-                _nativeSelectedAt && (Date.now() - _nativeSelectedAt > NATIVE_NO_DECODE_FALLBACK_MS)) {
-                _switchToZXing("no decode in " + NATIVE_NO_DECODE_FALLBACK_MS + "ms");
+        // Preserved public name - the camera buttons call toggleInlineCamera('product'|'pos').
+        async function toggleInlineCamera(mode) {
+            if (activeCameraMode === mode) { await stopCameraScanner(); return; }
+            await stopCameraScanner();
+            _primePipelineAudio();   // runs inside the button tap -> unlocks the decode beep
+
+            if (!window.ZXing || !window.ZXing.BrowserMultiFormatReader) {
+                console.error('[barcode] window.ZXing missing - add <script src="/assets/vendor/zxing.umd.js"> before /js/app.js in index.html');
+                showToast("Barcode scanner library did not load. Reload the page.", "error");
+                return;
             }
-
-            _camLastAttempt = ts;
-            _camDetectInFlight = true;
-            _camAttempts++;
-            if (_camAttempts === 1 || _camAttempts % 4 === 0) {
-                _updateScannerDecoderLabel();
-                _setScannerStatus(activeCameraMode, "scanning");
-            }
-
-            // A detect() call must be able to: throw synchronously, reject, or
-            // hang — and never leave the loop stuck. Promise.race + a hard
-            // finally covers all three.
-            let call;
-            try {
-                call = _nativeDetector
-                    ? _nativeDetector.detect(v).then(list => (list && list[0] && list[0].rawValue) || "")
-                    : Promise.resolve(_zxingDecodeFrame(v));
-            } catch (syncErr) {
-                _camDetectInFlight = false;
-                _nativeErrorStreak++;
-                console.warn("[barcode] detect() threw synchronously:", (syncErr && syncErr.name) || syncErr);
-                if (_nativeDetector && _nativeErrorStreak >= 3) _switchToZXing("native detect() throwing");
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                console.error("[barcode] getUserMedia unavailable in this browser");
+                showToast(t("products.cameraAccessFailed"), "error");
                 return;
             }
 
-            let _tid;
-            const timeout = new Promise((_, rej) => { _tid = setTimeout(() => rej(new Error("detect-timeout")), CAMERA_DETECT_TIMEOUT_MS); });
+            const containerId = mode === "product" ? "product-camera-container" : "pos-camera-container";
+            const cont = document.getElementById(containerId);
+            if (cont) cont.classList.remove("hidden");
+            _mountScannerUI(mode);
+            activeCameraMode = mode;
+            _setScannerLine(mode, "Starting camera\u2026");
 
-            Promise.race([call, timeout]).then(text => {
-                _nativeErrorStreak = 0;
-                const code = String(text || "").trim();
-                if (code) { _camLastResult = code; if (_camRunning) handleCameraBarcodeDecoded(code); }
-            }).catch(err => {
-                const name = (err && (err.name || err.message)) || String(err);
-                if (name === "detect-timeout") console.warn("[barcode] a detect() call timed out (" + CAMERA_DETECT_TIMEOUT_MS + "ms)");
-                if (_nativeDetector && _camRunning) {
-                    _nativeErrorStreak++;
-                    if (_nativeErrorStreak >= 3) _switchToZXing("native detector errors: " + name);
-                }
-            }).finally(() => { _camDetectInFlight = false; clearTimeout(_tid); });
-        }
-
-        async function toggleInlineCamera(mode) {
-            if (cameraScannerStarting) return;
-            if (activeCameraMode === mode) { await stopCameraScanner(); return; }
-            cameraScannerStarting = true;
-            _primePipelineAudio(); // inside the user's button tap -> unlocks the decode beep
+            let stream;
             try {
-                await stopCameraScanner();
-                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                    console.error("[barcode] getUserMedia unavailable in this browser");
+                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+            } catch (e1) {
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+                } catch (e2) {
+                    console.error("[barcode] getUserMedia failed:", (e2 && e2.name) || e2);
+                    _setScannerLine(mode, "Unable to access camera");
                     showToast(t("products.cameraAccessFailed"), "error");
+                    await stopCameraScanner();
                     return;
                 }
-                const containerId = mode === "product" ? "product-camera-container" : "pos-camera-container";
-                document.getElementById(containerId) && document.getElementById(containerId).classList.remove("hidden");
-                _mountScannerUI(mode);
-                activeCameraMode = mode;
-                _setScannerStatus(mode, "starting");
+            }
+            if (activeCameraMode !== mode) { stream.getTracks().forEach(x => { try { x.stop(); } catch (_) {} }); return; }
+            _camStream = stream;
+            if (_camVideo) {
+                _camVideo.srcObject = stream;
+                try { await _camVideo.play(); } catch (_) { /* autoplay quirk - the tick still reads frames once ready */ }
+            }
 
-                let stream;
-                try {
-                    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
-                } catch (e1) {
-                    try {
-                        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
-                    } catch (e2) {
-                        console.error("[barcode] getUserMedia failed:", (e2 && e2.name) || e2);
-                        showToast(t("products.cameraAccessFailed"), "error");
-                        await stopCameraScanner();
-                        return;
-                    }
-                }
-                if (activeCameraMode !== mode) { stream.getTracks().forEach(x => { try { x.stop(); } catch (_) {} }); return; }
-                _camStream = stream;
-                if (_camVideo) {
-                    _camVideo.srcObject = stream;
-                    try { await _camVideo.play(); } catch (_) { /* autoplay quirk — the loop still reads frames */ }
-                }
-
-                _anyCameraDecode = false;
-                _decoderSwitching = false;
-                _nativeSelectedAt = 0;
-                _camAttempts = 0;
-                _camLastResult = "";
-                _nativeDetector = await _buildNativeDetector();
-                if (_nativeDetector) {
-                    _camDecoderName = "Native BarcodeDetector";
-                    _nativeSelectedAt = Date.now();
-                } else {
-                    try {
-                        _zxingReader = await _buildZXingReader();
-                        _camDecoderName = "ZXing";
-                    } catch (e) {
-                        console.error("[barcode] no usable barcode decoder (native missing + ZXing load failed):", (e && e.message) || e);
-                        _showScannerFatal(mode, "Barcode decoder failed to load \u2014 re-upload zxing.umd.js to /assets/vendor/");
-                        showToast("Barcode decoder failed to load. Re-upload zxing.umd.js to /assets/vendor/ (see console).", "error");
-                        _camStream && _camStream.getTracks().forEach(x => { try { x.stop(); } catch (_) {} });
-                        _camStream = null;
-                        activeCameraMode = null;   // failed to start -> next camera-button tap is a fresh retry
-                        return;
-                    }
-                }
-                if (activeCameraMode !== mode) { await stopCameraScanner(); return; }
-
-                _updateScannerDecoderLabel();
-                _setScannerStatus(mode, "looking");
-                console.log("[barcode] " + SCANNER_BUILD + " started — decoder:", _camDecoderName, "| mode:", mode);
-
-                _camRunning = true;
-                _camDetectInFlight = false;
-                _camLastAttempt = 0;
-                _nativeErrorStreak = 0;
-                _cameraLastDecode = { code: null, at: 0 };
-                _camRAF = requestAnimationFrame(_camDetectLoop);
+            try {
+                _zxReader = new window.ZXing.BrowserMultiFormatReader(_zxHints(), 200);
             } catch (err) {
-                console.error("[barcode] " + SCANNER_BUILD + " start failed:", err);
+                console.error("[barcode] ZXing reader init failed:", (err && (err.name || err.message)) || err);
+                _setScannerLine(mode, "Scanner library error");
                 showToast(t("products.cameraAccessFailed"), "error");
                 await stopCameraScanner();
-            } finally {
-                cameraScannerStarting = false;
+                return;
             }
+            _zxScanning = true;
+            _zxLastDecode = { code: null, at: 0 };
+            _zxTimer = setTimeout(_zxScanTick, ZX_SCAN_INTERVAL_MS);
+            _setScannerLine(mode, "Point camera at barcode");
+            console.log("[barcode] " + SCANNER_BUILD + " scanner started (mode:", mode + ")");
         }
 
-        // Rewritten for the MediaStream scanner (Part 7). Safe to call twice,
-        // before the camera finishes starting, after it already stopped, and
-        // mid product<->POS switch.
+        // Preserved public name. Safe to call repeatedly / before start / after
+        // stop / mid product<->POS switch.
         async function stopCameraScanner() {
-            _camRunning = false;
-            if (_camRAF != null) { try { cancelAnimationFrame(_camRAF); } catch (_) {} _camRAF = null; }
-            _camDetectInFlight = false;
-
+            activeCameraMode = null;
+            _zxScanning = false;
+            if (_zxTimer) { clearTimeout(_zxTimer); _zxTimer = null; }
+            if (_zxReader) { try { _zxReader.reset(); } catch (_) {} _zxReader = null; }
             if (_camStream) {
                 try { _camStream.getTracks().forEach(tr => { try { tr.stop(); } catch (_) {} }); } catch (_) {}
                 _camStream = null;
@@ -20308,18 +20122,12 @@
                 try { _camVideo.srcObject = null; } catch (_) {}
                 _camVideo = null;
             }
-            try { if (_zxingReader && typeof _zxingReader.reset === "function") _zxingReader.reset(); } catch (_) {}
-            _zxingReader = null;
-            _nativeDetector = null;
-            _nativeErrorStreak = 0;
-            _cameraLastDecode = { code: null, at: 0 };
-            activeCameraMode = null;
-
-            document.getElementById("product-camera-view") && document.getElementById("product-camera-view").replaceChildren();
-            document.getElementById("pos-camera-view") && document.getElementById("pos-camera-view").replaceChildren();
-            document.getElementById("product-camera-container") && document.getElementById("product-camera-container").classList.add("hidden");
-            document.getElementById("pos-camera-container") && document.getElementById("pos-camera-container").classList.add("hidden");
-
+            _zxLastDecode = { code: null, at: 0 };
+            const pv = document.getElementById("product-camera-view"); if (pv) pv.replaceChildren();
+            const sv = document.getElementById("pos-camera-view");     if (sv) sv.replaceChildren();
+            const pc = document.getElementById("product-camera-container"); if (pc) pc.classList.add("hidden");
+            const sc = document.getElementById("pos-camera-container");     if (sc) sc.classList.add("hidden");
+            // hand keyboard focus back so a hardware/Bluetooth scanner still works
             if (!document.getElementById("sale-modal")?.classList.contains("hidden")) {
                 document.getElementById("pos-scan-input")?.focus();
             } else if (!document.getElementById("add-product-modal")?.classList.contains("hidden")) {
@@ -20435,7 +20243,7 @@
         // => nothing was ever decoded. One reused AudioContext, unlocked on the
         // camera tap / scan-field focus; entirely best-effort — a blocked or
         // missing AudioContext must never interrupt a scan.
-        console.log("[barcode] app.js build 2026-09-03-v17 — camera-v2 (live on-screen scan diagnostics + hardened loop)");
+        console.log("[barcode] app.js build 2026-09-03-v18 — camera scanner: ZXing ONLY (zxing-only-v1)");
         let _pipelineAudioCtx = null;
         function _primePipelineAudio() {
             try {
