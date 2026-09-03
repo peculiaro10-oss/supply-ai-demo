@@ -19946,6 +19946,7 @@
             if (cameraScannerStarting) return;
             if (activeCameraMode === mode) { await stopCameraScanner(); return; }
             cameraScannerStarting = true;
+            _primePipelineAudio(); // runs inside the user's camera-button tap -> unlocks the decode beep
             try {
                 await stopCameraScanner();
                 if (typeof Html5Qrcode === "undefined") {
@@ -19978,12 +19979,16 @@
                 // outside the decoded crop and never resolved.
                 const startConfig = {
                     fps: 15,
+                    // 1D retail barcodes are never mirrored — skip html5-qrcode's
+                    // flipped-frame re-scan pass so the whole frame budget goes to
+                    // a straight decode (~2x 1D throughput). Supported by 2.3.8.
+                    disableFlip: true,
                     qrbox: (vw, vh) => {
                         const W = (typeof vw === "number" && vw > 0) ? vw : 240;
                         const H = (typeof vh === "number" && vh > 0) ? vh : 180;
                         return {
-                            width: Math.max(140, Math.min(Math.floor(W * 0.88), Math.floor(W) - 2)),
-                            height: Math.max(70, Math.min(Math.floor(Math.min(H * 0.42, 180)), Math.floor(H) - 2)),
+                            width: Math.max(140, Math.min(Math.floor(W * 0.9), Math.floor(W) - 2)),
+                            height: Math.max(70, Math.min(Math.floor(Math.min(H * 0.5, 200)), Math.floor(H) - 2)),
                         };
                     },
                 };
@@ -19991,6 +19996,7 @@
                     // 2.3.8 accepts facingMode only as a bare string here (or an
                     // object keyed "exact"); { ideal: ... } throws inside start().
                     await scanner.start({ facingMode: "environment" }, startConfig, onCameraScanSuccess, onCameraScanFailure);
+                    console.log("[barcode] camera scanner started (mode:", mode + ")");
                 } catch (err) {
                     if (html5QrCodeScanner !== scanner) return; // superseded by a newer toggle while awaiting
                     console.error("[barcode] Html5Qrcode start failed:", err);
@@ -20026,33 +20032,42 @@
             // clean — iOS Safari can otherwise keep a stream bound to an orphan node.
             document.getElementById("product-camera-view")?.replaceChildren?.();
             document.getElementById("pos-camera-view")?.replaceChildren?.();
+            // Closing the camera must hand keyboard focus back to whichever
+            // scan field is on screen, or a hardware/Bluetooth scanner would
+            // have nowhere to type after a camera session (Part 5).
+            if (!document.getElementById("sale-modal")?.classList.contains("hidden")) {
+                document.getElementById("pos-scan-input")?.focus();
+            } else if (!document.getElementById("add-product-modal")?.classList.contains("hidden")) {
+                document.getElementById("barcode-input")?.focus();
+            }
         }
 
-        function onCameraScanSuccess(decodedText) {
-            if (!activeCameraMode) return; // scanner is being torn down
-            console.log("[barcode] decoded:", decodedText, "(mode:", activeCameraMode + ")");
-            if (activeCameraMode === "product") {
-                playSuccessBeep();
-                document.getElementById("barcode-input").value = decodedText;
-                stopCameraScanner();
-                lookupBarcode();
+        // Camera decode callback — deliberately tiny and deterministic.
+        // html5-qrcode calls this once per successful decode. Route by the mode
+        // captured BEFORE any cleanup (stopCameraScanner() nulls
+        // activeCameraMode), then converge on the SAME per-screen submission
+        // helper the hardware scanner and manual entry use.
+        async function onCameraScanSuccess(decodedText) {
+            const mode = activeCameraMode;
+            if (!mode) return;                       // scanner already tearing down
+            const code = String(decodedText == null ? "" : decodedText).trim();
+            if (!code) return;                       // ignore an empty/garbage frame
+
+            if (mode === "product") {
+                await stopCameraScanner();           // release the camera first
+                submitProductBarcode(code, "camera"); // -> LOW beep -> lookupBarcode()
                 return;
             }
-            if (activeCameraMode === "pos") {
-                // Duplicate-frame guard: the same barcode staying in view can
-                // decode repeatedly within milliseconds. A genuine second
-                // scan of the same product after the cooldown still counts.
+            if (mode === "pos") {
+                // Duplicate-FRAME guard: a barcode held in view decodes many
+                // times per second. A deliberate re-scan of the same product
+                // after the cooldown still counts (Part 16 P5/P6).
                 const now = Date.now();
-                if (decodedText === posLastCameraScan.code && (now - posLastCameraScan.at) < POS_CAMERA_SCAN_COOLDOWN_MS) {
+                if (code === posLastCameraScan.code && (now - posLastCameraScan.at) < POS_CAMERA_SCAN_COOLDOWN_MS) {
                     return;
                 }
-                posLastCameraScan = { code: decodedText, at: now };
-                // Same resolver + add path as the hardware scanner/Enter key
-                // (see resolveAndAddScannedProduct) — one barcode resolution
-                // path for both scanning methods (section 19). The success
-                // beep lives inside addSpecificProductToPOSCart, so it fires
-                // once per actual add/increment, not once per raw decode.
-                resolveAndAddScannedProduct(decodedText);
+                posLastCameraScan = { code, at: now };
+                submitPosBarcode(code, "camera");    // -> LOW beep -> resolveAndAddScannedProduct()
             }
         }
 
@@ -20127,6 +20142,9 @@
             }
             document.getElementById("add-product-modal").classList.remove("hidden");
             updateFormCurrencyLabels();
+            // Give the scan field focus so a USB/Bluetooth wedge scanner can
+            // type straight into it with no extra click (Part 5).
+            setTimeout(() => document.getElementById("barcode-input")?.focus(), 50);
         }
 
         function closeAddProductModal() {
@@ -20147,10 +20165,146 @@
             document.getElementById("ai-center-modal").classList.add("hidden");
         }
 
-        document.getElementById("barcode-input").addEventListener("keypress", (e) => {
-            if (e.key === "Enter") { e.preventDefault(); lookupBarcode(); }
-        });
-        document.getElementById("barcode-input").addEventListener("input", updateSkuPlaceholder);
+        // ===================================================================
+        // BARCODE CAPTURE PIPELINE (Parts 1/3/4/6/7)
+        // Camera, USB wedge, Bluetooth wedge and manual entry all converge on
+        // submitProductBarcode() / submitPosBarcode(). The ONLY difference
+        // between sources is how the raw string is captured; once a complete
+        // barcode exists, every source runs the identical downstream business
+        // flow for that screen. No source calls a different lookup.
+        // ===================================================================
+
+        // Two diagnostic tones. LOW = a complete barcode string was CAPTURED
+        // (before any lookup). HIGH = it RESOLVED to a product. No beep at all
+        // => nothing was ever decoded. One reused AudioContext, unlocked on the
+        // camera tap / scan-field focus; entirely best-effort — a blocked or
+        // missing AudioContext must never interrupt a scan.
+        let _pipelineAudioCtx = null;
+        function _primePipelineAudio() {
+            try {
+                const AC = window.AudioContext || window.webkitAudioContext;
+                if (!AC) return;
+                if (!_pipelineAudioCtx) _pipelineAudioCtx = new AC();
+                if (_pipelineAudioCtx.state === "suspended") _pipelineAudioCtx.resume();
+            } catch (e) { /* ignore */ }
+        }
+        function _playPipelineBeep(frequency, seconds) {
+            try {
+                const AC = window.AudioContext || window.webkitAudioContext;
+                if (!AC) return;
+                if (!_pipelineAudioCtx) _pipelineAudioCtx = new AC();
+                const ctx = _pipelineAudioCtx;
+                if (ctx.state === "suspended") { try { ctx.resume(); } catch (e) {} }
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = "sine";
+                osc.frequency.setValueAtTime(frequency, ctx.currentTime);
+                gain.gain.setValueAtTime(0.1, ctx.currentTime);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start();
+                osc.stop(ctx.currentTime + seconds);
+            } catch (e) { /* AudioContext unavailable/blocked — ignore */ }
+        }
+        function playScanDetectedBeep()    { _playPipelineBeep(540, 0.12); }  // LOW  — barcode captured
+        function playProductResolvedBeep() { _playPipelineBeep(1180, 0.14); } // HIGH — product resolved
+
+        // Barcodes are STRINGS. Never parseInt() — leading zeroes are
+        // significant (012345678905 stays 012345678905). Mirrors the backend
+        // normalize_barcode() contract in main.py exactly: strip every
+        // non-digit; 6-14 digits is a barcode. Anything that is not 6-14
+        // digits after stripping (an alphanumeric SKU in Add Product, a
+        // product name typed into the POS field) passes through trimmed and
+        // otherwise untouched, so SKU / name entry still works.
+        function normalizeBarcodeInput(raw) {
+            const trimmed = String(raw == null ? "" : raw).replace(/[\r\n\t]+/g, " ").trim();
+            const digits = trimmed.replace(/\D/g, "");
+            const isBarcode = digits.length >= 6 && digits.length <= 14;
+            return { value: trimmed, digits, isBarcode, canonical: isBarcode ? digits : trimmed };
+        }
+
+        // Collapse a scanner that ends a barcode with more than one terminator
+        // (CR+LF, or Enter then a stray Tab) into one submission. Event-noise
+        // suppression only, not a business rule.
+        let _lastBarcodeSubmit = { key: "", at: 0 };
+        const BARCODE_SUBMIT_DEDUP_MS = 150;
+        function _isDuplicateBarcodeSubmit(scope, value) {
+            const now = Date.now();
+            const key = scope + "|" + value;
+            if (key === _lastBarcodeSubmit.key && (now - _lastBarcodeSubmit.at) < BARCODE_SUBMIT_DEDUP_MS) return true;
+            _lastBarcodeSubmit = { key, at: now };
+            return false;
+        }
+
+        // Diagnostic-only guess: wedge scanners emit keystrokes far faster
+        // than a person types. Never a routing or security decision — both
+        // paths are byte-for-byte identical.
+        const _barcodeKeyCadence = {};
+        function _noteBarcodeKeystroke(fieldId) {
+            const now = Date.now();
+            const s = _barcodeKeyCadence[fieldId] || (_barcodeKeyCadence[fieldId] = { last: 0, fast: 0, n: 0 });
+            if (s.last) { s.n++; if (now - s.last < 35) s.fast++; }
+            s.last = now;
+        }
+        function _classifyBarcodeSource(fieldId) {
+            const s = _barcodeKeyCadence[fieldId];
+            _barcodeKeyCadence[fieldId] = { last: 0, fast: 0, n: 0 };
+            return (s && s.n >= 3 && (s.fast / s.n) > 0.7) ? "hardware" : "manual";
+        }
+
+        // ADD PRODUCT submission: normalize -> LOW capture beep -> the existing
+        // server-backed identity chain (own inventory -> Cauldra General
+        // Catalog -> UPCitemdb, all inside POST /catalog/barcode-lookup). This
+        // helper never talks to UPCitemdb or the catalog directly, and never
+        // touches POS.
+        function submitProductBarcode(raw, source) {
+            const norm = normalizeBarcodeInput(raw);
+            if (!norm.value) return;
+            if (_isDuplicateBarcodeSubmit("product", norm.value)) return;
+            const input = document.getElementById("barcode-input");
+            if (input) input.value = norm.value;
+            console.log("[barcode] captured", { source: source || "manual", mode: "product", code: norm.canonical });
+            playScanDetectedBeep();            // LOW — complete barcode captured, BEFORE any lookup
+            lookupBarcode();
+        }
+
+        // POS submission: normalize -> LOW capture beep -> the existing local
+        // resolver. POS matches ONLY this business's stocked inventory
+        // (resolveScannedProduct) and never calls /catalog/barcode-lookup or
+        // UPCitemdb — recognising a barcode is not the same as stocking it.
+        function submitPosBarcode(raw, source) {
+            const norm = normalizeBarcodeInput(raw);
+            if (!norm.value) return;
+            if (_isDuplicateBarcodeSubmit("pos", norm.value)) return;
+            console.log("[barcode] captured", { source: source || "manual", mode: "pos", code: norm.canonical });
+            playScanDetectedBeep();            // LOW — captured, BEFORE inventory matching
+            const input = document.getElementById("pos-scan-input");
+            if (input) input.value = "";
+            document.getElementById("pos-autocomplete-dropdown")?.classList.add("hidden");
+            resolveAndAddScannedProduct(norm.value);
+        }
+
+        // Shared terminator handling for a scan field. keydown, not keypress:
+        // keypress never fires for Tab, and browsers drop keypresses under the
+        // synthetic-keystroke burst a wedge scanner produces. Handles Enter,
+        // NumpadEnter and Tab — covering CR, LF, CRLF, Enter and Tab wedge
+        // suffixes. preventDefault stops Tab moving focus off the field before
+        // the value is read (and any stray form submit on Enter).
+        function _wireScanField(fieldId, submitFn) {
+            const el = document.getElementById(fieldId);
+            if (!el) return;
+            el.addEventListener("focus", _primePipelineAudio);
+            el.addEventListener("keydown", (e) => {
+                const isTerminator = e.key === "Enter" || e.key === "Tab" || e.code === "NumpadEnter";
+                if (!isTerminator) { _noteBarcodeKeystroke(fieldId); return; }
+                e.preventDefault();
+                if (!String(el.value).trim()) return;
+                submitFn(el.value, _classifyBarcodeSource(fieldId));
+            });
+        }
+        _wireScanField("barcode-input", submitProductBarcode);
+        _wireScanField("pos-scan-input", submitPosBarcode);
+        document.getElementById("barcode-input")?.addEventListener("input", updateSkuPlaceholder);
 
         // Add Product's OWN barcode chain — completely separate from POS
         // scanning (see resolveScannedProduct/resolveAndAddScannedProduct):
@@ -20176,11 +20330,16 @@
             // the server repeats this exact-barcode check authoritatively
             // (business-scoped) before ever consulting the catalog/UPCitemdb,
             // so this is purely a faster response for the common case, not
-            // the security boundary.
+            // the security boundary. Digits-only, matching backend
+            // normalize_barcode() and how Product.barcode is stored.
             const normalizedInput = inputVal.replace(/\D/g, "");
+            console.log("[barcode] product lookup starting:", normalizedInput || inputVal);
             const ownMatch = normalizedInput && globalProducts.find(p => p.barcode && String(p.barcode).trim() === normalizedInput);
             if (ownMatch) {
-                playSuccessBeep();
+                // Already stocked. The LOW capture beep already fired; a
+                // duplicate is a "you have this" notice, not a resolved-
+                // identity success, so no HIGH beep (Part 11: least confusing).
+                console.warn("[barcode] already in this inventory:", normalizedInput);
                 showToast(t("products.barcodeAlreadyInInventory", { name: ownMatch.name }), "info");
                 return;
             }
@@ -20202,7 +20361,7 @@
                 if (res.ok && data.found && data.duplicate) {
                     nameInput.value = "";
                     document.getElementById("p-sku").value = "";
-                    playSuccessBeep();
+                    console.warn("[barcode] already in this inventory:", data.product_name);
                     showToast(t("products.barcodeAlreadyInInventory", { name: data.product_name }), "info");
                 } else if (res.ok && data.found) {
                     // Only IDENTITY fields the form actually supports — never
@@ -20212,16 +20371,17 @@
                     document.getElementById("p-name").value = data.product_name || "";
                     if (document.getElementById("p-size") && data.size) document.getElementById("p-size").value = data.size;
                     updateSkuPlaceholder();
-                    playSuccessBeep();
+                    console.log("[barcode] product resolved:", data.product_name, "(source:", (data.source || "catalog") + ")");
+                    playProductResolvedBeep();     // HIGH — barcode resolved to a product identity
                 } else {
                     document.getElementById("p-name").value = "";
-                    playSuccessBeep();
+                    console.warn("[barcode] not found:", inputVal);
                     showToast(t("products.productNotFoundManualEntry"), "info");
                 }
             } catch (err) {
                 nameInput.disabled = false;
                 document.getElementById("p-name").value = "";
-                playSuccessBeep();
+                console.error("[barcode] product lookup failed:", (err && err.message) || err);
                 showToast(t("products.lookupFailed"), "error");
             }
         }
@@ -20292,13 +20452,10 @@
             }
         }
 
-        document.getElementById("pos-scan-input").addEventListener("keypress", (e) => {
-            if (e.key === "Enter") {
-                e.preventDefault();
-                document.getElementById("pos-autocomplete-dropdown").classList.add("hidden");
-                addScannedItemToPOSCart();
-            }
-        });
+        // #pos-scan-input terminator handling is wired by _wireScanField()
+        // in the barcode capture pipeline above (keydown: Enter / NumpadEnter /
+        // Tab -> submitPosBarcode). addScannedItemToPOSCart() is kept below as
+        // a still-valid programmatic entry point.
 
         function handlePOSSearchInput() {
             const query = document.getElementById("pos-scan-input").value.toLowerCase().trim();
@@ -20343,7 +20500,11 @@
             const code = String(rawCode || "").trim();
             if (!code) return null;
             const lower = code.toLowerCase();
+            const digits = code.replace(/\D/g, "");
+            // barcode: stored digits-only (backend normalize_barcode) — try the
+            // raw scan and its digits-only form; SKU: exact, case-insensitive.
             return globalProducts.find(p => p.barcode && String(p.barcode).trim() === code)
+                || (digits.length >= 6 && globalProducts.find(p => p.barcode && String(p.barcode).trim() === digits))
                 || globalProducts.find(p => p.sku && String(p.sku).trim().toLowerCase() === lower)
                 || null;
         }
@@ -20357,8 +20518,10 @@
         function resolveAndAddScannedProduct(rawCode) {
             const code = String(rawCode || "").trim();
             if (!code) return;
+            console.log("[barcode] POS resolving:", code);
             const product = resolveScannedProduct(code);
             if (!product) {
+                console.warn("[barcode] not in this inventory:", code);
                 showToast(t("sales.itemNotInInventory"), "error");
                 document.getElementById("pos-scan-input").value = "";
                 keepPOSScannerFocused();
@@ -20368,13 +20531,18 @@
         }
 
         function addScannedItemToPOSCart() {
+            // Retained programmatic entry point — routes through the shared POS
+            // submission helper so any caller still gets the capture beep and
+            // terminator de-dup (the scan field's own keydown is wired
+            // separately by _wireScanField).
             const code = document.getElementById("pos-scan-input").value.trim();
             if (!code) return;
-            resolveAndAddScannedProduct(code);
+            submitPosBarcode(code, "manual");
         }
 
         function addSpecificProductToPOSCart(product) {
             if (product.quantity < 1) {
+                console.warn("[barcode] resolved but out of stock:", product.name);
                 showToast(t("sales.itemOutOfStock", {name: product.name}), "error");
                 document.getElementById("pos-scan-input").value = "";
                 keepPOSScannerFocused();
@@ -20383,6 +20551,7 @@
             const existing = posCart.find(i => i.id === product.id);
             if (existing) {
                 if (existing.qty >= product.quantity) {
+                    console.warn("[barcode] resolved but no more stock to add:", product.name);
                     showToast(t("sales.onlyUnitsLeft", {count: product.quantity}), "error");
                     document.getElementById("pos-scan-input").value = "";
                     keepPOSScannerFocused();
@@ -20408,7 +20577,8 @@
                     qty: 1, maxStock: product.quantity
                 });
             }
-            playSuccessBeep();
+            console.log("[barcode] product resolved:", product.name);
+            playProductResolvedBeep();          // HIGH — stocked product added/incremented in the cart
             document.getElementById("pos-scan-input").value = "";
             renderPOSCart();
             keepPOSScannerFocused();
