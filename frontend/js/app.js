@@ -19952,6 +19952,10 @@
         let _zxScanning = false;
         let _zxGrab = null;
         let _zxLastDecode = { code: null, at: 0 };
+        // --- V19 camera diagnostic state (does not affect decoding) ---
+        let _camTrack = null;      // active MediaStreamTrack (video)
+        let _camDevices = [];      // enumerateDevices() -> kind === "videoinput"
+        let _camDeviceId = null;   // deviceId currently in use
 
         function _zxHints() {
             const ZX = window.ZXing, BF = ZX.BarcodeFormat, H = new Map();
@@ -19992,6 +19996,174 @@
             host.appendChild(build);
             _camVideo = video;
         }
+
+        // ===================== V19 CAMERA DIAGNOSTICS =====================
+        // Additive. Never called by _zxScanTick / handleCameraBarcodeDecoded /
+        // any downstream barcode path.
+
+        async function _enumerateCameras() {
+            try {
+                const all = await navigator.mediaDevices.enumerateDevices();
+                _camDevices = all.filter(d => d.kind === "videoinput");
+            } catch (err) {
+                console.warn("[camera-diag] enumerateDevices() failed:", (err && err.message) || err);
+                _camDevices = [];
+            }
+            console.log("[camera-diag] videoinput devices (" + _camDevices.length + "):",
+                _camDevices.map((d, i) => ({ i: i, deviceId: d.deviceId, label: d.label || "(no label)" })));
+            console.log("[camera-diag] active deviceId:", _camDeviceId);
+        }
+
+        function _readTrackCapabilities() {
+            const trk = _camTrack;
+            if (!trk) return null;
+            let caps = {}, settings = {};
+            try { caps = (trk.getCapabilities && trk.getCapabilities()) || {}; }
+            catch (err) { console.warn("[camera-diag] getCapabilities() failed:", (err && err.message) || err); }
+            try { settings = (trk.getSettings && trk.getSettings()) || {}; } catch (err) {}
+            const report = {
+                focusMode: (caps.focusMode !== undefined) ? caps.focusMode : "(not reported)",
+                zoom: caps.zoom ? { min: caps.zoom.min, max: caps.zoom.max, step: caps.zoom.step, current: settings.zoom } : "(not supported)",
+                width: caps.width ? { min: caps.width.min, max: caps.width.max, current: settings.width } : "(not reported)",
+                height: caps.height ? { min: caps.height.min, max: caps.height.max, current: settings.height } : "(not reported)",
+            };
+            console.log("[camera-diag] track.getCapabilities():", caps);
+            console.log("[camera-diag] track.getSettings():", settings);
+            console.log("[camera-diag] focusMode / zoom / width / height ->", report);
+            return { caps: caps, settings: settings, report: report };
+        }
+
+        async function _applyContinuousFocus() {
+            const trk = _camTrack;
+            if (!trk || !trk.getCapabilities || !trk.applyConstraints) return;
+            let modes = [];
+            try { modes = (trk.getCapabilities() || {}).focusMode || []; } catch (err) { return; }
+            if (Array.isArray(modes) && modes.indexOf("continuous") !== -1) {
+                try {
+                    await trk.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+                    console.log("[camera-diag] applied focusMode: continuous");
+                } catch (err) {
+                    console.warn("[camera-diag] applyConstraints(focusMode:continuous) failed:", (err && err.message) || err);
+                }
+            } else {
+                console.log("[camera-diag] continuous focus not supported (focusMode =", modes, ")");
+            }
+        }
+
+        async function _applyCameraZoom(value) {
+            const trk = _camTrack;
+            if (!trk || !trk.applyConstraints) return;
+            try { await trk.applyConstraints({ advanced: [{ zoom: value }] }); }
+            catch (err) { console.warn("[camera-diag] applyConstraints(zoom) failed:", (err && err.message) || err); }
+        }
+
+        // Rear-camera cycle list: prefer devices whose label reads back/rear/
+        // environment (phones expose wide + ultrawide + tele); fall back to all.
+        function _rearCycleList() {
+            const rear = _camDevices.filter(d => /back|rear|environment|world/i.test(d.label || ""));
+            return rear.length >= 2 ? rear : _camDevices;
+        }
+
+        async function _openCameraDevice(deviceId, mode) {
+            if (_camStream) {
+                try { _camStream.getTracks().forEach(tr => { try { tr.stop(); } catch (_) {} }); } catch (_) {}
+                _camStream = null;
+            }
+            let stream;
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: "environment" } },
+                    audio: false,
+                });
+            } catch (err) {
+                console.error("[camera-diag] switch-camera getUserMedia failed:", (err && err.name) || err);
+                showToast("Could not open that camera", "error");
+                return;
+            }
+            if (activeCameraMode !== mode) { stream.getTracks().forEach(x => { try { x.stop(); } catch (_) {} }); return; }
+            _camStream = stream;
+            _camTrack = (stream.getVideoTracks && stream.getVideoTracks()[0]) || null;
+            _camDeviceId = (_camTrack && _camTrack.getSettings && _camTrack.getSettings().deviceId) || deviceId || null;
+            if (_camVideo) {
+                _camVideo.srcObject = stream;
+                try { await _camVideo.play(); } catch (_) {}
+            }
+            await _applyContinuousFocus();
+            _renderCameraDiagnostics(mode);
+            console.log("[camera-diag] switched to deviceId:", _camDeviceId);
+        }
+
+        async function _switchCamera() {
+            if (!activeCameraMode) return;
+            const list = _rearCycleList();
+            if (list.length < 2) { showToast("Only one camera available", "info"); return; }
+            let idx = list.findIndex(d => d.deviceId && d.deviceId === _camDeviceId);
+            if (idx < 0) idx = 0;
+            const next = list[(idx + 1) % list.length];
+            if (next && next.deviceId) await _openCameraDevice(next.deviceId, activeCameraMode);
+        }
+
+        function _renderCameraDiagnostics(mode) {
+            const host = document.getElementById(_scannerViewId(mode));
+            if (!host) return;
+            let panel = host.querySelector("[data-camera-diag]");
+            if (!panel) {
+                panel = document.createElement("div");
+                panel.setAttribute("data-camera-diag", "");
+                panel.style.cssText = "font-size:11px;line-height:1.5;color:#c7d2fe;padding:4px 2px 3px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace";
+                if (host.lastElementChild) host.insertBefore(panel, host.lastElementChild);
+                else host.appendChild(panel);
+            }
+            const cap = _readTrackCapabilities();
+            const rep = cap ? cap.report : { focusMode: "?", zoom: "?", width: "?", height: "?" };
+            const list = _camDevices;
+            const curIdx = list.findIndex(d => d.deviceId && d.deviceId === _camDeviceId);
+            const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+            const rows = list.map((d, i) =>
+                (i === curIdx ? "→ " : "  ") + "[" + i + "] " +
+                esc(d.label || ("camera " + (i + 1))) + " · " +
+                (d.deviceId ? esc(d.deviceId.slice(0, 10)) + "…" : "(id hidden)")
+            ).join("<br>");
+
+            panel.innerHTML =
+                "<div style='opacity:.8;margin-bottom:1px'>videoinput devices (" + list.length + "):</div>" +
+                "<div>" + (rows || "(none)") + "</div>" +
+                "<div style='margin-top:3px'>active deviceId: <b style='color:#e0e7ff'>" +
+                    (_camDeviceId ? esc(_camDeviceId.slice(0, 16)) + "…" : "(unknown)") + "</b></div>" +
+                "<div>focusMode: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.focusMode)) + "</b></div>" +
+                "<div>zoom: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.zoom)) + "</b></div>" +
+                "<div>width: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.width)) + "</b></div>" +
+                "<div>height: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.height)) + "</b></div>";
+
+            if (list.length > 1) {
+                const btn = document.createElement("button");
+                btn.type = "button";
+                btn.textContent = "Switch camera";
+                btn.style.cssText = "margin-top:6px;padding:5px 12px;font-size:12px;border-radius:6px;border:1px solid #6366f1;background:#312e81;color:#e0e7ff;cursor:pointer";
+                btn.onclick = function () { _switchCamera(); };
+                panel.appendChild(btn);
+            }
+
+            if (cap && cap.caps && cap.caps.zoom) {
+                const zc = cap.caps.zoom;
+                const curZoom = (cap.settings && cap.settings.zoom != null) ? cap.settings.zoom : (zc.min != null ? zc.min : 1);
+                const wrap = document.createElement("div");
+                wrap.style.cssText = "margin-top:6px;display:flex;align-items:center;gap:8px";
+                const lab = document.createElement("span"); lab.textContent = "Zoom";
+                const rng = document.createElement("input");
+                rng.type = "range";
+                rng.min = (zc.min != null ? zc.min : 1);
+                rng.max = (zc.max != null ? zc.max : 1);
+                rng.step = (zc.step || 0.1);
+                rng.value = curZoom;
+                rng.style.cssText = "flex:1";
+                const out = document.createElement("span"); out.textContent = Number(curZoom).toFixed(1) + "×";
+                rng.oninput = function () { out.textContent = Number(rng.value).toFixed(1) + "×"; _applyCameraZoom(Number(rng.value)); };
+                wrap.appendChild(lab); wrap.appendChild(rng); wrap.appendChild(out);
+                panel.appendChild(wrap);
+            }
+        }
+        // =================== end V19 CAMERA DIAGNOSTICS ===================
 
         // ONE camera success entry point. submitProductBarcode / submitPosBarcode
         // already emit the LOW capture beep + "Barcode captured" diagnostic and
@@ -20090,6 +20262,18 @@
                 try { await _camVideo.play(); } catch (_) { /* autoplay quirk - the tick still reads frames once ready */ }
             }
 
+            // --- V19 diagnostics: permission is granted here, so labels/caps
+            // are available. Purely observational + focus/zoom helpers. ---
+            _camTrack = (stream.getVideoTracks && stream.getVideoTracks()[0]) || null;
+            _camDeviceId = (_camTrack && _camTrack.getSettings && _camTrack.getSettings().deviceId) || null;
+            try {
+                await _enumerateCameras();
+                await _applyContinuousFocus();
+                _renderCameraDiagnostics(mode);
+            } catch (err) {
+                console.warn("[camera-diag] setup failed (decoding unaffected):", (err && err.message) || err);
+            }
+
             try {
                 _zxReader = new window.ZXing.BrowserMultiFormatReader(_zxHints(), 200);
             } catch (err) {
@@ -20117,6 +20301,9 @@
                 try { _camStream.getTracks().forEach(tr => { try { tr.stop(); } catch (_) {} }); } catch (_) {}
                 _camStream = null;
             }
+            _camTrack = null;
+            _camDevices = [];
+            _camDeviceId = null;
             if (_camVideo) {
                 try { _camVideo.pause(); } catch (_) {}
                 try { _camVideo.srcObject = null; } catch (_) {}
@@ -20243,7 +20430,7 @@
         // => nothing was ever decoded. One reused AudioContext, unlocked on the
         // camera tap / scan-field focus; entirely best-effort — a blocked or
         // missing AudioContext must never interrupt a scan.
-        console.log("[barcode] app.js build 2026-09-03-v18 — camera scanner: ZXing ONLY (zxing-only-v1)");
+        console.log("[barcode] app.js build 2026-09-03-v19 — camera diagnostics (device list / switch / capabilities / focus / zoom)");
         let _pipelineAudioCtx = null;
         function _primePipelineAudio() {
             try {
