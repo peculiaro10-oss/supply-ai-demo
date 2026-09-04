@@ -8533,16 +8533,20 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
     barcode = normalize_barcode(req.barcode)
     if not barcode:
         raise HTTPException(status_code=400, detail="Please scan or enter a valid barcode.")
+    print(f"[barcode-flow] request received: {barcode}")
 
     # 1. Duplicate check — this business's OWN inventory only. Never reveals
     # whether any other business stocks this barcode (see spec: business
     # isolation must hold even when the barcode is otherwise recognized).
     existing = db.query(Product).filter(Product.business_id == user.business_id, Product.barcode == barcode).first()
     if existing:
+        print("[barcode-flow] own inventory: HIT")
+        print("[barcode-flow] final response source: own_inventory")
         return {
             "found": True, "source": "own_inventory", "barcode": barcode,
             "duplicate": True, "product_id": existing.id, "product_name": existing.name,
         }
+    print("[barcode-flow] own inventory: MISS")
 
     # 2. Cauldra General Catalog — shared product IDENTITY only (see
     # GeneralCatalog docstring). Checked before ever considering UPCitemdb,
@@ -8550,17 +8554,27 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
     # submission, or a past UPCitemdb hit) never costs a new external call.
     cataloged = lookup_general_catalog(db, barcode)
     if cataloged:
+        print("[barcode-flow] general catalog: HIT")
+        print("[barcode-flow] final response source: cauldra_catalog")
         return {
             "found": True, "source": "cauldra_catalog", "barcode": barcode,
             "product_name": cataloged.product_name, "brand": cataloged.brand, "size": cataloged.size,
         }
+    print("[barcode-flow] general catalog: MISS")
 
-    # 3. UPCitemdb — only ever reached on a genuine General Catalog miss.
-    # lookup_upcitemdb() never raises: not-found, rate-limited, and
-    # unreachable/error outcomes all come back as None here.
-    from upcitemdb_provider import lookup_upcitemdb
-    identity = lookup_upcitemdb(barcode)
-    if identity:
+    # 3. UPCitemdb — reached on EVERY General Catalog miss. A miss here is not
+    # the end of the lookup, and a provider error/rate-limit here is NOT a
+    # "catalog did not contain it" outcome — the two are reported separately
+    # (source "not_found" vs "upcitemdb_unavailable") so the frontend can show
+    # an accurate message.
+    print("[barcode-flow] ENTERING UPCITEMDB FALLBACK")
+    from upcitemdb_provider import lookup_upcitemdb_detailed
+    print("[barcode-flow] UPCitemdb request started")
+    upc = lookup_upcitemdb_detailed(barcode)
+    print(f"[barcode-flow] UPCitemdb raw outcome: {upc['outcome'].upper()} ({upc['detail']})")
+
+    if upc["outcome"] == "hit" and upc["identity"]:
+        identity = upc["identity"]
         cached = upsert_general_catalog_identity(
             db, barcode, identity["product_name"], identity.get("brand"), identity.get("size"), source="upcitemdb",
         )
@@ -8569,11 +8583,23 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
         except Exception:
             db.rollback()
             raise
+        print("[barcode-flow] final response source: upcitemdb")
         return {
             "found": True, "source": "upcitemdb", "barcode": barcode,
             "product_name": cached.product_name, "brand": cached.brand, "size": cached.size,
         }
 
+    if upc["outcome"] in ("error", "rate_limited"):
+        # The barcode service could not answer — DO NOT claim the catalog
+        # lacked it. Manual entry is still offered, with an honest message.
+        print(f"[barcode-flow] final response source: upcitemdb_unavailable ({upc['outcome']})")
+        return {
+            "found": False, "source": "upcitemdb_unavailable", "barcode": barcode,
+            "upcitemdb_outcome": upc["outcome"], "upcitemdb_detail": upc["detail"],
+            "manual_entry": True,
+        }
+
+    print("[barcode-flow] final response source: not_found")
     return {"found": False, "source": "not_found", "barcode": barcode, "manual_entry": True}
 
 @app.get("/general-catalog")

@@ -1256,6 +1256,7 @@
                     cameraAccessFailed: "Unable to access camera.", scanOrEnterSku: "Please scan barcode or enter SKU/UPC!",
                     productNotFoundManualEntry: "We could not find this product in the Cauldra catalog. Please enter the details manually.",
                     lookupFailed: "We could not look up that product. Please try again.",
+                    barcodeServiceUnavailable: "The barcode lookup service is temporarily unavailable. You can still enter the product details manually below.",
                     barcodeAlreadyInInventory: "This barcode is already in your inventory ({name}). Search for it in Stock Inventory to restock or edit it instead.",
                     updateStockFailed: "Unable to update stock right now. Please try again.",
                     addedSuccess: "Product added successfully!", addFailed: "Unable to add the product right now. Please try again.",
@@ -20650,6 +20651,7 @@
         // missing AudioContext must never interrupt a scan.
         console.log("[barcode] app.js build 2026-09-04-v24 — clean scanner UI + Add Product autofill + [barcode-flow] trace");
         console.log("[dup] app.js build 2026-09-04-v25 — smart product duplicate detection");
+        console.log("[barcode-flow] app.js build 2026-09-04-v26 — barcode lookup: catalog MISS is not final; UPCitemdb outcome surfaced");
         let _pipelineAudioCtx = null;
         function _primePipelineAudio() {
             try {
@@ -20917,7 +20919,10 @@
             const sizeOwn = !!sizeEl && !sizeEl.value.trim();
 
             const normalizedInput = inputVal.replace(/\D/g, "");
+            const endpoint = `${API_URL}/catalog/barcode-lookup`;
+            console.log("[barcode-flow] lookupBarcode started");
             console.log("[barcode-flow] lookup request:", normalizedInput || inputVal);
+            console.log("[barcode-flow] endpoint:", endpoint);
 
             // Cheap client-side duplicate hint using data already in memory —
             // the server repeats this exact-barcode check authoritatively
@@ -20926,16 +20931,22 @@
             const ownMatch = normalizedInput && globalProducts.find(p => p.barcode && String(p.barcode).trim() === normalizedInput);
             if (ownMatch) {
                 console.log("[barcode-flow] source: own_inventory (client hint)");
-                console.log("[barcode-flow] populated fields: (already stocked — no autofill)");
-                showToast(t("products.barcodeAlreadyInInventory", { name: ownMatch.name }), "info");
+                const msg = t("products.barcodeAlreadyInInventory", { name: ownMatch.name });
+                console.log("[barcode-flow] message shown to user:", msg);
+                showToast(msg, "info");
                 return;
             }
 
             if (nameOwn) { nameEl.value = SENTINEL; nameEl.disabled = true; }
             if (skuEl && !skuEl.value.trim()) skuEl.value = generatedSku;
 
+            const clearProvisional = () => {
+                if (nameOwn && nameEl.value === SENTINEL) nameEl.value = "";
+                if (skuEl && skuEl.value === generatedSku) skuEl.value = "";
+            };
+
             try {
-                const res = await fetch(`${API_URL}/catalog/barcode-lookup`, {
+                const res = await fetch(endpoint, {
                     method: "POST",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
                     body: JSON.stringify({ barcode: inputVal })
@@ -20945,15 +20956,29 @@
                 let data = {};
                 try { data = rawText ? JSON.parse(rawText) : {}; } catch (_) { data = {}; }
                 console.log("[barcode-flow] HTTP status:", res.status);
-                console.log("[barcode-flow] response:", rawText.slice(0, 700));
+                console.log("[barcode-flow] response body:", rawText.slice(0, 700));
                 console.log("[barcode-flow] source:", data.source || "(none)");
 
-                if (res.ok && data.found && data.duplicate) {
-                    if (nameOwn) nameEl.value = "";
-                    if (skuEl && skuEl.value === generatedSku) skuEl.value = "";
-                    console.log("[barcode-flow] populated fields: (duplicate — user sent to Stock Inventory)");
-                    showToast(t("products.barcodeAlreadyInInventory", { name: data.product_name || "" }), "info");
-                } else if (res.ok && data.found) {
+                // HTTP-level failure (4xx/5xx). This is NOT a catalog miss and
+                // must never be reported as "not in the Cauldra catalog".
+                if (!res.ok) {
+                    clearProvisional();
+                    const msg = (res.status === 403 && data.detail) ? data.detail : t("products.lookupFailed");
+                    console.warn("[barcode-flow] lookup HTTP error", res.status, "-", (data.detail || rawText.slice(0, 200)));
+                    console.log("[barcode-flow] message shown to user:", msg);
+                    showToast(msg, "error");
+                    return;
+                }
+
+                if (data.found && data.duplicate) {
+                    clearProvisional();
+                    const msg = t("products.barcodeAlreadyInInventory", { name: data.product_name || "" });
+                    console.log("[barcode-flow] message shown to user:", msg);
+                    showToast(msg, "info");
+                    return;
+                }
+
+                if (data.found) {
                     // SAFE shared identity only — never category / price / cost /
                     // quantity / supplier / warehouse / SKU / sales history.
                     const filled = [];
@@ -20965,24 +20990,42 @@
                     if (barcodeEl && data.barcode) { barcodeEl.value = data.barcode; filled.push("barcode-input"); }
                     if (data.brand) console.log("[barcode-flow] brand available (Add Product has no brand field):", data.brand);
                     updateSkuPlaceholder();
-                    console.log("[barcode-flow] populated fields:", filled.join(", ") || "(response found:true but carried no identity fields)");
+                    console.log("[barcode-flow] populated fields:", filled.join(", ") || "(found:true but carried no identity fields)");
                     if (filled.length) {
                         playProductResolvedBeep();
-                        showToast("Product identified: " + (data.product_name || data.brand || "\u2713"), "success");
+                        const msg = "Product identified: " + (data.product_name || data.brand || "\u2713") + " (source: " + (data.source || "catalog") + ")";
+                        console.log("[barcode-flow] message shown to user:", msg);
+                        showToast(msg, "success");
                     } else {
-                        showToast(t("products.productNotFoundManualEntry"), "info");
+                        const msg = t("products.productNotFoundManualEntry");
+                        console.log("[barcode-flow] message shown to user:", msg);
+                        showToast(msg, "info");
                     }
+                    return;
+                }
+
+                // data.found === false. Distinguish "the barcode service could
+                // not answer" (source: upcitemdb_unavailable) from a genuine
+                // miss across BOTH the General Catalog AND UPCitemdb.
+                if (nameOwn) nameEl.value = "";
+                if (data.source === "upcitemdb_unavailable") {
+                    console.warn("[barcode-flow] UPCitemdb unavailable:", data.upcitemdb_outcome, "-", data.upcitemdb_detail);
+                    const msg = t("products.barcodeServiceUnavailable");
+                    console.log("[barcode-flow] message shown to user:", msg);
+                    showToast(msg, "warning");
                 } else {
-                    if (nameOwn) nameEl.value = "";
-                    console.log("[barcode-flow] populated fields: (not found — manual entry)");
-                    showToast(t("products.productNotFoundManualEntry"), "info");
+                    console.log("[barcode-flow] genuine miss (General Catalog + UPCitemdb) — manual entry");
+                    const msg = t("products.productNotFoundManualEntry");
+                    console.log("[barcode-flow] message shown to user:", msg);
+                    showToast(msg, "info");
                 }
             } catch (err) {
                 nameEl.disabled = false;
-                if (nameOwn && nameEl.value === SENTINEL) nameEl.value = "";
+                clearProvisional();
                 console.error("[barcode-flow] HTTP status: (request failed)  error:", (err && err.message) || err);
-                console.log("[barcode-flow] populated fields: (lookup failed — manual entry)");
-                showToast(t("products.lookupFailed"), "error");
+                const msg = t("products.lookupFailed");
+                console.log("[barcode-flow] message shown to user:", msg);
+                showToast(msg, "error");
             }
         }
 
