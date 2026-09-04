@@ -14,6 +14,7 @@ COPY frontend ./frontend
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY scripts ./scripts
+COPY platform ./platform
 
 RUN mkdir -p /data/uploads && useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app /data
 USER appuser
