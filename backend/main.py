@@ -8571,7 +8571,8 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
     from upcitemdb_provider import lookup_upcitemdb_detailed
     print("[barcode-flow] UPCitemdb request started")
     upc = lookup_upcitemdb_detailed(barcode)
-    print(f"[barcode-flow] UPCitemdb raw outcome: {upc['outcome'].upper()} ({upc['detail']})")
+    print(f"[barcode-flow] UPCitemdb raw outcome: {upc['outcome'].upper()} "
+          f"(http={upc.get('http_status')}, detail={upc['detail']})")
 
     if upc["outcome"] == "hit" and upc["identity"]:
         identity = upc["identity"]
@@ -8589,16 +8590,31 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
             "product_name": cached.product_name, "brand": cached.brand, "size": cached.size,
         }
 
-    if upc["outcome"] in ("error", "rate_limited"):
-        # The barcode service could not answer — DO NOT claim the catalog
-        # lacked it. Manual entry is still offered, with an honest message.
-        print(f"[barcode-flow] final response source: upcitemdb_unavailable ({upc['outcome']})")
+    if upc["outcome"] == "config_error":
+        # The provider is MISCONFIGURED (missing/invalid credentials). Loud
+        # server-side log for the operator; safe generic message to the user.
+        print(f"[barcode-flow] CONFIG ERROR: UPCitemdb provider is misconfigured — {upc['detail']} "
+              f"(set UPCITEMDB_PLAN / UPCITEMDB_API_KEY correctly). Barcode lookup fallback is DISABLED until fixed.")
+        print("[barcode-flow] final response source: upcitemdb_unavailable (config_error)")
         return {
             "found": False, "source": "upcitemdb_unavailable", "barcode": barcode,
-            "upcitemdb_outcome": upc["outcome"], "upcitemdb_detail": upc["detail"],
+            "upcitemdb_outcome": "config_error", "upcitemdb_detail": upc["detail"],
             "manual_entry": True,
         }
 
+    if upc["outcome"] == "temporary_error":
+        # Network / timeout / 429 / 5xx / provider outage / schema drift. DO NOT
+        # claim the catalog lacked the product. Manual entry still offered.
+        print(f"[barcode-flow] final response source: upcitemdb_unavailable "
+              f"(temporary_error: {upc['detail']})")
+        return {
+            "found": False, "source": "upcitemdb_unavailable", "barcode": barcode,
+            "upcitemdb_outcome": "temporary_error", "upcitemdb_detail": upc["detail"],
+            "manual_entry": True,
+        }
+
+    # upc["outcome"] == "miss" — the provider answered and genuinely has no
+    # product for this barcode. This (and only this) is a real not_found.
     print("[barcode-flow] final response source: not_found")
     return {"found": False, "source": "not_found", "barcode": barcode, "manual_entry": True}
 

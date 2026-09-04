@@ -52,6 +52,19 @@ UPCITEMDB_PAID_URL = "https://api.upcitemdb.com/prod/v1/lookup"
 # existing "enter product details manually" path, not stall the form.
 _REQUEST_TIMEOUT_SECONDS = 6
 
+# Diagnostic tracing (default on). Set UPCITEMDB_DEBUG=0 to silence. These logs
+# are secret-safe BY CONSTRUCTION: they only ever print the barcode, the PUBLIC
+# endpoint URL, whether (not which) an auth header is attached, UPCitemdb's own
+# response, and exception types/messages — never request headers, the API key,
+# Authorization, tokens, or cookies.
+_UPC_VERBOSE = os.getenv("UPCITEMDB_DEBUG", "1").strip().lower() not in ("0", "false", "no", "off")
+_BODY_PREVIEW_CHARS = 300
+
+
+def _upc_log(msg: str) -> None:
+    if _UPC_VERBOSE:
+        print(msg)
+
 # Fields UPCitemdb may return that Cauldra is explicitly forbidden from
 # importing into a business's inventory (see spec: never retail pricing,
 # never UPCitemdb's category) — kept here as documentation of what
@@ -99,92 +112,146 @@ def _sanitize_item(barcode: str, item: dict) -> Optional[UpcItemIdentity]:
 
 
 class UpcLookupResult(TypedDict):
-    outcome: str                        # "hit" | "miss" | "rate_limited" | "error"
+    outcome: str                        # "hit" | "miss" | "temporary_error" | "config_error"
     identity: Optional[UpcItemIdentity]
     detail: str
+    http_status: Optional[int]
 
 
 def lookup_upcitemdb_detailed(barcode: str) -> UpcLookupResult:
     """Look up one already-normalized barcode against UPCitemdb and report WHY
-    the lookup ended the way it did.
+    the lookup ended the way it did. Never raises. Never logs the API key or
+    request headers.
 
-    The plain lookup_upcitemdb() below returns dict-or-None, which makes a
-    genuine "this barcode is unknown" indistinguishable from "the request
-    timed out / was rate limited / the provider 500'd". /catalog/barcode-lookup
-    needs that distinction so it can log a real trace and so it never tells the
-    user "not in the Cauldra catalog" when the catalog was never the problem.
+      outcome="hit"              identity is a sanitized dict
+      outcome="miss"             the provider answered normally but no product
+                                 exists for this barcode
+      outcome="temporary_error"  the provider could not be reached or could not
+                                 give a usable answer right now: timeout, DNS,
+                                 SSL, connection reset, HTTP 429 (rate limit),
+                                 HTTP 5xx, other 4xx, TOO_FAST burst limit,
+                                 non-JSON body, or a response whose schema no
+                                 longer matches the parser
+      outcome="config_error"     the provider is misconfigured / credentials
+                                 are missing or rejected: UPCITEMDB_PLAN=paid
+                                 with an empty UPCITEMDB_API_KEY, or HTTP 401 /
+                                 HTTP 403 from UPCitemdb
 
-      outcome="hit"           identity is a sanitized dict
-      outcome="miss"          barcode genuinely not in UPCitemdb (or empty input)
-      outcome="rate_limited"  HTTP 429, or the trial endpoint's TOO_FAST body
-      outcome="error"         timeout / unreachable / HTTP 4xx-5xx / bad JSON /
-                              paid plan with no key
-
-    Never raises. Never logs the API key.
+    main.py maps hit->source"upcitemdb", miss->source"not_found",
+    temporary_error/config_error->source"upcitemdb_unavailable" (never
+    "not_found"), and logs config_error loudly server-side.
     """
-    def _r(outcome: str, identity, detail: str) -> "UpcLookupResult":
-        return {"outcome": outcome, "identity": identity, "detail": detail}
+    def _r(outcome: str, identity, detail: str, http_status=None) -> "UpcLookupResult":
+        return {"outcome": outcome, "identity": identity, "detail": detail, "http_status": http_status}
 
+    _upc_log(f"[upcitemdb] barcode: {barcode!r}")
     if not barcode:
-        return _r("miss", None, "no barcode")
+        _upc_log("[upcitemdb] parse result: MISS (empty barcode)")
+        return _r("miss", None, "empty barcode")
 
     url, headers = _provider_url_and_headers()
-    # Provider mode is logged (never the key or headers) so a developer can see
-    # which endpoint/auth path a lookup took.
-    print(f"[upcitemdb] lookup (mode={UPCITEMDB_PLAN})")
+    auth_desc = "user_key header attached" if (UPCITEMDB_PLAN == "paid" and headers.get("user_key")) else "none"
+    _upc_log(f"[upcitemdb] request endpoint: {url}  (mode={UPCITEMDB_PLAN}, auth={auth_desc})")
+
     if UPCITEMDB_PLAN == "paid" and not UPCITEMDB_API_KEY:
-        # Misconfiguration, not a provider failure — fail closed rather than
-        # sending an unauthenticated request to the paid endpoint.
-        print("[upcitemdb] UPCITEMDB_PLAN=paid but UPCITEMDB_API_KEY is not set; skipping lookup.")
-        return _r("error", None, "misconfigured: UPCITEMDB_PLAN=paid without UPCITEMDB_API_KEY")
+        _upc_log("[upcitemdb] parse result: CONFIG_ERROR (UPCITEMDB_PLAN=paid but UPCITEMDB_API_KEY is empty)")
+        print("[upcitemdb] CONFIG ERROR: UPCITEMDB_PLAN=paid but UPCITEMDB_API_KEY is not set")
+        return _r("config_error", None, "UPCITEMDB_PLAN=paid but UPCITEMDB_API_KEY is not set")
 
     import requests  # imported lazily, matching this codebase's other external-API call sites
 
+    _upc_log("[upcitemdb] request started")
     try:
         resp = requests.get(url, params={"upc": barcode}, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
-    except requests.exceptions.Timeout:
-        print("[upcitemdb] lookup timed out")
-        return _r("error", None, f"timeout after {_REQUEST_TIMEOUT_SECONDS}s")
+    except requests.exceptions.Timeout as exc:
+        _upc_log(f"[upcitemdb] exception: {type(exc).__name__}: {exc}")
+        _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR (timeout)")
+        return _r("temporary_error", None, f"timeout after {_REQUEST_TIMEOUT_SECONDS}s")
+    except requests.exceptions.SSLError as exc:
+        _upc_log(f"[upcitemdb] exception: {type(exc).__name__}: {exc}")
+        _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR (SSL error)")
+        return _r("temporary_error", None, f"SSL error: {type(exc).__name__}")
+    except requests.exceptions.ConnectionError as exc:
+        # DNS failure, connection refused, connection reset all arrive here.
+        _upc_log(f"[upcitemdb] exception: {type(exc).__name__}: {exc}")
+        _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR (connection / DNS)")
+        return _r("temporary_error", None, f"connection/DNS error: {type(exc).__name__}")
     except requests.exceptions.RequestException as exc:
-        print(f"[upcitemdb] lookup unreachable: {type(exc).__name__}")
-        return _r("error", None, f"unreachable: {type(exc).__name__}")
+        _upc_log(f"[upcitemdb] exception: {type(exc).__name__}: {exc}")
+        _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR (request exception)")
+        return _r("temporary_error", None, f"request error: {type(exc).__name__}")
 
-    if resp.status_code == 429:
-        print("[upcitemdb] rate limit exceeded (429) — falling back to manual entry, not retrying")
-        return _r("rate_limited", None, "HTTP 429")
-    if resp.status_code == 404:
-        print("[upcitemdb] barcode not found (HTTP 404)")
-        return _r("miss", None, "HTTP 404")
+    status = resp.status_code
+    _upc_log(f"[upcitemdb] HTTP status: {status}")
+    _rl = {k: resp.headers.get(k) for k in ("X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After")}
+    if any(_rl.values()):
+        _upc_log(
+            f"[upcitemdb] rate limit headers: limit={_rl['X-RateLimit-Limit']} "
+            f"remaining={_rl['X-RateLimit-Remaining']} reset={_rl['X-RateLimit-Reset']} "
+            f"retry_after={_rl['Retry-After']}"
+        )
+    _body = resp.text or ""
+    _upc_log("[upcitemdb] response body preview: " + _body[:_BODY_PREVIEW_CHARS].replace("\n", " ").replace("\r", " "))
+
+    if status in (401, 403):
+        _upc_log(f"[upcitemdb] parse result: CONFIG_ERROR (HTTP {status} - authentication rejected)")
+        print(f"[upcitemdb] CONFIG ERROR: UPCitemdb rejected the request with HTTP {status} "
+              f"(mode={UPCITEMDB_PLAN}; check UPCITEMDB_PLAN / UPCITEMDB_API_KEY)")
+        return _r("config_error", None, f"HTTP {status} (authentication rejected)", status)
+    if status == 429:
+        _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR (HTTP 429 rate limit)")
+        return _r("temporary_error", None, "HTTP 429 (rate limited)", status)
+    if status == 404:
+        _upc_log("[upcitemdb] parse result: MISS (HTTP 404)")
+        return _r("miss", None, "HTTP 404", status)
+    if 500 <= status <= 599:
+        _upc_log(f"[upcitemdb] parse result: TEMPORARY_ERROR (HTTP {status} provider server error)")
+        return _r("temporary_error", None, f"HTTP {status} (provider server error)", status)
     if not resp.ok:
-        print(f"[upcitemdb] lookup failed: HTTP {resp.status_code}")
-        return _r("error", None, f"HTTP {resp.status_code}")
+        _upc_log(f"[upcitemdb] parse result: TEMPORARY_ERROR (HTTP {status})")
+        return _r("temporary_error", None, f"HTTP {status}", status)
 
     try:
         payload = resp.json()
     except ValueError:
-        print("[upcitemdb] lookup returned invalid JSON")
-        return _r("error", None, "invalid JSON body")
+        _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR (response body was not valid JSON)")
+        return _r("temporary_error", None, "invalid JSON body", status)
 
     if not isinstance(payload, dict):
-        print("[upcitemdb] malformed response (top-level JSON was not an object)")
-        return _r("error", None, "top-level JSON not an object")
-    # UPCitemdb's trial endpoint signals its burst limit as an HTTP 200 with
-    # this body code, not a 429 status — treated exactly like the real 429.
-    if payload.get("code") == "TOO_FAST":
-        print("[upcitemdb] rate limit exceeded (TOO_FAST) — falling back to manual entry, not retrying")
-        return _r("rate_limited", None, "TOO_FAST body on HTTP 200")
+        _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR (top-level JSON was not an object)")
+        return _r("temporary_error", None, "top-level JSON not an object", status)
+
+    code = payload.get("code")
+    _upc_log(f"[upcitemdb] response code field: {code!r}  total={payload.get('total')!r}")
+
+    if code == "TOO_FAST":
+        _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR (TOO_FAST burst limit on HTTP 200)")
+        return _r("temporary_error", None, "TOO_FAST (burst limit) on HTTP 200", status)
+    if code in ("NOT_FOUND", "INVALID_UPC", "INVALID_QUERY"):
+        _upc_log(f"[upcitemdb] parse result: MISS (code={code})")
+        return _r("miss", None, f"code={code}", status)
+    if code not in ("OK", None):
+        _upc_log(f"[upcitemdb] parse result: TEMPORARY_ERROR (unexpected code={code!r})")
+        return _r("temporary_error", None, f"unexpected code={code}", status)
+
     items = payload.get("items")
-    if isinstance(items, list) and not items:
-        print("[upcitemdb] barcode not found (no items in response)")
-        return _r("miss", None, "no items in response")
-    if not isinstance(items, list) or not isinstance(items[0], dict):
-        print("[upcitemdb] malformed response (unexpected 'items' shape)")
-        return _r("error", None, "unexpected 'items' shape")
+    if not isinstance(items, list):
+        _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR ('items' missing / not a list - schema mismatch)")
+        return _r("temporary_error", None, "'items' missing or not a list (schema mismatch)", status)
+    if not items:
+        _upc_log("[upcitemdb] parse result: MISS (items list empty)")
+        return _r("miss", None, "no items in response", status)
+    if not isinstance(items[0], dict):
+        _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR (items[0] not an object - schema mismatch)")
+        return _r("temporary_error", None, "items[0] not an object (schema mismatch)", status)
+
     identity = _sanitize_item(barcode, items[0])
     if identity is None:
-        print("[upcitemdb] malformed item (no usable product title)")
-        return _r("miss", None, "item had no usable product title")
-    return _r("hit", identity, "ok")
+        _upc_log("[upcitemdb] parse result: MISS (item carried no usable product title)")
+        return _r("miss", None, "item had no usable product title", status)
+
+    _upc_log(f"[upcitemdb] parse result: HIT ({identity['product_name'][:60]!r})")
+    return _r("hit", identity, "ok", status)
 
 
 def lookup_upcitemdb(barcode: str) -> Optional[UpcItemIdentity]:
