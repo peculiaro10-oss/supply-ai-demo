@@ -1257,6 +1257,7 @@
                     productNotFoundManualEntry: "We could not find this product in the Cauldra catalog. Please enter the details manually.",
                     lookupFailed: "We could not look up that product. Please try again.",
                     barcodeServiceUnavailable: "The barcode lookup service is temporarily unavailable. You can still enter the product details manually below.",
+                    catalogTemporarilyUnavailable: "We're having trouble reaching the product catalog right now. You can still enter the product details manually below.",
                     barcodeAlreadyInInventory: "This barcode is already in your inventory ({name}). Search for it in Stock Inventory to restock or edit it instead.",
                     updateStockFailed: "Unable to update stock right now. Please try again.",
                     addedSuccess: "Product added successfully!", addFailed: "Unable to add the product right now. Please try again.",
@@ -21011,6 +21012,14 @@
                 if (data.source === "upcitemdb_unavailable") {
                     console.warn("[barcode-flow] UPCitemdb unavailable:", data.upcitemdb_outcome, "-", data.upcitemdb_detail);
                     const msg = t("products.barcodeServiceUnavailable");
+                    console.log("[barcode-flow] message shown to user:", msg);
+                    showToast(msg, "warning");
+                } else if (data.source === "catalog_error") {
+                    // The SERVER hit a General Catalog DB error (see backend
+                    // [barcode-flow] general catalog lookup ERROR). This is NOT
+                    // "product not found" — do not say so.
+                    console.error("[barcode-flow] server-side General Catalog error — check backend logs for the exception");
+                    const msg = t("products.catalogTemporarilyUnavailable");
                     console.log("[barcode-flow] message shown to user:", msg);
                     showToast(msg, "warning");
                 } else {

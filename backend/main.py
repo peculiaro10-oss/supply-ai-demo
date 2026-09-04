@@ -8535,32 +8535,51 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
         raise HTTPException(status_code=400, detail="Please scan or enter a valid barcode.")
     print(f"[barcode-flow] request received: {barcode}")
 
-    # 1. Duplicate check — this business's OWN inventory only. Never reveals
-    # whether any other business stocks this barcode (see spec: business
-    # isolation must hold even when the barcode is otherwise recognized).
-    existing = db.query(Product).filter(Product.business_id == user.business_id, Product.barcode == barcode).first()
+    # 1. Duplicate check — this business's OWN inventory only. A DB error here
+    # is logged and treated as a MISS (the authoritative business-scoped
+    # duplicate check still runs later in create_product); it must never abort
+    # the whole lookup.
+    print("[barcode-flow] own inventory lookup START")
+    try:
+        existing = db.query(Product).filter(
+            Product.business_id == user.business_id, Product.barcode == barcode
+        ).first()
+    except Exception as exc:
+        db.rollback()
+        existing = None
+        print(f"[barcode-flow] own inventory lookup ERROR: {type(exc).__name__}: {exc}")
     if existing:
-        print("[barcode-flow] own inventory: HIT")
+        print("[barcode-flow] own inventory lookup RESULT: HIT")
         print("[barcode-flow] final response source: own_inventory")
         return {
             "found": True, "source": "own_inventory", "barcode": barcode,
             "duplicate": True, "product_id": existing.id, "product_name": existing.name,
         }
-    print("[barcode-flow] own inventory: MISS")
+    print("[barcode-flow] own inventory lookup RESULT: MISS")
 
     # 2. Cauldra General Catalog — shared product IDENTITY only (see
-    # GeneralCatalog docstring). Checked before ever considering UPCitemdb,
-    # so a barcode already known to Cauldra (from any business's past
-    # submission, or a past UPCitemdb hit) never costs a new external call.
-    cataloged = lookup_general_catalog(db, barcode)
+    # GeneralCatalog docstring). A MISS here is NORMAL and simply continues to
+    # UPCitemdb. A genuine DB/query ERROR here is NOT a miss: it is logged
+    # distinctly, the lookup STILL tries UPCitemdb, and if that also cannot
+    # help the response is source "catalog_error" (never "not_found").
+    print("[barcode-flow] general catalog lookup START")
+    catalog_errored = False
+    cataloged = None
+    try:
+        cataloged = lookup_general_catalog(db, barcode)
+    except Exception as exc:
+        db.rollback()
+        catalog_errored = True
+        print(f"[barcode-flow] general catalog lookup ERROR: {type(exc).__name__}: {exc}")
     if cataloged:
-        print("[barcode-flow] general catalog: HIT")
+        print("[barcode-flow] general catalog lookup RESULT: HIT")
         print("[barcode-flow] final response source: cauldra_catalog")
         return {
             "found": True, "source": "cauldra_catalog", "barcode": barcode,
             "product_name": cataloged.product_name, "brand": cataloged.brand, "size": cataloged.size,
         }
-    print("[barcode-flow] general catalog: MISS")
+    print("[barcode-flow] general catalog lookup RESULT: "
+          + ("ERROR (continuing to UPCitemdb anyway)" if catalog_errored else "MISS"))
 
     # 3. UPCitemdb — reached on EVERY General Catalog miss. A miss here is not
     # the end of the lookup, and a provider error/rate-limit here is NOT a
@@ -8576,18 +8595,25 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
 
     if upc["outcome"] == "hit" and upc["identity"]:
         identity = upc["identity"]
-        cached = upsert_general_catalog_identity(
-            db, barcode, identity["product_name"], identity.get("brand"), identity.get("size"), source="upcitemdb",
-        )
+        name = identity["product_name"]
+        brand = identity.get("brand")
+        size = identity.get("size")
+        # Caching the identity back into the General Catalog is best-effort: if
+        # the write (or this connection) is unhealthy we still return the
+        # identity we already have from UPCitemdb rather than 500-ing.
         try:
+            cached = upsert_general_catalog_identity(
+                db, barcode, name, brand, size, source="upcitemdb",
+            )
             db.commit()
-        except Exception:
+            name, brand, size = cached.product_name, cached.brand, cached.size
+        except Exception as exc:
             db.rollback()
-            raise
+            print(f"[barcode-flow] general catalog cache-write ERROR (identity still returned): {type(exc).__name__}: {exc}")
         print("[barcode-flow] final response source: upcitemdb")
         return {
             "found": True, "source": "upcitemdb", "barcode": barcode,
-            "product_name": cached.product_name, "brand": cached.brand, "size": cached.size,
+            "product_name": name, "brand": brand, "size": size,
         }
 
     if upc["outcome"] == "config_error":
@@ -8614,7 +8640,13 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
         }
 
     # upc["outcome"] == "miss" — the provider answered and genuinely has no
-    # product for this barcode. This (and only this) is a real not_found.
+    # product for this barcode.
+    if catalog_errored:
+        # UPCitemdb had nothing AND the General Catalog query failed earlier.
+        # Do NOT report a clean "not found" — the catalog is degraded.
+        print("[barcode-flow] final response source: catalog_error")
+        return {"found": False, "source": "catalog_error", "barcode": barcode, "manual_entry": True}
+    # A real not_found: both the General Catalog and UPCitemdb looked and neither knows it.
     print("[barcode-flow] final response source: not_found")
     return {"found": False, "source": "not_found", "barcode": barcode, "manual_entry": True}
 
