@@ -1671,6 +1671,11 @@
             </div>
 
             <form id="product-form" onsubmit="handleCreateProduct(event)" class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div id="product-dup-hint" class="hidden sm:col-span-2 flex items-start gap-2 px-3 py-2 rounded-xl border border-warning/30 bg-warning/10 text-[11px] text-amber-200">
+                    <i class="fa-solid fa-circle-info mt-0.5 shrink-0"></i>
+                    <span id="product-dup-hint-text" class="flex-1 leading-relaxed"></span>
+                    <button type="button" onclick="document.getElementById('product-dup-hint').classList.add('hidden')" class="text-textSec hover:text-textMain shrink-0"><i class="fa-solid fa-xmark"></i></button>
+                </div>
                 <div>
                     <label class="block font-medium text-textSec mb-1" data-i18n="products.skuBarcode">SKU / Barcode</label>
                     <input type="text" id="p-sku" placeholder="SKU-XXXX" oninput="updateSkuPlaceholder()" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain placeholder-textSec focus:outline-none focus:border-primary font-mono">
@@ -1807,6 +1812,11 @@
             </div>
 
             <form id="edit-product-form" onsubmit="handleUpdateProductCombined(event)" class="space-y-3 text-xs">
+                <div id="edit-product-dup-hint" class="hidden flex items-start gap-2 px-3 py-2 rounded-xl border border-warning/30 bg-warning/10 text-[11px] text-amber-200">
+                    <i class="fa-solid fa-circle-info mt-0.5 shrink-0"></i>
+                    <span id="edit-product-dup-hint-text" class="flex-1 leading-relaxed"></span>
+                    <button type="button" onclick="document.getElementById('edit-product-dup-hint').classList.add('hidden')" class="text-textSec hover:text-textMain shrink-0"><i class="fa-solid fa-xmark"></i></button>
+                </div>
                 <input type="hidden" id="edit-p-id">
                 <div>
                     <label class="block font-medium text-textSec mb-1" data-i18n="products.productName">Product Name</label>
@@ -2027,6 +2037,23 @@
             <div class="pt-3 border-t border-borderCol mt-3 flex justify-end gap-2">
                 <button type="button" id="confirm-modal-cancel" class="bg-bgMain hover:bg-cardHover text-textSec px-3.5 py-2 rounded-xl text-xs font-semibold transition border border-borderCol cursor-pointer">Cancel</button>
                 <button type="button" id="confirm-modal-ok" class="bg-danger hover:bg-red-600 text-white px-4 py-2 rounded-xl text-xs font-semibold transition shadow-md shadow-danger/20 cursor-pointer">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- V25 SMART DUPLICATE DETECTION — blocking, un-bypassable dialog -->
+    <div id="duplicate-product-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-[140] hidden flex items-center justify-center p-4">
+        <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-md w-full shadow-2xl flex flex-col max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
+                <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-clone text-warning"></i> <span id="duplicate-modal-title">Possible duplicate found</span></h3>
+                <button type="button" id="duplicate-modal-close" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+            </div>
+            <p id="duplicate-modal-message" class="text-xs text-textMain leading-relaxed mb-3">This looks a lot like a product you already have. Are you sure this is not the same product?</p>
+            <div id="duplicate-candidate-list" class="space-y-2"></div>
+            <div class="pt-3 border-t border-borderCol mt-3 flex flex-col sm:flex-row sm:justify-end gap-2">
+                <button type="button" id="duplicate-modal-cancel" class="bg-bgMain hover:bg-cardHover text-textSec px-3.5 py-2 rounded-xl text-xs font-semibold transition border border-borderCol cursor-pointer">Cancel</button>
+                <button type="button" id="duplicate-add-different" class="bg-bgMain hover:bg-cardHover text-amber-300 border border-warning/40 px-4 py-2 rounded-xl text-xs font-semibold transition cursor-pointer">Add as a different product</button>
+                <button type="button" id="duplicate-use-existing" class="bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl text-xs font-semibold transition shadow-md cursor-pointer">Use existing product</button>
             </div>
         </div>
     </div>

@@ -19923,7 +19923,7 @@
         }
 
         // ============================================================
-        // CAMERA SCANNER - ZXing only   (Scanner build: zxing-stable-v1)
+        // CAMERA SCANNER - ZXing only   (Scanner build: zxing-stable-v2)
         //
         // PERFORMANCE ROLLBACK of V20. Camera frame -> barcode STRING ->
         // submitProductBarcode / submitPosBarcode (downstream unchanged).
@@ -19941,7 +19941,9 @@
         // <video>) - this 0.21.3 build's decode(<video>) returns a blank frame
         // on Chrome.
         // ============================================================
-        const SCANNER_BUILD = "zxing-stable-v2";
+        const SCANNER_BUILD = "zxing-stable-v2";   // console only from V24 - not shown in the UI
+        const DEBUG_SCANNER = false;               // V24: gate verbose [camera-diag] console noise
+        function _dbg() { if (DEBUG_SCANNER) { try { console.log.apply(console, arguments); } catch (e) {} } }
         const ZX_SCAN_INTERVAL_MS = 350;
         const ZX_DECODE_CANVAS_MAX_W = 1280;
         const ZX_DECODE_COOLDOWN_MS = 1200;   // same code re-read while still in frame is ignored this long
@@ -19963,8 +19965,6 @@
         let _zxStartLogged = false;
         let _zxGrab = null;            // ONE reusable decode canvas (app lifetime)
         let _zxCtx = null;             // ONE reusable 2D context
-        let _frozenCanvas = null;      // V22: ONE reusable frozen-frame canvas
-        let _frozenCtx = null;
         let _zxLastDecode = { code: null, at: 0 };
         // --- camera diagnostic state (read only at start / switch) ---
         let _camTrack = null;
@@ -19999,14 +19999,10 @@
             video.style.cssText = "width:100%;max-height:62vh;display:block;background:#000;border-radius:8px;object-fit:contain";
             const line = document.createElement("div");
             line.setAttribute("data-scanner-line", "");
-            line.style.cssText = "font-size:12px;font-weight:700;line-height:1.5;color:#e0e7ff;padding:6px 2px 1px;word-break:break-all";
-            line.textContent = "Camera ready";
-            const build = document.createElement("div");
-            build.style.cssText = "font-size:10px;color:#818cf8;opacity:.85;padding:0 2px 3px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace";
-            build.textContent = "Scanner build: " + SCANNER_BUILD;
+            line.style.cssText = "font-size:11px;font-weight:400;line-height:1.4;color:#94a3b8;text-align:center;padding:5px 2px 1px;word-break:break-all";
+            line.textContent = "Point camera at barcode";
             host.appendChild(video);
             host.appendChild(line);
-            host.appendChild(build);
             _camVideo = video;
         }
 
@@ -20021,28 +20017,9 @@
                 console.warn("[camera-diag] enumerateDevices() failed:", (err && err.message) || err);
                 _camDevices = [];
             }
-            console.log("[camera-diag] videoinput devices (" + _camDevices.length + "):",
+            _dbg("[camera-diag] videoinput devices (" + _camDevices.length + "):",
                 _camDevices.map((d, i) => ({ i: i, deviceId: d.deviceId, label: d.label || "(no label)" })));
-            console.log("[camera-diag] active deviceId:", _camDeviceId);
-        }
-
-        function _readTrackCapabilities() {
-            const trk = _camTrack;
-            if (!trk) return null;
-            let caps = {}, settings = {};
-            try { caps = (trk.getCapabilities && trk.getCapabilities()) || {}; }
-            catch (err) { console.warn("[camera-diag] getCapabilities() failed:", (err && err.message) || err); }
-            try { settings = (trk.getSettings && trk.getSettings()) || {}; } catch (err) {}
-            const report = {
-                focusMode: (caps.focusMode !== undefined) ? caps.focusMode : "(not reported)",
-                zoom: caps.zoom ? { min: caps.zoom.min, max: caps.zoom.max, step: caps.zoom.step, current: settings.zoom } : "(not supported)",
-                width: caps.width ? { min: caps.width.min, max: caps.width.max, current: settings.width } : "(not reported)",
-                height: caps.height ? { min: caps.height.min, max: caps.height.max, current: settings.height } : "(not reported)",
-            };
-            console.log("[camera-diag] track.getCapabilities():", caps);
-            console.log("[camera-diag] track.getSettings():", settings);
-            console.log("[camera-diag] focusMode / zoom / width / height ->", report);
-            return { caps: caps, settings: settings, report: report };
+            _dbg("[camera-diag] active deviceId:", _camDeviceId);
         }
 
         async function _applyContinuousFocus() {
@@ -20053,12 +20030,12 @@
             if (Array.isArray(modes) && modes.indexOf("continuous") !== -1) {
                 try {
                     await trk.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
-                    console.log("[camera-diag] applied focusMode: continuous");
+                    _dbg("[camera-diag] applied focusMode: continuous");
                 } catch (err) {
-                    console.warn("[camera-diag] applyConstraints(focusMode:continuous) failed:", (err && err.message) || err);
+                    _dbg("[camera-diag] applyConstraints(focusMode:continuous) failed:", (err && err.message) || err);
                 }
             } else {
-                console.log("[camera-diag] continuous focus not supported (focusMode =", modes, ")");
+                _dbg("[camera-diag] continuous focus not supported (focusMode =", modes, ")");
             }
         }
 
@@ -20066,7 +20043,7 @@
             const trk = _camTrack;
             if (!trk || !trk.applyConstraints) return;
             try { await trk.applyConstraints({ advanced: [{ zoom: value }] }); }
-            catch (err) { console.warn("[camera-diag] applyConstraints(zoom) failed:", (err && err.message) || err); }
+            catch (err) { _dbg("[camera-diag] applyConstraints(zoom) failed:", (err && err.message) || err); }
         }
 
         function _rearCycleList() {
@@ -20083,7 +20060,7 @@
             try {
                 stream = await navigator.mediaDevices.getUserMedia(_camVideoConstraints(deviceId));
             } catch (err) {
-                console.error("[camera-diag] switch-camera getUserMedia failed:", (err && err.name) || err);
+                _dbg("[camera-diag] switch-camera getUserMedia failed:", (err && err.name) || err);
                 showToast("Could not open that camera", "error");
                 return;
             }
@@ -20096,9 +20073,9 @@
                 try { await _camVideo.play(); } catch (_) {}
             }
             await _applyContinuousFocus();
-            _renderCameraDiagnostics(mode);
+            _renderScannerControls(mode);
             _zxStartLogged = false;   // re-log decode canvas once for the new source
-            console.log("[camera-diag] switched to deviceId:", _camDeviceId);
+            _dbg("[camera-diag] switched to deviceId:", _camDeviceId);
         }
 
         async function _switchCamera() {
@@ -20111,200 +20088,60 @@
             if (next && next.deviceId) await _openCameraDevice(next.deviceId, activeCameraMode);
         }
 
-        function _renderCameraDiagnostics(mode) {
+        // V24: the ONLY visible scanner chrome besides the preview + one line
+        // of muted helper text - a discreet bottom row: an icon switch-camera
+        // button and a thin zoom slider on the SAME line. Everything else
+        // (device list, deviceIds, focusMode/zoom/capability JSON, capture
+        // resolution, freeze-frame test, build text) is gone.
+        function _renderScannerControls(mode) {
             const host = document.getElementById(_scannerViewId(mode));
             if (!host) return;
-            let panel = host.querySelector("[data-camera-diag]");
-            if (!panel) {
-                panel = document.createElement("div");
-                panel.setAttribute("data-camera-diag", "");
-                panel.style.cssText = "font-size:11px;line-height:1.5;color:#c7d2fe;padding:4px 2px 3px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace";
-                if (host.lastElementChild) host.insertBefore(panel, host.lastElementChild);
-                else host.appendChild(panel);
+            let row = host.querySelector("[data-scan-controls]");
+            if (!row) {
+                row = document.createElement("div");
+                row.setAttribute("data-scan-controls", "");
+                row.style.cssText = "display:flex;align-items:center;gap:10px;margin-top:6px;padding:0 3px 1px";
+                host.appendChild(row);
             }
-            const cap = _readTrackCapabilities();
-            const rep = cap ? cap.report : { focusMode: "?", zoom: "?", width: "?", height: "?" };
-            const list = _camDevices;
-            const curIdx = list.findIndex(d => d.deviceId && d.deviceId === _camDeviceId);
-            const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-            const rows = list.map((d, i) =>
-                (i === curIdx ? "\u2192 " : "\u00a0\u00a0") + "[" + i + "] " +
-                esc(d.label || ("camera " + (i + 1))) + " \u00b7 " +
-                (d.deviceId ? esc(d.deviceId.slice(0, 10)) + "\u2026" : "(id hidden)")
-            ).join("<br>");
+            row.replaceChildren();
 
-            panel.innerHTML =
-                "<div style='opacity:.8;margin-bottom:1px'>videoinput devices (" + list.length + "):</div>" +
-                "<div>" + (rows || "(none)") + "</div>" +
-                "<div style='margin-top:3px'>active deviceId: <b style='color:#e0e7ff'>" +
-                    (_camDeviceId ? esc(_camDeviceId.slice(0, 16)) + "\u2026" : "(unknown)") + "</b></div>" +
-                "<div>focusMode: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.focusMode)) + "</b></div>" +
-                "<div>zoom: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.zoom)) + "</b></div>" +
-                "<div>width: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.width)) + "</b></div>" +
-                "<div>height: <b style='color:#e0e7ff'>" + esc(JSON.stringify(rep.height)) + "</b></div>";
-
-            if (list.length > 1) {
-                const btn = document.createElement("button");
-                btn.type = "button";
-                btn.textContent = "Switch camera";
-                btn.style.cssText = "margin-top:6px;padding:5px 12px;font-size:12px;border-radius:6px;border:1px solid #6366f1;background:#312e81;color:#e0e7ff;cursor:pointer";
-                btn.onclick = function () { _switchCamera(); };
-                panel.appendChild(btn);
+            // switch camera - icon only, muted, shown only when >1 camera
+            const camList = _rearCycleList();
+            if ((camList && camList.length > 1) || _camDevices.length > 1) {
+                const sw = document.createElement("button");
+                sw.type = "button";
+                sw.title = "Switch camera";
+                sw.setAttribute("aria-label", "Switch camera");
+                sw.innerHTML = '<i class="fa-solid fa-camera-rotate"></i>';
+                sw.style.cssText = "flex:0 0 auto;width:26px;height:24px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#94a3b8;background:transparent;border:1px solid rgba(148,163,184,.35);border-radius:5px;cursor:pointer;padding:0";
+                sw.onclick = function () { _switchCamera(); };
+                row.appendChild(sw);
             }
 
-            if (cap && cap.caps && cap.caps.zoom) {
-                const zc = cap.caps.zoom;
-                const curZoom = (cap.settings && cap.settings.zoom != null) ? cap.settings.zoom : (zc.min != null ? zc.min : 1);
-                const wrap = document.createElement("div");
-                wrap.style.cssText = "margin-top:6px;display:flex;align-items:center;gap:8px";
-                const lab = document.createElement("span"); lab.textContent = "Zoom";
+            // zoom - thin muted slider + tiny value, shown only when supported
+            let zc = null;
+            try {
+                const c = _camTrack && _camTrack.getCapabilities && _camTrack.getCapabilities();
+                if (c && c.zoom && (c.zoom.max || 0) > (c.zoom.min || 1)) zc = c.zoom;
+            } catch (e) {}
+            if (zc) {
+                let cur = (zc.min != null ? zc.min : 1);
+                try { const s = _camTrack.getSettings(); if (s && s.zoom != null) cur = s.zoom; } catch (e) {}
                 const rng = document.createElement("input");
                 rng.type = "range";
                 rng.min = (zc.min != null ? zc.min : 1);
-                rng.max = (zc.max != null ? zc.max : 1);
+                rng.max = zc.max;
                 rng.step = (zc.step || 0.1);
-                rng.value = curZoom;
-                rng.style.cssText = "flex:1";
-                const out = document.createElement("span"); out.textContent = Number(curZoom).toFixed(1) + "\u00d7";
-                rng.oninput = function () { out.textContent = Number(rng.value).toFixed(1) + "\u00d7"; _applyCameraZoom(Number(rng.value)); };
-                wrap.appendChild(lab); wrap.appendChild(rng); wrap.appendChild(out);
-                panel.appendChild(wrap);
-            }
-
-            // V22: frozen-frame decoder isolation test
-            const frow = document.createElement("div");
-            frow.style.cssText = "margin-top:8px;border-top:1px solid #334155;padding-top:6px";
-            const fbtn = document.createElement("button");
-            fbtn.type = "button";
-            fbtn.textContent = "\u2744 Freeze frame & test decoders";
-            fbtn.style.cssText = "padding:6px 12px;font-size:12px;border-radius:6px;border:1px solid #10b981;background:#064e3b;color:#d1fae5;cursor:pointer;display:block;width:100%";
-            fbtn.onclick = function () { _freezeFrameTest(mode); };
-            const fout = document.createElement("div");
-            fout.setAttribute("data-freeze-result", "");
-            fout.style.cssText = "margin-top:5px;white-space:pre-wrap;color:#a7f3d0;font-size:11px";
-            frow.appendChild(fbtn);
-            frow.appendChild(fout);
-            panel.appendChild(frow);
-        }
-
-        // V22: alternative 1D decoder = native BarcodeDetector (no new vendor
-        // file). Runs against the exact frozen canvas. Formats include the
-        // required UPC-A / UPC-E / EAN-13 / EAN-8.
-        async function _altDecode(canvas) {
-            if (typeof window.BarcodeDetector === "undefined") {
-                return { unavailable: true, reason: "BarcodeDetector not in this browser" };
-            }
-            const want = ["upc_a", "upc_e", "ean_13", "ean_8", "code_128", "code_39", "itf"];
-            let formats = want;
-            try {
-                const s = await window.BarcodeDetector.getSupportedFormats();
-                formats = want.filter(f => s.indexOf(f) !== -1);
-            } catch (e) { /* keep the full list */ }
-            if (!formats.length) return { unavailable: true, reason: "no supported 1D formats" };
-            try {
-                const det = new window.BarcodeDetector({ formats: formats });
-                const res = await det.detect(canvas);
-                if (res && res.length && res[0] && res[0].rawValue) {
-                    return { decoded: String(res[0].rawValue), format: res[0].format };
-                }
-                return { noResult: true };
-            } catch (err) {
-                return { name: (err && err.name) || "(no name)", message: (err && err.message) || String(err) };
-            }
-        }
-
-        async function _freezeFrameTest(mode) {
-            const host = document.getElementById(_scannerViewId(mode));
-            const out = host && host.querySelector("[data-freeze-result]");
-            const v = _camVideo;
-            if (!v || v.readyState < 2 || !v.videoWidth) {
-                if (out) out.textContent = "No live camera frame to freeze yet.";
-                return;
-            }
-
-            // Freeze into a DEDICATED reusable canvas, sized exactly like the
-            // live decode canvas (<=1280 wide, source aspect). The live loop
-            // keeps using _zxGrab; this canvas is not overwritten until the
-            // next freeze, so ZXing and the alternative decode identical
-            // pixels and repeat runs are reproducible.
-            const sw = v.videoWidth, sh = v.videoHeight;
-            const dw = Math.min(ZX_DECODE_CANVAS_MAX_W, sw);
-            const dh = Math.max(1, Math.round(dw * sh / sw));
-            if (!_frozenCanvas) _frozenCanvas = document.createElement("canvas");
-            if (_frozenCanvas.width !== dw || _frozenCanvas.height !== dh) { _frozenCanvas.width = dw; _frozenCanvas.height = dh; }
-            _frozenCtx = _frozenCanvas.getContext("2d", { willReadFrequently: true });
-            _frozenCtx.drawImage(v, 0, 0, dw, dh);
-
-            // Show the frozen frame so its sharpness / framing is visible.
-            let thumb = host.querySelector("[data-freeze-thumb]");
-            if (!thumb) {
-                thumb = document.createElement("img");
-                thumb.setAttribute("data-freeze-thumb", "");
-                thumb.style.cssText = "display:block;max-width:100%;margin-top:6px;border:1px solid #334155;border-radius:4px";
-                if (out) out.parentElement.appendChild(thumb);
-            }
-            try { thumb.src = _frozenCanvas.toDataURL("image/jpeg", 0.85); } catch (e) {}
-
-            // Build a fresh reader with the current hints/formats.
-            const reader = new window.ZXing.BrowserMultiFormatReader(_zxHints());
-
-            // 1a. EXACTLY what the live scan loop calls: reader.decode(<canvas>).
-            //     Full exception detail - never swallowed to "".
-            let zxA;
-            try {
-                const r = reader.decode(_frozenCanvas);
-                zxA = { decoded: (r && r.getText && r.getText()) || String(r || "") };
-            } catch (err) {
-                zxA = { name: (err && err.name) || "(no name)", message: (err && err.message) || String(err) };
-            }
-            console.log("[freeze-test] frozen " + dw + "x" + dh + " | ZXing decode(canvas) ->", zxA);
-
-            // 1b. ZXing decoder via HTMLCanvasElementLuminanceSource (the
-            //     canvas-correct path in this bundle). Isolates whether ZXing's
-            //     actual DECODER can read this frame, independent of 1a's
-            //     canvas-input handling.
-            let zxB;
-            try {
-                const ZX = window.ZXing;
-                const src = new ZX.HTMLCanvasElementLuminanceSource(_frozenCanvas);
-                const bmp = new ZX.BinaryBitmap(new ZX.HybridBinarizer(src));
-                const r = reader.decodeBitmap(bmp);
-                zxB = { decoded: (r && r.getText && r.getText()) || String(r || "") };
-            } catch (err) {
-                zxB = { name: (err && err.name) || "(no name)", message: (err && err.message) || String(err) };
-            }
-            console.log("[freeze-test] ZXing luminance-source ->", zxB);
-
-            // 2. ALTERNATIVE decoder against the SAME frozen canvas.
-            const alt = await _altDecode(_frozenCanvas);
-            console.log("[freeze-test] Alternative (BarcodeDetector) ->", alt);
-
-            const fmt = o => o.decoded ? ("decoded: " + o.decoded) : ("no result: " + (o.name || "?") + (o.message ? "  \u2014 " + o.message : ""));
-            const L = [];
-            L.push("Frozen frame: " + dw + "x" + dh);
-            L.push("");
-            L.push("ZXing decode(canvas)  [pre-V23 path - shows the bug]:");
-            L.push("  - " + fmt(zxA));
-            L.push("");
-            L.push("ZXing luminance-source  [= live scan loop, V23+]:");
-            L.push("  - " + fmt(zxB));
-            L.push("");
-            L.push("Alternative (BarcodeDetector):");
-            if (alt.unavailable) L.push("  - not available" + (alt.reason ? " (" + alt.reason + ")" : ""));
-            else if (alt.decoded) L.push("  - decoded: " + alt.decoded + (alt.format ? "  [" + alt.format + "]" : ""));
-            else if (alt.noResult) L.push("  - no result");
-            else L.push("  - error: " + (alt.name || "?") + (alt.message ? "  \u2014 " + alt.message : ""));
-            if (out) out.textContent = L.join("\n");
-
-            console.log("[freeze-test] RESULT | decode(canvas): " + (zxA.decoded || ("no result " + zxA.name)) +
-                " | luminance: " + (zxB.decoded || ("no result " + zxB.name)) +
-                " | BarcodeDetector: " + (alt.decoded || (alt.unavailable ? "unavailable" : (alt.noResult ? "no result" : ("error " + alt.name)))));
-
-            // 9. feed a successful result into the existing pipeline.
-            const winner = zxA.decoded || zxB.decoded || alt.decoded;
-            if (winner) {
-                console.log("[freeze-test] feeding into handleCameraBarcodeDecoded():", winner);
-                handleCameraBarcodeDecoded(winner);
+                rng.value = cur;
+                rng.setAttribute("aria-label", "Zoom");
+                rng.style.cssText = "flex:1 1 auto;height:3px;accent-color:#64748b;cursor:pointer;opacity:.75";
+                const val = document.createElement("span");
+                val.style.cssText = "flex:0 0 auto;font-size:10px;color:#94a3b8;min-width:20px;text-align:right;font-variant-numeric:tabular-nums";
+                const show = z => (Number(z) < 10 ? Number(z).toFixed(1) : String(Math.round(z))) + "\u00d7";
+                val.textContent = show(cur);
+                rng.oninput = function () { val.textContent = show(rng.value); _applyCameraZoom(Number(rng.value)); };
+                row.appendChild(rng);
+                row.appendChild(val);
             }
         }
 
@@ -20328,6 +20165,7 @@
             }
 
             console.log("[barcode] ZXING DECODE SUCCESS:", code);
+            console.log("[barcode-flow] decoded:", code, "(mode:", mode + ")");
             _setScannerLine(mode, "Barcode read: " + code);
 
             if (mode === "product") {
@@ -20436,9 +20274,9 @@
             try {
                 await _enumerateCameras();
                 await _applyContinuousFocus();
-                _renderCameraDiagnostics(mode);
+                _renderScannerControls(mode);
             } catch (err) {
-                console.warn("[camera-diag] setup failed (decoding unaffected):", (err && err.message) || err);
+                _dbg("[camera-diag] setup failed (decoding unaffected):", (err && err.message) || err);
             }
 
             try {
@@ -20567,13 +20405,219 @@
             }
             document.getElementById("add-product-modal").classList.remove("hidden");
             updateFormCurrencyLabels();
+            _dupClearOverride();
+            _dupClearHint("add");
+            _dupWireHintInputs("add");
             // Give the scan field focus so a USB/Bluetooth wedge scanner can
             // type straight into it with no extra click (Part 5).
             setTimeout(() => document.getElementById("barcode-input")?.focus(), 50);
         }
 
+        // ===================================================================
+        // SMART PRODUCT DUPLICATE DETECTION (V25) - frontend
+        // Blocking, un-bypassable "possible duplicate" dialog on Save, plus a
+        // live non-blocking "similar product already in inventory" hint while
+        // typing. The backend (/products/ POST and /products/{id} PATCH)
+        // enforces the identical check independently - this UI is never the
+        // only guard. Business-scoped end to end (only this business's own
+        // products are ever compared or shown).
+        // ===================================================================
+        let _dupOverrideCandidateId = null;   // set ONLY by "Add as a different product"
+        let _dupOverrideSignature = null;     // identity form-state the override was granted for
+        let _dupHintTimer = null;
+
+        function _dupEsc(s) {
+            return String(s == null ? "" : s).replace(/[&<>"']/g, function (ch) {
+                return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+            });
+        }
+
+        function _dupFmtMoney(v) {
+            if (v === null || v === undefined || v === "") return "\u2014";
+            try { return (typeof formatCurrency === "function") ? formatCurrency(v) : String(v); }
+            catch (_) { return String(v); }
+        }
+
+        // Identity fields only (spec: barcode / SKU / name / size). A material
+        // change to any of these AFTER an override was approved must void it.
+        function _dupIdentitySignature(scope) {
+            const g = function (id) {
+                return (document.getElementById(id)?.value || "").trim().toLowerCase().replace(/\s+/g, " ");
+            };
+            if (scope === "edit") return [g("edit-p-name"), g("edit-p-sku"), g("edit-p-size")].join("|");
+            return [g("p-name"), g("p-sku"), g("p-size"), g("barcode-input")].join("|");
+        }
+
+        function _dupClearOverride() {
+            _dupOverrideCandidateId = null;
+            _dupOverrideSignature = null;
+        }
+
+        function _dupHintEls(scope) {
+            const suffix = scope === "edit" ? "edit-" : "";
+            return {
+                box: document.getElementById(suffix + "product-dup-hint"),
+                text: document.getElementById(suffix + "product-dup-hint-text"),
+            };
+        }
+
+        function _dupClearHint(scope) {
+            const els = _dupHintEls(scope);
+            if (els.box) els.box.classList.add("hidden");
+        }
+
+        function _dupWireHintInputs(scope) {
+            const suffix = scope === "edit" ? "edit-" : "";
+            ["p-name", "p-size", "p-category"].forEach(function (base) {
+                const el = document.getElementById(suffix + base);
+                if (!el || el.dataset.dupHintWired === "1") return;
+                el.dataset.dupHintWired = "1";
+                el.addEventListener("input", function () { _dupScheduleHint(scope); });
+            });
+            if (scope === "add") {
+                const bc = document.getElementById("barcode-input");
+                if (bc && bc.dataset.dupHintWired !== "1") {
+                    bc.dataset.dupHintWired = "1";
+                    bc.addEventListener("input", function () { _dupScheduleHint("add"); });
+                }
+            }
+        }
+
+        function _dupScheduleHint(scope) {
+            clearTimeout(_dupHintTimer);
+            _dupHintTimer = setTimeout(function () { _dupRunHint(scope); }, 400);
+        }
+
+        // Non-blocking. Never prevents a save; only shows/hides the hint bar.
+        async function _dupRunHint(scope) {
+            if (!authToken) return;
+            const suffix = scope === "edit" ? "edit-" : "";
+            const els = _dupHintEls(scope);
+            if (!els.box || !els.text) return;
+            const name = (document.getElementById(suffix + "p-name")?.value || "").trim();
+            if (name.length < 3) { els.box.classList.add("hidden"); return; }
+            const body = {
+                name: name,
+                size: (document.getElementById(suffix + "p-size")?.value || "").trim() || null,
+                category: (document.getElementById(suffix + "p-category")?.value || "").trim() || null,
+                sku: (document.getElementById(suffix + "p-sku")?.value || "").trim() || null,
+            };
+            if (scope === "edit") {
+                const eid = parseInt(document.getElementById("edit-p-id")?.value);
+                if (!Number.isNaN(eid)) body.exclude_id = eid;
+            } else {
+                body.barcode = (document.getElementById("barcode-input")?.value || "").trim() || null;
+            }
+            try {
+                const res = await fetch(`${API_URL}/products/duplicate-check`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+                    body: JSON.stringify(body),
+                });
+                if (!res.ok) { els.box.classList.add("hidden"); return; }
+                const data = await res.json();
+                const c = (data.candidates && data.candidates[0]) || data.hint_candidate;
+                if (!c) { els.box.classList.add("hidden"); return; }
+                const bits = [c.name];
+                if (c.size) bits.push(c.size);
+                if (c.category) bits.push(c.category);
+                els.text.textContent = "Similar product already in inventory: " + bits.join(" \u00b7 ");
+                els.box.classList.remove("hidden");
+            } catch (_) { els.box.classList.add("hidden"); }
+        }
+
+        // Given a non-OK response, returns { isDuplicate, body }. `body` carries
+        // duplicate_detected / duplicate_level / candidate(s) when the server
+        // flagged a duplicate (FastAPI wraps our payload under `detail`).
+        async function _dupParse409(res) {
+            let raw = null;
+            try { raw = await res.json(); } catch (_) { return { isDuplicate: false, body: null }; }
+            const d = (raw && raw.detail !== undefined) ? raw.detail : raw;
+            if (d && typeof d === "object" && d.duplicate_detected) {
+                const sig = d.matched_signals || [];
+                d._hardSignal = sig.indexOf("same_barcode") !== -1 || sig.indexOf("same_sku") !== -1;
+                return { isDuplicate: true, body: d };
+            }
+            return { isDuplicate: false, body: raw };
+        }
+
+        // Blocking, un-bypassable. X / backdrop / Escape / Cancel all resolve
+        // to { action: "dismiss" } - NOT approval; the caller then does nothing
+        // and the next Save re-runs the whole check. Resolves to one of:
+        //   { action: "use-existing", candidateId }
+        //   { action: "add-different", candidateId }
+        //   { action: "dismiss" }
+        function _dupShowBlockingDialog(body, scope) {
+            return new Promise(function (resolve) {
+                const modal = document.getElementById("duplicate-product-modal");
+                const listEl = document.getElementById("duplicate-candidate-list");
+                const titleEl = document.getElementById("duplicate-modal-title");
+                const msgEl = document.getElementById("duplicate-modal-message");
+                const useBtn = document.getElementById("duplicate-use-existing");
+                const addBtn = document.getElementById("duplicate-add-different");
+                const closeBtn = document.getElementById("duplicate-modal-close");
+                const cancelBtn = document.getElementById("duplicate-modal-cancel");
+                if (!modal || !listEl || !useBtn || !addBtn) { resolve({ action: "dismiss" }); return; }
+
+                const cands = (body.candidates && body.candidates.length)
+                    ? body.candidates : (body.candidate ? [body.candidate] : []);
+                const primary = cands[0] || body.candidate || null;
+                const definite = body.duplicate_level === "definite";
+
+                if (titleEl) titleEl.textContent = definite ? "This product already exists" : "Possible duplicate found";
+                if (msgEl) msgEl.textContent = definite
+                    ? "Cauldra found this product already in your inventory. Are you sure this is not the same product?"
+                    : "This looks a lot like a product you already have. Are you sure this is not the same product?";
+
+                listEl.innerHTML = cands.slice(0, 3).map(function (c, i) {
+                    return '<div class="rounded-xl border ' + (i === 0 ? "border-primary/50 bg-primary/5" : "border-borderCol bg-bgMain") + ' p-3">'
+                        + '<div class="flex items-center justify-between gap-2">'
+                        + '<span class="font-semibold text-textMain text-xs">' + _dupEsc(c.name) + '</span>'
+                        + '<span class="text-[9px] uppercase tracking-wide text-textSec">' + _dupEsc(c.duplicate_level || "") + '</span></div>'
+                        + '<div class="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-textSec">'
+                        + '<span>Size: ' + _dupEsc(c.size || "\u2014") + '</span>'
+                        + '<span>Category: ' + _dupEsc(c.category || "\u2014") + '</span>'
+                        + '<span>Cost: ' + _dupEsc(_dupFmtMoney(c.cost_price)) + '</span>'
+                        + '<span>Wholesale: ' + _dupEsc(_dupFmtMoney(c.wholesale_price)) + '</span>'
+                        + '<span>Retail: ' + _dupEsc(_dupFmtMoney(c.retail_price)) + '</span>'
+                        + (c.sku ? '<span>SKU: ' + _dupEsc(c.sku) + '</span>' : '')
+                        + '</div></div>';
+                }).join("");
+
+                // An exact barcode / SKU collision cannot be "added as different".
+                addBtn.classList.toggle("hidden", !!body._hardSignal);
+
+                modal.classList.remove("hidden");
+
+                function cleanup(result) {
+                    modal.classList.add("hidden");
+                    useBtn.removeEventListener("click", onUse);
+                    addBtn.removeEventListener("click", onAdd);
+                    if (closeBtn) closeBtn.removeEventListener("click", onDismiss);
+                    if (cancelBtn) cancelBtn.removeEventListener("click", onDismiss);
+                    modal.removeEventListener("click", onBackdrop);
+                    document.removeEventListener("keydown", onKey, true);
+                    resolve(result);
+                }
+                function onUse() { cleanup({ action: "use-existing", candidateId: primary && primary.id }); }
+                function onAdd() { cleanup({ action: "add-different", candidateId: primary && primary.id }); }
+                function onDismiss() { cleanup({ action: "dismiss" }); }
+                function onBackdrop(ev) { if (ev.target === modal) cleanup({ action: "dismiss" }); }
+                function onKey(ev) { if (ev.key === "Escape") { ev.preventDefault(); cleanup({ action: "dismiss" }); } }
+
+                useBtn.addEventListener("click", onUse);
+                addBtn.addEventListener("click", onAdd);
+                if (closeBtn) closeBtn.addEventListener("click", onDismiss);
+                if (cancelBtn) cancelBtn.addEventListener("click", onDismiss);
+                modal.addEventListener("click", onBackdrop);
+                document.addEventListener("keydown", onKey, true);
+            });
+        }
+
         function closeAddProductModal() {
             stopCameraScanner();
+            _dupClearOverride();
+            _dupClearHint("add");
             document.getElementById("add-product-modal").classList.add("hidden");
         }
 
@@ -20604,7 +20648,8 @@
         // => nothing was ever decoded. One reused AudioContext, unlocked on the
         // camera tap / scan-field focus; entirely best-effort — a blocked or
         // missing AudioContext must never interrupt a scan.
-        console.log("[barcode] app.js build 2026-09-04-v23 — decode fix: HTMLCanvasElementLuminanceSource (zxing-stable-v2)");
+        console.log("[barcode] app.js build 2026-09-04-v24 — clean scanner UI + Add Product autofill + [barcode-flow] trace");
+        console.log("[dup] app.js build 2026-09-04-v25 — smart product duplicate detection");
         let _pipelineAudioCtx = null;
         function _primePipelineAudio() {
             try {
@@ -20691,8 +20736,9 @@
             const input = document.getElementById("barcode-input");
             if (input) input.value = norm.value;
             console.log("[barcode] captured", { source: source || "manual", mode: "product", code: norm.canonical });
+            console.log("[barcode-flow] submitProductBarcode:", norm.canonical, "source:", source || "manual");
             playScanDetectedBeep();            // LOW — complete barcode captured, BEFORE any lookup
-            showToast("Barcode captured: " + norm.canonical, "info"); // temporary visible diagnostic
+            showToast("Barcode captured: " + norm.canonical, "info");
             lookupBarcode();
         }
 
@@ -20859,28 +20905,34 @@
             const catPrefix = categoryInput ? categoryInput.toUpperCase().slice(0, 3) : "SKU";
             const generatedSku = `${catPrefix}-${last4}`;
 
+            const nameEl = document.getElementById("p-name");
+            const sizeEl = document.getElementById("p-size");
+            const skuEl = document.getElementById("p-sku");
+            const barcodeEl = document.getElementById("barcode-input");
+            const SENTINEL = "Searching database...";
+            // "This scan owns the field" only when the user has NOT typed into
+            // it (blank, or still showing our sentinel). We never overwrite a
+            // value the user manually entered.
+            const nameOwn = !nameEl.value.trim() || nameEl.value === SENTINEL;
+            const sizeOwn = !!sizeEl && !sizeEl.value.trim();
+
+            const normalizedInput = inputVal.replace(/\D/g, "");
+            console.log("[barcode-flow] lookup request:", normalizedInput || inputVal);
+
             // Cheap client-side duplicate hint using data already in memory —
             // the server repeats this exact-barcode check authoritatively
-            // (business-scoped) before ever consulting the catalog/UPCitemdb,
-            // so this is purely a faster response for the common case, not
-            // the security boundary. Digits-only, matching backend
-            // normalize_barcode() and how Product.barcode is stored.
-            const normalizedInput = inputVal.replace(/\D/g, "");
-            console.log("[barcode] product lookup starting:", normalizedInput || inputVal);
+            // (business-scoped) before the catalog/UPCitemdb, so this is only
+            // a faster path for the common case, not the security boundary.
             const ownMatch = normalizedInput && globalProducts.find(p => p.barcode && String(p.barcode).trim() === normalizedInput);
             if (ownMatch) {
-                // Already stocked. The LOW capture beep already fired; a
-                // duplicate is a "you have this" notice, not a resolved-
-                // identity success, so no HIGH beep (Part 11: least confusing).
-                console.warn("[barcode] already in this inventory:", normalizedInput);
+                console.log("[barcode-flow] source: own_inventory (client hint)");
+                console.log("[barcode-flow] populated fields: (already stocked — no autofill)");
                 showToast(t("products.barcodeAlreadyInInventory", { name: ownMatch.name }), "info");
                 return;
             }
 
-            const nameInput = document.getElementById("p-name");
-            nameInput.value = "Searching database...";
-            nameInput.disabled = true;
-            document.getElementById("p-sku").value = generatedSku;
+            if (nameOwn) { nameEl.value = SENTINEL; nameEl.disabled = true; }
+            if (skuEl && !skuEl.value.trim()) skuEl.value = generatedSku;
 
             try {
                 const res = await fetch(`${API_URL}/catalog/barcode-lookup`, {
@@ -20888,34 +20940,48 @@
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
                     body: JSON.stringify({ barcode: inputVal })
                 });
-                const data = await res.json();
-                nameInput.disabled = false;
+                nameEl.disabled = false;
+                const rawText = await res.text();
+                let data = {};
+                try { data = rawText ? JSON.parse(rawText) : {}; } catch (_) { data = {}; }
+                console.log("[barcode-flow] HTTP status:", res.status);
+                console.log("[barcode-flow] response:", rawText.slice(0, 700));
+                console.log("[barcode-flow] source:", data.source || "(none)");
 
                 if (res.ok && data.found && data.duplicate) {
-                    nameInput.value = "";
-                    document.getElementById("p-sku").value = "";
-                    console.warn("[barcode] already in this inventory:", data.product_name);
-                    showToast(t("products.barcodeAlreadyInInventory", { name: data.product_name }), "info");
+                    if (nameOwn) nameEl.value = "";
+                    if (skuEl && skuEl.value === generatedSku) skuEl.value = "";
+                    console.log("[barcode-flow] populated fields: (duplicate — user sent to Stock Inventory)");
+                    showToast(t("products.barcodeAlreadyInInventory", { name: data.product_name || "" }), "info");
                 } else if (res.ok && data.found) {
-                    // Only IDENTITY fields the form actually supports — never
-                    // category, price, cost, quantity, or SKU from an
-                    // external/shared source (see spec: the business always
-                    // chooses those itself).
-                    document.getElementById("p-name").value = data.product_name || "";
-                    if (document.getElementById("p-size") && data.size) document.getElementById("p-size").value = data.size;
+                    // SAFE shared identity only — never category / price / cost /
+                    // quantity / supplier / warehouse / SKU / sales history.
+                    const filled = [];
+                    if (nameOwn) {
+                        nameEl.value = data.product_name || "";
+                        if (data.product_name) filled.push("p-name");
+                    }
+                    if (sizeEl && sizeOwn && data.size) { sizeEl.value = data.size; filled.push("p-size"); }
+                    if (barcodeEl && data.barcode) { barcodeEl.value = data.barcode; filled.push("barcode-input"); }
+                    if (data.brand) console.log("[barcode-flow] brand available (Add Product has no brand field):", data.brand);
                     updateSkuPlaceholder();
-                    console.log("[barcode] product resolved:", data.product_name, "(source:", (data.source || "catalog") + ")");
-                    playProductResolvedBeep();     // HIGH — barcode resolved to a product identity
-                    showToast("Product resolved: " + (data.product_name || "(unnamed)"), "success"); // temporary visible diagnostic
+                    console.log("[barcode-flow] populated fields:", filled.join(", ") || "(response found:true but carried no identity fields)");
+                    if (filled.length) {
+                        playProductResolvedBeep();
+                        showToast("Product identified: " + (data.product_name || data.brand || "\u2713"), "success");
+                    } else {
+                        showToast(t("products.productNotFoundManualEntry"), "info");
+                    }
                 } else {
-                    document.getElementById("p-name").value = "";
-                    console.warn("[barcode] not found:", inputVal);
+                    if (nameOwn) nameEl.value = "";
+                    console.log("[barcode-flow] populated fields: (not found — manual entry)");
                     showToast(t("products.productNotFoundManualEntry"), "info");
                 }
             } catch (err) {
-                nameInput.disabled = false;
-                document.getElementById("p-name").value = "";
-                console.error("[barcode] product lookup failed:", (err && err.message) || err);
+                nameEl.disabled = false;
+                if (nameOwn && nameEl.value === SENTINEL) nameEl.value = "";
+                console.error("[barcode-flow] HTTP status: (request failed)  error:", (err && err.message) || err);
+                console.log("[barcode-flow] populated fields: (lookup failed — manual entry)");
                 showToast(t("products.lookupFailed"), "error");
             }
         }
@@ -24488,6 +24554,13 @@
                 openBusinessAuthModal();
                 return;
             }
+            return _submitCreateProduct();
+        }
+
+        // V25: the create path. Re-entrant - "Add as a different product" sets
+        // the verified override and calls this again; a dismissed dialog just
+        // returns, so the next Save press re-runs the whole check.
+        async function _submitCreateProduct() {
             const name = document.getElementById("p-name").value.trim();
             const category = document.getElementById("p-category").value.trim();
             const size = document.getElementById("p-size") ? document.getElementById("p-size").value.trim() : "";
@@ -24501,9 +24574,15 @@
             const warehouse = document.getElementById("p-warehouse").value;
             const expiry_date = document.getElementById("p-expiry")?.value || null;
 
+            // An approved override is valid ONLY for the exact identity form
+            // state it was granted for (spec: barcode / SKU / name / size).
+            const signature = _dupIdentitySignature("add");
+            if (_dupOverrideCandidateId !== null && _dupOverrideSignature !== signature) _dupClearOverride();
+
             const payload = { name, category, size, sku, barcode, quantity, min_stock_level, cost_price, retail_price, wholesale_price, warehouse, expiry_date };
             const mutationRef = generateOpId();
             const requestPayload = { ...payload, client_ref: mutationRef };
+            if (_dupOverrideCandidateId !== null) requestPayload.duplicate_override_candidate_id = _dupOverrideCandidateId;
             try {
                 const res = await fetch(`${API_URL}/products/`, {
                     method: "POST",
@@ -24512,25 +24591,45 @@
                 });
                 if (res.ok) {
                     const data = await res.json().catch(() => null);
+                    _dupClearOverride();
+                    _dupClearHint("add");
                     closeAddProductModal();
                     document.getElementById("product-form").reset();
                     document.getElementById("barcode-input").value = "";
                     showToast(t("products.addedSuccess"), "success");
-                    // Targeted update — append the new product to local state
-                    // using the server-confirmed id/sku/barcode plus the form
-                    // payload already known client-side, instead of reloading
-                    // the entire application (see performance refactor,
-                    // section 12).
                     if (data && !data.duplicate) {
                         globalProducts.push({ ...payload, id: data.id, sku: data.sku, barcode: data.barcode, name: data.name });
                         cacheProductsLocally(globalProducts);
                     }
                     updateDashboardMetrics();
                     refreshInventoryViewFromLocalState();
-                } else {
-                    const data = await res.json();
-                    showToast(data.detail || t("products.addDetailFailed"), "error");
+                    return;
                 }
+                if (res.status === 409) {
+                    const parsed = await _dupParse409(res);
+                    if (parsed.isDuplicate) {
+                        const outcome = await _dupShowBlockingDialog(parsed.body, "add");
+                        if (outcome.action === "use-existing" && outcome.candidateId) {
+                            _dupClearOverride();
+                            _dupClearHint("add");
+                            closeAddProductModal();
+                            document.getElementById("product-form").reset();
+                            document.getElementById("barcode-input").value = "";
+                            openEditProductModalFromData(outcome.candidateId);
+                            return;
+                        }
+                        if (outcome.action === "add-different" && outcome.candidateId) {
+                            _dupOverrideCandidateId = outcome.candidateId;
+                            _dupOverrideSignature = signature;
+                            return _submitCreateProduct();
+                        }
+                        return; // dismissed - no creation, next Save re-runs the check
+                    }
+                    showToast((parsed.body && parsed.body.detail) || t("products.addDetailFailed"), "error");
+                    return;
+                }
+                const data = await res.json().catch(() => null);
+                showToast((data && data.detail) || t("products.addDetailFailed"), "error");
             } catch (err) {
                 if (isNetworkFailure(err)) { await handleCreateProductOffline(payload, mutationRef); return; }
                 showToast(t("products.addFailed"), "error");
@@ -24591,9 +24690,14 @@
 
             runEditAiMarginAdvice();
             document.getElementById("edit-product-modal").classList.remove("hidden");
+            _dupClearOverride();
+            _dupClearHint("edit");
+            _dupWireHintInputs("edit");
         }
 
         function closeEditProductModal() {
+            _dupClearOverride();
+            _dupClearHint("edit");
             document.getElementById("edit-product-modal").classList.add("hidden");
         }
 
@@ -24604,6 +24708,11 @@
                 openBusinessAuthModal();
                 return;
             }
+            return _submitUpdateProduct();
+        }
+
+        // V25: the edit path. Re-entrant, same contract as _submitCreateProduct.
+        async function _submitUpdateProduct() {
             const id = parseInt(document.getElementById("edit-p-id").value);
             const name = document.getElementById("edit-p-name").value.trim();
             const sku = document.getElementById("edit-p-sku").value.trim();
@@ -24626,8 +24735,12 @@
                 return;
             }
 
+            const signature = _dupIdentitySignature("edit");
+            if (_dupOverrideCandidateId !== null && _dupOverrideSignature !== signature) _dupClearOverride();
+
             const mutationRef = generateOpId();
             const requestPayload = { ...payload, client_ref: mutationRef };
+            if (_dupOverrideCandidateId !== null) requestPayload.duplicate_override_candidate_id = _dupOverrideCandidateId;
 
             try {
                 const res = await fetch(`${API_URL}/products/${id}`, {
@@ -24637,14 +24750,10 @@
                 });
                 if (res.ok) {
                     const data = await res.json().catch(() => null);
+                    _dupClearOverride();
+                    _dupClearHint("edit");
                     closeEditProductModal();
                     showToast(t("products.updatedSuccess"), "success");
-                    // Targeted update — patch local state from the server's
-                    // authoritative returned product instead of reloading the
-                    // entire application (see performance refactor, section
-                    // 12/13): a single product edit must not re-fetch
-                    // products/suppliers/warehouses/financial intelligence/
-                    // profit/Business Brain/subscription/audit/everything.
                     const updated = data?.product;
                     if (updated) {
                         const idx = globalProducts.findIndex(p => p.id === id);
@@ -24652,10 +24761,31 @@
                     }
                     updateDashboardMetrics();
                     refreshInventoryViewFromLocalState();
-                } else {
-                    const data = await res.json();
-                    showToast(data.detail || t("products.updateDetailFailed"), "error");
+                    return;
                 }
+                if (res.status === 409) {
+                    const parsed = await _dupParse409(res);
+                    if (parsed.isDuplicate) {
+                        const outcome = await _dupShowBlockingDialog(parsed.body, "edit");
+                        if (outcome.action === "use-existing" && outcome.candidateId) {
+                            _dupClearOverride();
+                            _dupClearHint("edit");
+                            closeEditProductModal();
+                            openEditProductModalFromData(outcome.candidateId);
+                            return;
+                        }
+                        if (outcome.action === "add-different" && outcome.candidateId) {
+                            _dupOverrideCandidateId = outcome.candidateId;
+                            _dupOverrideSignature = signature;
+                            return _submitUpdateProduct();
+                        }
+                        return;
+                    }
+                    showToast((parsed.body && parsed.body.detail) || t("products.updateDetailFailed"), "error");
+                    return;
+                }
+                const data = await res.json().catch(() => null);
+                showToast((data && data.detail) || t("products.updateDetailFailed"), "error");
             } catch (err) {
                 if (isNetworkFailure(err)) { await handleUpdateProductOffline(id, payload, mutationRef); return; }
                 showToast(t("products.updateFailed"), "error");

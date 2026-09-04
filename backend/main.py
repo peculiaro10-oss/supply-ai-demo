@@ -3870,6 +3870,12 @@ class ProductCreate(BaseModel):
     # same locally-created product (e.g. after a dropped connection) is
     # recognized instead of creating a duplicate product.
     client_ref: Optional[str] = None
+    # V25 smart duplicate detection: the id of the EXISTING product the user
+    # explicitly chose to override via "Add as different product". Never a
+    # generic force=true - the server verifies this id belongs to the same
+    # business AND matches a real duplicate candidate for this exact form
+    # state before letting the create/edit proceed.
+    duplicate_override_candidate_id: Optional[int] = None
 
 class ProductUpdate(BaseModel):
     barcode: Optional[str] = None
@@ -3885,6 +3891,7 @@ class ProductUpdate(BaseModel):
     warehouse: Optional[str] = None
     expiry_date: Optional[datetime] = None
     client_ref: Optional[str] = None
+    duplicate_override_candidate_id: Optional[int] = None
 
 class StockUpdate(BaseModel):
     quantity_change: int
@@ -5214,6 +5221,294 @@ def inventory_summary(warehouse: Optional[str] = Query(None), user: User = Depen
         "out": sum(1 for qty, minimum in quantities if qty == 0),
     }
 
+# =============================================================================
+# SMART PRODUCT DUPLICATE DETECTION (V25)
+# One reusable, deterministic function. Business-scoped: it never looks at any
+# other business's products and never consults the General Catalog / UPCitemdb
+# (those are identity lookups, not "do I already stock this?"). No AI/LLM.
+# Both the create and the edit product paths run through _dup_enforce_or_raise
+# BEFORE writing a row, so the check cannot be bypassed by a stale frontend,
+# a second client, or a direct API call.
+#
+# Signals & weights (barcode/SKU strongest, name/size strong, category/price
+# supporting):
+#   same_barcode            +100     same_size (normalized)     +30
+#   same_sku                 +80     same_category              +10
+#   name_similarity   up to  +35     similar_cost_price          +8
+#                                    similar_wholesale_price     +8
+#                                    similar_retail_price        +8
+# Decision:  exact barcode OR exact SKU OR score >= 95  -> "definite"
+#            score >= 55                                 -> "possible"
+#            else                                        -> "low"/"none"
+# =============================================================================
+DUP_PRICE_PERCENT_TOLERANCE = 0.07      # 7%
+DUP_PRICE_ABSOLUTE_ALLOWANCE = 1.0      # currency units - absorbs rounding
+DUP_NAME_SIMILAR_MIN = 0.72            # below this, names contribute nothing
+DUP_WEIGHT_BARCODE = 100
+DUP_WEIGHT_SKU = 80
+DUP_WEIGHT_NAME = 35
+DUP_WEIGHT_SIZE = 30
+DUP_WEIGHT_CATEGORY = 10
+DUP_WEIGHT_PRICE_EACH = 8
+DUP_HARD_THRESHOLD = 95               # >= this (or exact barcode/SKU) -> definite
+DUP_POSSIBLE_THRESHOLD = 55           # >= this -> possible
+DUP_HINT_THRESHOLD = 25              # >= this -> worth a non-blocking "similar" hint
+
+_DUP_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+_DUP_WS_RE = re.compile(r"\s+")
+
+
+def _dup_norm_name(value: Optional[str]) -> str:
+    """lowercase, unify hyphen/underscore/slash to space, drop other
+    punctuation, collapse whitespace, trim. 'Cream-Crackers' / 'CREAM   CRACKERS'
+    / 'cream crackers' all normalize to the same string."""
+    s = (value or "").strip().casefold()
+    s = s.replace("-", " ").replace("_", " ").replace("/", " ")
+    s = _DUP_PUNCT_RE.sub(" ", s)
+    return _DUP_WS_RE.sub(" ", s).strip()
+
+
+def _dup_norm_size(value: Optional[str]) -> str:
+    """'200g' == '200 g' == '200G'; '200g' != '500g'. A few obvious spelling
+    variants are unified but NO unit conversion is attempted (the project has
+    no safe size-parsing utility, and 0.2kg vs 200g should stay 'different')."""
+    s = (value or "").strip().casefold()
+    s = _DUP_WS_RE.sub("", s).replace(".", "").replace(",", "")
+    s = s.replace("litres", "l").replace("litre", "l").replace("liters", "l").replace("liter", "l")
+    s = s.replace("grams", "g").replace("gram", "g")
+    s = s.replace("kilograms", "kg").replace("kilogram", "kg").replace("kgs", "kg")
+    s = s.replace("millilitres", "ml").replace("millilitre", "ml").replace("milliliters", "ml").replace("milliliter", "ml")
+    return s
+
+
+def _dup_name_similarity(a: Optional[str], b: Optional[str]) -> float:
+    """0.0-1.0. Fuzzy, not exact-string-only. Combines a character-level
+    SequenceMatcher ratio with a token Jaccard so word-order and small
+    spelling/plural differences ('Cream Crackers' vs 'Cream Cracker') score
+    high, while an added meaningful word ('Blue Cream Crackers') scores
+    'similar but not identical' rather than 1.0."""
+    na, nb = _dup_norm_name(a), _dup_norm_name(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+    from difflib import SequenceMatcher
+    ratio = SequenceMatcher(None, na, nb).ratio()
+    ta, tb = set(na.split()), set(nb.split())
+    union = ta | tb
+    jaccard = (len(ta & tb) / len(union)) if union else 0.0
+    return max(ratio, jaccard)
+
+
+def _dup_price_similar(candidate_price, existing_price) -> bool:
+    try:
+        c = float(candidate_price or 0)
+        e_ = float(existing_price or 0)
+    except (TypeError, ValueError):
+        return False
+    if c <= 0 or e_ <= 0:
+        return False   # a missing/zero price is not evidence of anything
+    return abs(c - e_) <= max(DUP_PRICE_ABSOLUTE_ALLOWANCE, e_ * DUP_PRICE_PERCENT_TOLERANCE)
+
+
+def _dup_score_pair(cand: dict, existing: "Product") -> "Tuple[int, list]":
+    """cand = normalized candidate fields. Returns (score, matched_signals)."""
+    score = 0
+    signals: list = []
+
+    cb = (cand.get("barcode") or "").strip()
+    if cb and (existing.barcode or "").strip() == cb:
+        score += DUP_WEIGHT_BARCODE
+        signals.append("same_barcode")
+
+    cs = (cand.get("sku") or "").strip().casefold()
+    if cs and (existing.sku or "").strip().casefold() == cs:
+        score += DUP_WEIGHT_SKU
+        signals.append("same_sku")
+
+    name_sim = _dup_name_similarity(cand.get("name"), existing.name)
+    if name_sim >= DUP_NAME_SIMILAR_MIN:
+        score += int(round(DUP_WEIGHT_NAME * name_sim))
+        signals.append("name_similarity")
+
+    csize, esize = _dup_norm_size(cand.get("size")), _dup_norm_size(existing.size)
+    if csize and esize and csize == esize:
+        score += DUP_WEIGHT_SIZE
+        signals.append("same_size")
+
+    ccat = _dup_norm_name(cand.get("category"))
+    if ccat and _dup_norm_name(existing.category) == ccat:
+        score += DUP_WEIGHT_CATEGORY
+        signals.append("same_category")
+
+    if _dup_price_similar(cand.get("cost_price"), existing.cost_price):
+        score += DUP_WEIGHT_PRICE_EACH
+        signals.append("similar_cost_price")
+    if _dup_price_similar(cand.get("wholesale_price"), existing.wholesale_price):
+        score += DUP_WEIGHT_PRICE_EACH
+        signals.append("similar_wholesale_price")
+    if _dup_price_similar(cand.get("retail_price"), existing.retail_price):
+        score += DUP_WEIGHT_PRICE_EACH
+        signals.append("similar_retail_price")
+
+    return score, signals
+
+
+def _dup_level_for(score: int, signals: list) -> str:
+    if "same_barcode" in signals or "same_sku" in signals or score >= DUP_HARD_THRESHOLD:
+        return "definite"
+    if score >= DUP_POSSIBLE_THRESHOLD:
+        return "possible"
+    return "low"
+
+
+def _dup_candidate_payload(p: "Product", score: int, signals: list, level: str) -> dict:
+    return {
+        "id": p.id, "name": p.name, "sku": p.sku, "barcode": p.barcode,
+        "size": p.size, "category": p.category,
+        "cost_price": p.cost_price, "wholesale_price": p.wholesale_price,
+        "retail_price": p.retail_price,
+        "score": score, "matched_signals": signals, "duplicate_level": level,
+    }
+
+
+def assess_product_duplicate(db: Session, business_id: int, *, name: str,
+                             size: Optional[str] = None, category: Optional[str] = None,
+                             barcode: Optional[str] = None, sku: Optional[str] = None,
+                             cost_price=None, wholesale_price=None, retail_price=None,
+                             exclude_id: Optional[int] = None) -> dict:
+    """The single source of truth for 'is this a duplicate of a product THIS
+    business already has?'. Deterministic, business-scoped, no external calls.
+
+    Returns:
+      {
+        "duplicate_detected": bool,            # top candidate is definite/possible
+        "duplicate_level": "definite"|"possible"|"low"|"none",
+        "score": int, "matched_signals": [...],   # of the top candidate
+        "candidate":  {...} | None,               # top flagged candidate
+        "candidates": [ {...}, ... up to 3 ],      # flagged, ranked best-first
+        "hint_candidate": {id,name,size,category} | None,  # best match for the live hint
+      }
+    """
+    cand = {
+        "name": name, "size": size, "category": category,
+        "barcode": normalize_barcode(barcode) if barcode else None,
+        "sku": sku, "cost_price": cost_price,
+        "wholesale_price": wholesale_price, "retail_price": retail_price,
+    }
+    q = db.query(Product).filter(Product.business_id == business_id)
+    if exclude_id is not None:
+        q = q.filter(Product.id != exclude_id)
+
+    scored = []
+    for p in q.all():
+        s, sig = _dup_score_pair(cand, p)
+        if s <= 0:
+            continue
+        scored.append((s, _dup_level_for(s, sig), p, sig))
+
+    _rank = {"definite": 0, "possible": 1, "low": 2}
+    scored.sort(key=lambda x: (_rank[x[1]], -x[0], x[2].id))
+
+    empty = {"duplicate_detected": False, "duplicate_level": "none", "score": 0,
+             "matched_signals": [], "candidate": None, "candidates": [], "hint_candidate": None}
+    if not scored:
+        return empty
+
+    flagged = [x for x in scored if x[1] in ("definite", "possible")][:3]
+    best = scored[0]
+    hint = None
+    if best[0] >= DUP_HINT_THRESHOLD:
+        hp = best[2]
+        hint = {"id": hp.id, "name": hp.name, "size": hp.size, "category": hp.category}
+
+    if not flagged:
+        return {**empty, "duplicate_level": "low", "score": best[0],
+                "matched_signals": best[3], "hint_candidate": hint}
+
+    candidates = [_dup_candidate_payload(p, s, sig, lv) for (s, lv, p, sig) in flagged]
+    return {
+        "duplicate_detected": True,
+        "duplicate_level": flagged[0][1],
+        "score": flagged[0][0],
+        "matched_signals": flagged[0][3],
+        "candidate": candidates[0],
+        "candidates": candidates,
+        "hint_candidate": hint,
+    }
+
+
+def _dup_enforce_or_raise(db: Session, business_id: int, *, name, size, category,
+                          barcode, sku, cost_price, wholesale_price, retail_price,
+                          override_id: Optional[int], exclude_id: Optional[int]) -> None:
+    """Run the assessment and, unless the caller supplied a valid explicit
+    override for this exact candidate, raise 409 with the structured duplicate
+    body the frontend renders in its blocking dialog. An exact barcode or SKU
+    match ('hard' signal) can NEVER be overridden - it is a real collision, the
+    user must use the existing product or change the identifier."""
+    assessment = assess_product_duplicate(
+        db, business_id, name=name, size=size, category=category,
+        barcode=barcode, sku=sku, cost_price=cost_price,
+        wholesale_price=wholesale_price, retail_price=retail_price,
+        exclude_id=exclude_id,
+    )
+    if not assessment["duplicate_detected"]:
+        return
+
+    signals = assessment.get("matched_signals") or []
+    hard = ("same_barcode" in signals) or ("same_sku" in signals)
+
+    if override_id is not None and not hard:
+        allowed = {c["id"] for c in (assessment.get("candidates") or [])}
+        if assessment.get("candidate"):
+            allowed.add(assessment["candidate"]["id"])
+        if int(override_id) in allowed:
+            return   # explicit, verified, same-business override -> allow
+
+    raise HTTPException(status_code=409, detail={
+        "duplicate_detected": True,
+        "duplicate_level": assessment["duplicate_level"],
+        "score": assessment["score"],
+        "matched_signals": signals,
+        "candidate": assessment["candidate"],
+        "candidates": assessment["candidates"],
+        "message": ("This product already exists in your inventory."
+                    if assessment["duplicate_level"] == "definite"
+                    else "This looks like a product you may already have."),
+    })
+
+
+class ProductDuplicateCheckRequest(BaseModel):
+    name: str
+    size: Optional[str] = None
+    category: Optional[str] = None
+    barcode: Optional[str] = None
+    sku: Optional[str] = None
+    cost_price: Optional[float] = None
+    wholesale_price: Optional[float] = None
+    retail_price: Optional[float] = None
+    exclude_id: Optional[int] = None
+
+
+@app.post("/products/duplicate-check")
+def products_duplicate_check(req: ProductDuplicateCheckRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Read-only, business-scoped. Powers the live non-blocking 'similar
+    product already in inventory' hint and the pre-save check. The blocking
+    guarantee still lives in the create/edit endpoints (see
+    _dup_enforce_or_raise) - this endpoint only informs the UI."""
+    if user.role == "staff":
+        raise HTTPException(status_code=403, detail="Staff accounts cannot add products.")
+    if not (req.name or "").strip():
+        return {"duplicate_detected": False, "duplicate_level": "none", "score": 0,
+                "matched_signals": [], "candidate": None, "candidates": [], "hint_candidate": None}
+    return assess_product_duplicate(
+        db, user.business_id, name=req.name, size=req.size, category=req.category,
+        barcode=req.barcode, sku=req.sku, cost_price=req.cost_price,
+        wholesale_price=req.wholesale_price, retail_price=req.retail_price,
+        exclude_id=req.exclude_id,
+    )
+
+
 @app.post("/products/")
 def create_product(data: ProductCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_offline_replay_identity(request, user)
@@ -5221,7 +5516,7 @@ def create_product(data: ProductCreate, request: Request, user: User = Depends(g
     client_ref = (data.client_ref or "").strip()[:100] or None
     claim, replay = claim_idempotent_mutation(
         db, user.business_id, "product_create", client_ref,
-        data.model_dump(mode="json", exclude={"client_ref"}),
+        data.model_dump(mode="json", exclude={"client_ref", "duplicate_override_candidate_id"}),
     )
     if replay:
         return replay
@@ -5239,8 +5534,18 @@ def create_product(data: ProductCreate, request: Request, user: User = Depends(g
     if not get_warehouse_for_business(db, user.business_id, warehouse_name):
         raise HTTPException(status_code=400, detail="The selected warehouse does not exist in this business.")
     barcode = normalize_barcode(data.barcode) if data.barcode else None
-    if barcode and db.query(Product).filter(Product.business_id==user.business_id, Product.barcode==barcode).first():
-        raise HTTPException(status_code=409, detail="A product with this barcode already exists in your inventory.")
+    # V25: business-scoped smart duplicate detection. Runs before the row is
+    # created so a stale/bypassed frontend, a 2nd client or a direct API call
+    # still cannot slip an accidental duplicate through. An exact barcode match
+    # in this business is a "definite" duplicate and is not overridable.
+    _dup_enforce_or_raise(
+        db, user.business_id,
+        name=data.name, size=data.size, category=data.category,
+        barcode=barcode, sku=sku, cost_price=data.cost_price,
+        wholesale_price=(data.wholesale_price or data.retail_price * 0.85),
+        retail_price=data.retail_price,
+        override_id=data.duplicate_override_candidate_id, exclude_id=None,
+    )
     p=Product(sku=sku, barcode=barcode, name=data.name, category=data.category, size=data.size, quantity=data.quantity, min_stock_level=data.min_stock_level, cost_price=data.cost_price, wholesale_price=data.wholesale_price or data.retail_price*0.85, retail_price=data.retail_price, warehouse=warehouse_name, initial_stock=data.quantity, expiry_date=data.expiry_date, business_id=user.business_id, owner_id=user.id, client_ref=client_ref, synced_at=(datetime.utcnow() if client_ref else None))
     db.add(p); db.flush(); db.add(WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=p.warehouse,quantity=p.quantity)); auto_upsert_general_catalog(db,p); add_audit(db,user,"PRODUCT_CREATED",f"Added product {p.name}."); mark_business_brain_dirty(db, user.business_id)
     response = {"id":p.id,"sku":p.sku,"barcode":p.barcode,"name":p.name}
@@ -5259,6 +5564,7 @@ def update_product(product_id: int, data: ProductUpdate, request: Request, user:
     if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot edit products.")
     changes = data.model_dump(exclude_unset=True)
     client_ref = str(changes.pop("client_ref", "") or "").strip()[:100] or None
+    _dup_override_id = changes.pop("duplicate_override_candidate_id", None)
     claim, replay = claim_idempotent_mutation(
         db, user.business_id, f"product_update:{product_id}", client_ref,
         {key: (value.isoformat() if isinstance(value, datetime) else value) for key, value in changes.items()},
@@ -5275,6 +5581,20 @@ def update_product(product_id: int, data: ProductUpdate, request: Request, user:
         if normalized_barcode and db.query(Product).filter(Product.business_id == user.business_id, Product.barcode == normalized_barcode, Product.id != p.id).first():
             raise HTTPException(status_code=409, detail="That barcode is already used by another product in this business.")
         changes["barcode"] = normalized_barcode
+    # V25: business-scoped smart duplicate detection on edits. Excludes this
+    # product's own id; still compares against every other product in this
+    # business. Uses the post-edit effective value of each field.
+    _dup_enforce_or_raise(
+        db, user.business_id,
+        name=changes.get("name", p.name), size=changes.get("size", p.size),
+        category=changes.get("category", p.category),
+        barcode=(changes["barcode"] if "barcode" in changes else p.barcode),
+        sku=changes.get("sku", p.sku),
+        cost_price=changes.get("cost_price", p.cost_price),
+        wholesale_price=changes.get("wholesale_price", p.wholesale_price),
+        retail_price=changes.get("retail_price", p.retail_price),
+        override_id=_dup_override_id, exclude_id=p.id,
+    )
     if "warehouse" in changes:
         requested_warehouse = (changes["warehouse"] or "").strip()
         warehouse = get_warehouse_for_business(db, user.business_id, requested_warehouse)
