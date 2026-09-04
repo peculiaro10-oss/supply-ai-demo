@@ -19958,6 +19958,28 @@
             return { video: v, audio: false };
         }
 
+        // V29: the SAME scanner runs at every responsive tier - this is only a
+        // label for the [scanner] trace so a layout-specific report is legible.
+        // tailwind.config declares no custom `screens`, so these are the stock
+        // md / lg / xl boundaries.
+        function _scannerLayout() {
+            const w = window.innerWidth || document.documentElement.clientWidth || 0;
+            const tier = w < 768 ? "phone" : w < 1024 ? "tablet" : w < 1280 ? "laptop" : "desktop";
+            return tier + " (" + w + "x" + (window.innerHeight || 0) + ")";
+        }
+
+        // NotFound / Checksum / Format = "no readable barcode in this frame",
+        // which is the normal every-frame outcome and stays silent. Anything
+        // else is a real problem and must NOT be swallowed (V22 lesson).
+        function _zxErrIsExpected(err) {
+            const n = (err && (err.name || (err.constructor && err.constructor.name))) || "";
+            const m = (err && err.message) || "";
+            return /NotFound|Checksum|Format/i.test(n) || /NotFound|Checksum|Format/i.test(m) ||
+                   (err instanceof (window.ZXing && window.ZXing.NotFoundException || function () {}));
+        }
+        let _scanWaitLogged = false;   // rate-limit the "video not ready yet" line
+        let _zxFrameN = 0;             // frames drawn into the decode canvas this session
+
         let _zxReader = null;          // ONE BrowserMultiFormatReader per camera session
         let _camVideo = null;
         let _camStream = null;
@@ -20167,6 +20189,7 @@
             }
 
             console.log("[barcode] ZXING DECODE SUCCESS:", code);
+            console.log("[scanner] decode success: " + code + "  (mode: " + mode + ", layout: " + _scannerLayout() + ")");
             console.log("[barcode-flow] decoded:", code, "(mode:", mode + ")");
             _setScannerLine(mode, "Barcode read: " + code);
 
@@ -20187,6 +20210,10 @@
             if (!_zxDecodeBusy && _zxReader && _camVideo && activeCameraMode) {
                 const v = _camVideo;
                 if (v.readyState >= 2 && v.videoWidth) {
+                    if (_scanWaitLogged) {
+                        _scanWaitLogged = false;
+                        console.log("[scanner] video usable: " + v.videoWidth + "x" + v.videoHeight + " readyState=" + v.readyState);
+                    }
                     _zxDecodeBusy = true;
                     try {
                         const sw = v.videoWidth, sh = v.videoHeight;
@@ -20199,27 +20226,43 @@
                         }
                         if (!_zxStartLogged) {
                             _zxStartLogged = true;
+                            console.log("[scanner] scan loop started");
+                            console.log("[scanner] video dimensions: " + v.videoWidth + "x" + v.videoHeight);
                             console.log("[barcode] decode canvas: " + dw + "x" + dh);
                             console.log("[barcode] decode interval: " + ZX_SCAN_INTERVAL_MS + "ms");
+                            if (v.videoWidth < 1024) {
+                                console.warn("[scanner] camera resolution is low (" + v.videoWidth + "px wide). A fixed-focus / low-res webcam may not render a barcode sharply enough to decode - move the barcode ~15-25cm away and fill the frame.");
+                            }
                         }
                         _zxCtx.drawImage(v, 0, 0, dw, dh);
+                        _zxFrameN = (_zxFrameN || 0) + 1;
+                        if (_zxFrameN === 1 || _zxFrameN % 20 === 0) console.log("[scanner] frame submitted (#" + _zxFrameN + ")");
                         // V23: decode via HTMLCanvasElementLuminanceSource. This
                         // ZXing 0.21.3 bundle's _zxReader.decode(<canvas>) throws
                         // IndexSizeError - createCaptureCanvas() has no
-                        // HTMLCanvasElement branch, so its internal capture
-                        // canvas is 0x0 - and the catch below was silently
-                        // eating it on every frame. This path feeds the pixels
-                        // straight in, no internal canvas.
+                        // HTMLCanvasElement branch. This path feeds the pixels
+                        // straight in, no internal canvas. DO NOT revert to
+                        // _zxReader.decode(_zxGrab).
                         const _lum = new window.ZXing.HTMLCanvasElementLuminanceSource(_zxGrab);
                         const _bmp = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(_lum));
                         const result = _zxReader.decodeBitmap(_bmp);
                         const code = (result && result.getText) ? result.getText() : "";
                         if (code) handleCameraBarcodeDecoded(code);
-                    } catch (_) {
-                        // NotFoundException / ChecksumException / FormatException -> normal, silent
+                    } catch (err) {
+                        // NotFound / Checksum / Format = normal "no barcode in
+                        // this frame" -> silent. Anything else is real.
+                        if (!_zxErrIsExpected(err)) {
+                            console.warn("[scanner] UNEXPECTED decode error:",
+                                (err && (err.name || (err.constructor && err.constructor.name))) || "?",
+                                "-", (err && err.message) || err);
+                        }
                     } finally {
                         _zxDecodeBusy = false;
                     }
+                } else if (!_scanWaitLogged) {
+                    _scanWaitLogged = true;
+                    console.log("[scanner] waiting for video: readyState=" + v.readyState + " videoWidth=" + v.videoWidth +
+                        " (camera stream not delivering frames yet)");
                 }
             }
             if (_zxScanning) _zxTimer = setTimeout(_zxScanTick, ZX_SCAN_INTERVAL_MS);
@@ -20227,6 +20270,7 @@
 
         // Preserved public name - the camera buttons call toggleInlineCamera('product'|'pos').
         async function toggleInlineCamera(mode) {
+            console.log("[scanner] scan trigger clicked (mode: " + mode + ", layout: " + _scannerLayout() + ")");
             if (activeCameraMode === mode) { await stopCameraScanner(); return; }
             await stopCameraScanner();
             _primePipelineAudio();   // runs inside the button tap -> unlocks the decode beep
@@ -20237,7 +20281,7 @@
                 return;
             }
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                console.error("[barcode] getUserMedia unavailable in this browser");
+                console.error("[scanner] getUserMedia unavailable in this browser");
                 showToast(t("products.cameraAccessFailed"), "error");
                 return;
             }
@@ -20247,22 +20291,47 @@
             if (cont) cont.classList.remove("hidden");
             _mountScannerUI(mode);
             activeCameraMode = mode;
+            _scanWaitLogged = false;
+            _zxFrameN = 0;
             _setScannerLine(mode, "Starting camera\u2026");
+            console.log("[scanner] scanner opened (video element mounted in #" + _scannerViewId(mode) + ")");
 
-            let stream;
-            try {
-                stream = await navigator.mediaDevices.getUserMedia(_camVideoConstraints(null));
-            } catch (e1) {
+            // V29: try progressively looser constraints. A laptop with only a
+            // front webcam MUST still scan - never require facingMode.
+            const attempts = [
+                { label: "environment-ideal 1080p", c: _camVideoConstraints(null) },
+                { label: "any camera 1080p-ideal", c: { video: { width: { ideal: CAM_IDEAL_W }, height: { ideal: CAM_IDEAL_H } }, audio: false } },
+                { label: "any camera (bare)", c: { video: true, audio: false } },
+            ];
+            let stream = null, usedLabel = null;
+            for (const a of attempts) {
                 try {
-                    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: CAM_IDEAL_W }, height: { ideal: CAM_IDEAL_H } }, audio: false });
-                } catch (e2) {
-                    console.error("[barcode] getUserMedia failed:", (e2 && e2.name) || e2);
-                    _setScannerLine(mode, "Unable to access camera");
-                    showToast(t("products.cameraAccessFailed"), "error");
-                    await stopCameraScanner();
-                    return;
+                    console.log("[scanner] getUserMedia requested: " + a.label);
+                    stream = await navigator.mediaDevices.getUserMedia(a.c);
+                    usedLabel = a.label;
+                    break;
+                } catch (err) {
+                    console.warn("[scanner] getUserMedia rejected (" + a.label + "): " + ((err && err.name) || err));
+                    if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
+                        console.error("[scanner] camera permission result: DENIED");
+                        _setScannerLine(mode, "Camera permission denied");
+                        showToast(t("products.cameraAccessFailed"), "error");
+                        await stopCameraScanner();
+                        return;
+                    }
                 }
             }
+            if (!stream) {
+                console.error("[scanner] camera permission result: no usable camera after all fallbacks");
+                _setScannerLine(mode, "Unable to access camera");
+                showToast(t("products.cameraAccessFailed"), "error");
+                await stopCameraScanner();
+                return;
+            }
+            console.log("[scanner] camera permission result: GRANTED  (constraints: " + usedLabel + ")");
+            const _st0 = (stream.getVideoTracks && stream.getVideoTracks()[0]) || null;
+            console.log("[scanner] selected device: " + ((_st0 && _st0.label) || "(unnamed)") +
+                "  settings: " + JSON.stringify((_st0 && _st0.getSettings && _st0.getSettings()) || {}));
             if (activeCameraMode !== mode) { stream.getTracks().forEach(x => { try { x.stop(); } catch (_) {} }); return; }
             _camStream = stream;
             if (_camVideo) {

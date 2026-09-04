@@ -51,10 +51,17 @@
         }
 
         .inline-camera-box video {
+            /* V29: was max-height:180px + object-fit:cover - a thin cropped
+               strip at every viewport width, which made a barcode almost
+               impossible to aim on laptop/desktop. Show the whole frame,
+               same at every breakpoint. The DECODE canvas is still capped at
+               1280px in _zxScanTick - this only affects the preview. */
             width: 100% !important;
-            max-height: 180px !important;
+            min-height: 240px;
+            max-height: 60vh !important;
             border-radius: 0.5rem;
-            object-fit: cover;
+            object-fit: contain !important;
+            background: #000;
         }
     
 
