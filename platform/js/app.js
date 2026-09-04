@@ -71,7 +71,7 @@ async function apiFetch(path, opts = {}) {
     }
     return data;
 }
-const apiGet = (path) => apiFetch(path, { method: "GET" });
+const apiGet = (path) => apiFetch(path, { method: "GET", cache: "no-store" });
 const apiPost = (path, body) => apiFetch(path, { method: "POST", body: body !== undefined ? JSON.stringify(body) : undefined });
 const apiPut = (path, body) => apiFetch(path, { method: "PUT", body: JSON.stringify(body) });
 
@@ -237,7 +237,19 @@ function closeMobileNav() {
 document.getElementById("mobile-menu-btn").addEventListener("click", openMobileNav);
 document.getElementById("sidebar-close-btn").addEventListener("click", closeMobileNav);
 document.getElementById("mobile-nav-overlay").addEventListener("click", closeMobileNav);
-document.getElementById("refresh-btn").addEventListener("click", () => navigateTo(currentView, lastBusinessDetailId));
+document.getElementById("refresh-btn").addEventListener("click", async () => {
+    const btn = document.getElementById("refresh-btn");
+    const icon = btn.querySelector("i");
+    try {
+        btn.disabled = true;
+        if (icon) icon.classList.add("animate-spin");
+        const param = currentView === "business-detail" ? lastBusinessDetailId : null;
+        await navigateTo(currentView, param);
+    } finally {
+        btn.disabled = false;
+        if (icon) icon.classList.remove("animate-spin");
+    }
+});
 
 // =============================================================================
 // OVERVIEW
@@ -460,7 +472,7 @@ function buildPeriodBar(containerId, presets, onApply, storeKey) {
         }
     }
     render();
-    return { get: () => state, applyNow: () => { if (state.period === "custom" && state.start && state.end) onApply("custom", state.start, state.end); else onApply(state.period, null, null); } };
+    return { get: () => state, applyNow: () => { if (state.period === "custom" && state.start && state.end) return onApply("custom", state.start, state.end); return onApply(state.period, null, null); } };
 }
 
 // =============================================================================
@@ -475,7 +487,7 @@ async function loadRevenue() {
     if (!revenuePeriodCtl) {
         revenuePeriodCtl = buildPeriodBar("revenue-period-bar", REVENUE_PRESETS, fetchRevenue, "cauldra_platform_revenue_period");
     }
-    revenuePeriodCtl.applyNow();
+    await revenuePeriodCtl.applyNow();
 }
 async function fetchRevenue(period, start, end) {
     const params = new URLSearchParams({ period });
@@ -522,7 +534,7 @@ async function loadAiCosts() {
     if (!aiPeriodCtl) {
         aiPeriodCtl = buildPeriodBar("ai-period-bar", AI_PRESETS, fetchAiUsage, "cauldra_platform_ai_period");
     }
-    aiPeriodCtl.applyNow();
+    await aiPeriodCtl.applyNow();
     await loadAiPricing();
     await loadPlatformSettings();
 }
