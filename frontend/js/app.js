@@ -1118,12 +1118,43 @@
                     unableToConnect: "Unable to connect right now. Please check your connection and try again.", done: "Done",
                     current: "current",
                 },
+                // MY PROFILE (the individual person). Kept deliberately separate
+                // from `settings` (the business) so the two never blur together.
+                profile: {
+                    title: "My Profile", subtitle: "Manage your personal Cauldra account",
+                    personalInfo: "Personal Information", businessMembership: "Business Membership",
+                    preferences: "Preferences", accountSecurity: "Account & Security",
+                    firstName: "First Name", lastName: "Last Name", username: "Username",
+                    email: "Email", phone: "Phone",
+                    business: "Business", businessId: "Business ID", role: "Role", position: "Position",
+                    preferredLanguage: "Preferred Language",
+                    languageHint: "Saved to your personal account, not the business.",
+                    notifications: "Notifications", manage: "Manage",
+                    changePassword: "Change Password", changePhoto: "Change Photo", removePhoto: "Remove Photo",
+                    changeEmail: "Change Email", iVerified: "I have verified it",
+                    verified: "Verified", unverified: "Not verified",
+                    viewBusinessProfile: "View Business Profile",
+                    newEmailPrompt: "Enter your new email address. We will send a verification link to it; your current address stays active until you confirm.",
+                    pendingEmail: "Pending verification: {email}",
+                    profileLoadFailed: "We could not load your profile. Please try again.",
+                    profileSaved: "Profile updated.",
+                    profileSaveFailed: "We could not save your profile. Please try again.",
+                    avatarTooLarge: "Profile photo must be 2 MB or smaller.",
+                    avatarInvalidType: "Choose a PNG, JPEG, WebP or GIF image.",
+                    avatarSaved: "Profile photo updated.",
+                    avatarRemoved: "Profile photo removed.",
+                    emailChangeSent: "Verification email sent. Your current email stays active until you confirm the new one.",
+                    emailChangeConfirmed: "Email address updated and verified.",
+                    emailNotVerifiedYet: "That address is not verified yet. Open the link we emailed you, then try again.",
+                },
                 navigation: {
                     groupMain: "Main", groupManagement: "Management", groupIntelligence: "Intelligence", groupSystem: "System",
                     dashboard: "Dashboard", todaysSales: "Sales", teamManagement: "Team Management", teamPresence: "Team Presence",
                     generatePO: "Generate PO", purchaseOrders: "Purchase Orders", inventory: "Inventory", suppliers: "Suppliers",
                     warehouses: "Warehouses", expenses: "Expenses", profit: "Profit", businessBrain: "Business Brain", aiCenter: "AI Center",
                     priceMonitor: "Price Monitor", predictive: "Predictive", businessProfile: "Business Profile", getStarted: "Get Started",
+                    myProfile: "My Profile", settings: "Settings",
+                    subscriptionBilling: "Subscription & Billing", activityHistory: "Activity History",
                     guestHub: "Guest Hub", hub: "Hub", signIn: "Sign In", guest: "Guest",
                     adminHub: "Admin Hub", managerHub: "Manager Hub", staffHub: "Staff Hub",
                     quickControls: "Quick Controls", notifications: "Notifications", refreshData: "Refresh Data",
@@ -1153,6 +1184,10 @@
                 },
                 settings: {
                     title: "Settings", businessProfileTab: "Business Profile", billingTab: "Subscription & Billing",
+                    managedByAdmin: "Business information is managed by an Admin.",
+                    businessName: "Business Name", businessEmail: "Business Email",
+                    businessPhone: "Business Phone", businessAddress: "Business Address",
+                    countryRegion: "Country / Region",
                     appLanguage: "App Language", appLanguageNote: "Changing this does not change the business country, currency, or timezone.",
                     currency: "Currency", timezone: "Timezone", taxId: "Tax ID", profileUpdated: "Business profile updated successfully!",
                     loadInfoFailed: "We couldn't load that information right now. Please try again.",
@@ -15707,6 +15742,9 @@
             applyStaticTranslations();
             populateLanguageSelects(resolved);
             refreshVisibleDynamicText();
+            // Persist as the signed-in person's OWN preference so it follows them to
+            // any device. Guests keep the existing localStorage-only behaviour.
+            try { persistPreferredLanguage(resolved); } catch (_) {}
         }
 
         // Resolves the language to use at page load / whenever a fresh
@@ -15717,6 +15755,11 @@
         function syncLanguageFromProfile(profile) {
             const stored = getStoredLanguage();
             if (stored && SUPPORTED_LANGUAGES.includes(stored)) { setLanguage(stored); return; }
+            // V30: a signed-in person's OWN saved preference outranks the business
+            // language. Two users in the same business can differ; guests and users
+            // who have never chosen keep the previous business/browser/English chain.
+            const userLang = String(currentUserProfile?.preferred_language || "").toLowerCase();
+            if (SUPPORTED_LANGUAGES.includes(userLang)) { setLanguage(userLang); return; }
             const bizLang = String(profile?.language || "").toLowerCase();
             if (SUPPORTED_LANGUAGES.includes(bizLang)) { setLanguage(bizLang); return; }
             setLanguage(currentLanguage);
@@ -16102,6 +16145,43 @@
             ]),
             staff: new Set(['inventory', 'add product', 'new sale', 'daily sales', 'business brain', 'expenses'])
         };
+
+        // V30. Settings is NOT one permission any more. It is a container whose
+        // entries each have their own rule, so that removing Business Profile from a
+        // role never removes the whole Settings menu (the regression this replaces:
+        // `['nav-btn-settings', 'business profile']` in restrictedFeatures hid the
+        // entire group from Manager and Staff).
+        //
+        //                     Admin   Manager   Staff
+        //   My Profile         YES      YES      YES     personal, always available
+        //   Business Profile   YES      YES(ro)   NO      company info; edit = Admin only
+        //   Billing            YES      YES       NO      existing admin/manager rule
+        //   Activity History   YES      YES       NO      existing admin/manager rule
+        //   Refresh            YES      YES      YES     existing rule, untouched
+        function settingsMenuVisibility() {
+            const role = getCurrentRole();
+            const authed = hasAuthenticatedBusinessContext();
+            const adminOrManager = authed && ['admin', 'manager'].includes(role);
+            const entries = {
+                "my-profile": authed,
+                "business-profile": adminOrManager,
+                "billing": adminOrManager,
+                "activity-history": adminOrManager,
+            };
+            entries.settings = Object.values(entries).some(Boolean);
+            return entries;
+        }
+
+        // Applies visibility by [data-nav] rather than by id, so BOTH the desktop
+        // sidebar and the mobile-drawer clone are gated. ids are duplicated across
+        // those two copies, so getElementById() could only ever reach the desktop one.
+        function applySettingsMenuPermissions() {
+            const vis = settingsMenuVisibility();
+            Object.keys(vis).forEach(key => {
+                document.querySelectorAll(`[data-nav="${key}"]`).forEach(el => el.classList.toggle("hidden", !vis[key]));
+            });
+        }
+        const _v30RoleFeaturesEnd = true;   // marker: ROLE_FEATURES closed above
 
         function getCurrentRole() {
             return String(currentUserProfile?.role || '').toLowerCase();
@@ -16565,9 +16645,10 @@
                 ['nav-btn-daily-sales', 'daily sales'],
                 ['nav-btn-team-presence', 'team presence'],
                 ['nav-btn-new-sale', 'new sale'],
-                ['nav-btn-settings', 'business profile'],
             ];
             restrictedFeatures.forEach(([id, feature]) => hide(id, !hasFeaturePermission(feature)));
+            // Settings entries are gated individually (see settingsMenuVisibility).
+            applySettingsMenuPermissions();
 
             // Team Management is a group of three independent destinations. Each is
             // hidden individually by its own permission, and the parent group is only
@@ -16590,11 +16671,11 @@
             if (teamManagementGroup) teamManagementGroup.classList.toggle('hidden', !teamManagementVisible);
 
             const systemSection = document.getElementById('sidebar-system-section');
-            // Settings remains permission-gated, but Refresh retains the old
-            // header action's availability for every authenticated role.
+            // Every authenticated role has at least My Profile and Refresh here, so
+            // the System section is hidden only for guests. Individual entries are
             if (systemSection) systemSection.classList.toggle(
                 'hidden',
-                !hasFeaturePermission('business profile') && !hasAuthenticatedBusinessContext()
+                !hasAuthenticatedBusinessContext()
             );
 
             // Business Profile is Admin-editable only. Managers can use the employee directory,
@@ -16606,6 +16687,10 @@
             const saveBtn = document.getElementById('settings-save-btn');
             const addEmployeeBtn = document.getElementById('add-employee-btn');
             if (profileEdit) profileEdit.classList.toggle('hidden', role !== 'admin');
+            // Admin edits; Manager sees a genuine read-only presentation instead of
+            // an empty modal (the edit form is the ONLY thing that was ever rendered).
+            const profileReadOnly = document.getElementById('business-profile-readonly-section');
+            if (profileReadOnly) profileReadOnly.classList.toggle('hidden', role === 'admin' || !["admin","manager"].includes(role));
             if (dataSection) dataSection.classList.toggle('hidden', role !== 'admin');
             if (saveBtn) saveBtn.classList.toggle('hidden', role !== 'admin');
             if (employeeSection) employeeSection.classList.toggle('hidden', !['admin','manager'].includes(role));
@@ -16834,6 +16919,370 @@
             });
         }
 
+        // ===================================================================
+        // MY PROFILE (V30) - the individual person, never the business.
+        // Business Profile stays a completely separate screen with its own
+        // Admin-only edit rule; nothing here can change role, business
+        // membership, disabled state, or any other authorization field -
+        // PATCH /users/me/profile does not even accept those fields.
+        // ===================================================================
+        let myProfileState = null;
+
+        function profileInitials(profile) {
+            const p = profile || currentUserProfile || {};
+            const a = String(p.firstname || "").trim();
+            const b = String(p.lastname || "").trim();
+            const initials = ((a[0] || "") + (b[0] || "")).trim();
+            if (initials) return initials.toUpperCase();
+            return String(p.username || "?").trim().slice(0, 2).toUpperCase() || "?";
+        }
+
+        // Avatar bytes live in the PRIVATE upload store and are served by an
+        // authenticated endpoint, so the <img> carries a cache-busting token that
+        // changes whenever the photo does. Falls back to initials automatically.
+        function profileAvatarMarkup(sizeClasses, textClasses) {
+            const p = currentUserProfile || {};
+            const initials = escapeHtml(profileInitials(p));
+            const base = `${sizeClasses} rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0 overflow-hidden font-bold ${textClasses}`;
+            // renderAuthButton() runs once at top level BEFORE this module's `let`
+            // bindings are initialized, so read the object URL defensively rather
+            // than risking a temporal-dead-zone ReferenceError on first paint.
+            let url = null;
+            try { url = myProfileAvatarObjectUrl; } catch (_) { url = null; }
+            if (p.has_avatar && url) {
+                return `<span class="${base}"><img src="${url}" alt="" class="w-full h-full object-cover"></span>`;
+            }
+            return `<span class="${base}">${initials}</span>`;
+        }
+
+        let myProfileAvatarObjectUrl = null;
+
+        // GET /users/me/avatar needs the Authorization header, so the image is
+        // fetched as a blob and shown through an object URL rather than a bare src.
+        async function refreshMyAvatarObjectUrl() {
+            const had = myProfileAvatarObjectUrl;
+            myProfileAvatarObjectUrl = null;
+            if (had) { try { URL.revokeObjectURL(had); } catch (_) {} }
+            if (!authToken || !currentUserProfile?.has_avatar) return;
+            try {
+                const res = await fetch(`${API_URL}/users/me/avatar`, { headers: { "Authorization": `Bearer ${authToken}` } });
+                if (!res.ok) return;
+                myProfileAvatarObjectUrl = URL.createObjectURL(await res.blob());
+            } catch (_) { /* initials fallback is always valid */ }
+        }
+
+        function closeMyProfileModal() {
+            document.getElementById("my-profile-modal")?.classList.add("hidden");
+        }
+
+        async function openMyProfileModal() {
+            if (!hasAuthenticatedBusinessContext()) {
+                showToast(t("common.signInOrRegister"), "info");
+                openBusinessAuthModal();
+                return;
+            }
+            closeMobileNav();
+            const modal = document.getElementById("my-profile-modal");
+            if (!modal) return;
+            modal.classList.remove("hidden");
+            expandSettingsSubmenu("my-profile");
+            await loadMyProfile();
+        }
+
+        async function loadMyProfile() {
+            try {
+                const res = await fetch(`${API_URL}/users/me/profile`, { headers: { "Authorization": `Bearer ${authToken}` } });
+                if (!res.ok) throw new Error("load failed");
+                myProfileState = await res.json();
+                // Keep the in-memory session user in step (avatar/language/email).
+                if (myProfileState.user) currentUserProfile = { ...currentUserProfile, ...myProfileState.user };
+                await refreshMyAvatarObjectUrl();
+                renderMyProfile();
+                renderAuthButton();
+                renderMobileNav();
+            } catch (_) {
+                showToast(t("profile.profileLoadFailed"), "error");
+            }
+        }
+
+        function _profileRow(label, value) {
+            return `<div class="min-w-0">
+                <dt class="text-[10px] uppercase tracking-wider text-textSec font-semibold">${escapeHtml(label)}</dt>
+                <dd class="text-textMain font-medium truncate mt-0.5">${escapeHtml(value == null || value === "" ? "\u2014" : String(value))}</dd>
+            </div>`;
+        }
+
+        function renderMyProfile() {
+            const u = (myProfileState && myProfileState.user) || currentUserProfile || {};
+            const m = (myProfileState && myProfileState.membership) || {};
+            const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val == null ? "" : val; };
+            const txt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val == null ? "" : val; };
+
+            const fullName = [u.firstname, u.lastname].filter(Boolean).join(" ").trim() || u.username || "";
+            txt("profile-display-name", fullName);
+            txt("profile-role-line", hubRoleLabel(String(u.role || "").toLowerCase()));
+            txt("profile-position-line", u.position || "");
+
+            const initialsEl = document.getElementById("profile-avatar-initials");
+            const imgEl = document.getElementById("profile-avatar-img");
+            const removeBtn = document.getElementById("profile-avatar-remove-btn");
+            if (initialsEl && imgEl) {
+                if (u.has_avatar && myProfileAvatarObjectUrl) {
+                    imgEl.src = myProfileAvatarObjectUrl;
+                    imgEl.classList.remove("hidden");
+                    initialsEl.classList.add("hidden");
+                } else {
+                    imgEl.classList.add("hidden");
+                    imgEl.removeAttribute("src");
+                    initialsEl.textContent = profileInitials(u);
+                    initialsEl.classList.remove("hidden");
+                }
+            }
+            if (removeBtn) removeBtn.classList.toggle("hidden", !u.has_avatar);
+
+            set("profile-firstname", u.firstname);
+            set("profile-lastname", u.lastname);
+            set("profile-username", u.username);
+            set("profile-phone", u.phone);
+            set("profile-email", u.email);
+
+            const statusEl = document.getElementById("profile-email-status");
+            if (statusEl) {
+                // Supabase Auth is the source of truth; this only renders what the
+                // backend mirror reports. No frontend value can mark an email verified.
+                statusEl.innerHTML = u.email_verified
+                    ? `<span class="text-success"><i class="fa-solid fa-circle-check"></i> ${escapeHtml(t("profile.verified"))}</span>`
+                    : `<span class="text-textSec"><i class="fa-solid fa-circle-exclamation"></i> ${escapeHtml(t("profile.unverified"))}</span>`;
+            }
+            const pendingWrap = document.getElementById("profile-pending-email");
+            if (pendingWrap) {
+                pendingWrap.classList.toggle("hidden", !u.pending_email);
+                const pt = document.getElementById("profile-pending-email-text");
+                if (pt && u.pending_email) pt.textContent = t("profile.pendingEmail", { email: u.pending_email });
+            }
+
+            const grid = document.getElementById("profile-membership-grid");
+            if (grid) {
+                grid.innerHTML = [
+                    _profileRow(t("profile.business"), m.business_name),
+                    _profileRow(t("profile.businessId"), m.business_code),
+                    _profileRow(t("profile.role"), hubRoleLabel(String(m.role || u.role || "").toLowerCase())),
+                    _profileRow(t("profile.position"), m.position),
+                ].join("");
+            }
+            const viewBizBtn = document.getElementById("profile-view-business-btn");
+            if (viewBizBtn) viewBizBtn.classList.toggle("hidden", !m.can_view_business_profile);
+
+            const langSel = document.getElementById("profile-language");
+            if (langSel) {
+                // Labels come from the existing languageDatabase - no second list.
+                langSel.innerHTML = languageDatabase.map(l =>
+                    `<option value="${escapeHtml(l.code)}">${escapeHtml(l.name)}</option>`).join("");
+                langSel.value = u.preferred_language || currentLanguage || DEFAULT_LANGUAGE;
+            }
+            applyStaticTranslations(document.getElementById("my-profile-modal") || document);
+        }
+
+        async function saveMyProfile(event) {
+            event.preventDefault();
+            const btn = document.getElementById("profile-save-btn");
+            if (btn) btn.disabled = true;
+            try {
+                const body = {
+                    firstname: document.getElementById("profile-firstname").value.trim(),
+                    lastname: document.getElementById("profile-lastname").value.trim(),
+                    phone: document.getElementById("profile-phone").value.trim(),
+                };
+                const res = await fetch(`${API_URL}/users/me/profile`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+                    body: JSON.stringify(body),
+                });
+                const dataOut = await res.json().catch(() => null);
+                if (!res.ok) throw new Error((dataOut && dataOut.detail) || "save failed");
+                myProfileState = dataOut;
+                if (dataOut.user) currentUserProfile = { ...currentUserProfile, ...dataOut.user };
+                renderMyProfile();
+                renderAuthButton();
+                renderMobileNav();
+                updateWelcomeBanner();
+                showToast(t("profile.profileSaved"), "success");
+            } catch (err) {
+                showToast(friendlyErrorMessage(err.message, t("profile.profileSaveFailed")), "error");
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        // Personal language preference. Applies instantly, then persists to THIS
+        // user - never to the business, so two people in the same business can use
+        // Cauldra in different languages at the same time.
+        async function saveMyPreferredLanguage(lang) {
+            const resolved = SUPPORTED_LANGUAGES.includes(lang) ? lang : DEFAULT_LANGUAGE;
+            setLanguage(resolved);
+            await persistPreferredLanguage(resolved);
+        }
+
+        async function persistPreferredLanguage(lang) {
+            if (!authToken || !currentUserProfile) return;
+            if ((currentUserProfile.preferred_language || "") === lang) return;
+            try {
+                const res = await fetch(`${API_URL}/users/me/profile`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+                    body: JSON.stringify({ preferred_language: lang }),
+                });
+                if (res.ok) {
+                    const out = await res.json().catch(() => null);
+                    if (out && out.user) currentUserProfile = { ...currentUserProfile, ...out.user };
+                }
+            } catch (_) { /* the local choice still applies for this session */ }
+        }
+
+        function handleMyAvatarSelected(event) {
+            const file = event.target.files && event.target.files[0];
+            event.target.value = "";
+            if (!file) return;
+            const allowed = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+            if (!allowed.includes(file.type)) { showToast(t("profile.avatarInvalidType"), "error"); return; }
+            if (file.size > 2 * 1024 * 1024) { showToast(t("profile.avatarTooLarge"), "error"); return; }
+            const reader = new FileReader();
+            reader.onload = async ev => {
+                try {
+                    // The server re-validates the data URL against an image-only
+                    // allow-list and the size cap; these checks are only for fast feedback.
+                    const res = await fetch(`${API_URL}/users/me/avatar`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+                        body: JSON.stringify({ file_name: file.name, file_data: ev.target.result }),
+                    });
+                    const out = await res.json().catch(() => null);
+                    if (!res.ok) throw new Error((out && out.detail) || "upload failed");
+                    currentUserProfile = { ...currentUserProfile, has_avatar: true };
+                    await refreshMyAvatarObjectUrl();
+                    if (myProfileState && myProfileState.user) myProfileState.user.has_avatar = true;
+                    renderMyProfile(); renderAuthButton(); renderMobileNav();
+                    showToast(t("profile.avatarSaved"), "success");
+                } catch (err) {
+                    showToast(friendlyErrorMessage(err.message, t("profile.profileSaveFailed")), "error");
+                }
+            };
+            reader.onerror = () => showToast(t("profile.profileSaveFailed"), "error");
+            reader.readAsDataURL(file);
+        }
+
+        async function removeMyAvatar() {
+            try {
+                const res = await fetch(`${API_URL}/users/me/avatar`, { method: "DELETE", headers: { "Authorization": `Bearer ${authToken}` } });
+                if (!res.ok) throw new Error("remove failed");
+                currentUserProfile = { ...currentUserProfile, has_avatar: false };
+                if (myProfileState && myProfileState.user) myProfileState.user.has_avatar = false;
+                await refreshMyAvatarObjectUrl();
+                renderMyProfile(); renderAuthButton(); renderMobileNav();
+                showToast(t("profile.avatarRemoved"), "success");
+            } catch (err) {
+                showToast(friendlyErrorMessage(err.message, t("profile.profileSaveFailed")), "error");
+            }
+        }
+
+        // Verified email change. The trusted address is NOT replaced until the
+        // backend has confirmed the new one with Supabase.
+        async function startMyEmailChange() {
+            const next = await showCustomPrompt(t("profile.newEmailPrompt"), t("profile.changeEmail"), t("profile.email"), "email");
+            const value = String(next || "").trim();
+            if (!value) return;
+            try {
+                const res = await fetch(`${API_URL}/users/me/email-change`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+                    body: JSON.stringify({ new_email: value }),
+                });
+                const out = await res.json().catch(() => null);
+                if (!res.ok) throw new Error((out && out.detail) || "request failed");
+                currentUserProfile = { ...currentUserProfile, pending_email: value };
+                if (myProfileState && myProfileState.user) myProfileState.user.pending_email = value;
+                renderMyProfile();
+                showToast(t("profile.emailChangeSent"), "success");
+            } catch (err) {
+                showToast(friendlyErrorMessage(err.message, t("profile.profileSaveFailed")), "error");
+            }
+        }
+
+        async function confirmMyEmailChange() {
+            try {
+                const res = await fetch(`${API_URL}/users/me/email-change/confirm`, {
+                    method: "POST", headers: { "Authorization": `Bearer ${authToken}` },
+                });
+                const out = await res.json().catch(() => null);
+                if (res.status === 409) { showToast(t("profile.emailNotVerifiedYet"), "info"); return; }
+                if (!res.ok) throw new Error((out && out.detail) || "confirm failed");
+                myProfileState = out;
+                if (out.user) currentUserProfile = { ...currentUserProfile, ...out.user };
+                renderMyProfile();
+                showToast(t("profile.emailChangeConfirmed"), "success");
+            } catch (err) {
+                showToast(friendlyErrorMessage(err.message, t("profile.profileSaveFailed")), "error");
+            }
+        }
+
+        async function cancelMyEmailChange() {
+            try {
+                await fetch(`${API_URL}/users/me/email-change`, { method: "DELETE", headers: { "Authorization": `Bearer ${authToken}` } });
+            } catch (_) {}
+            currentUserProfile = { ...currentUserProfile, pending_email: null };
+            if (myProfileState && myProfileState.user) myProfileState.user.pending_email = null;
+            renderMyProfile();
+        }
+
+        // Reuses the EXISTING secure change-password flow (current-password
+        // verification, password reuse rules, session revocation) - no duplicate.
+        function openChangePasswordFromProfile() {
+            closeMyProfileModal();
+            const modal = document.getElementById("password-change-modal");
+            if (!modal) return;
+            // Same modal, same POST /auth/change-password, same current-password
+            // verification / reuse rules / session revocation. Only the framing
+            // differs: a voluntary change is dismissable and is not "required".
+            ["pw-change-current", "pw-change-new", "pw-change-confirm"].forEach(id => {
+                const el = document.getElementById(id); if (el) el.value = "";
+            });
+            document.getElementById("password-change-message")?.classList.add("hidden");
+            const title = document.getElementById("password-change-title");
+            if (title) title.textContent = t("profile.changePassword");
+            document.getElementById("pw-change-cancel-btn")?.classList.remove("hidden");
+            modal.classList.remove("hidden");
+            setTimeout(() => document.getElementById("pw-change-current")?.focus(), 40);
+        }
+
+        // Only ever reachable from the voluntary entry point above - the
+        // mandatory temporary-password flow keeps this button hidden.
+        function closeVoluntaryPasswordChange() {
+            if (currentUserProfile?.must_change_password) return;   // never dismissable
+            document.getElementById("password-change-modal")?.classList.add("hidden");
+            document.getElementById("pw-change-cancel-btn")?.classList.add("hidden");
+            ["pw-change-current", "pw-change-new", "pw-change-confirm"].forEach(id => {
+                const el = document.getElementById(id); if (el) el.value = "";
+            });
+        }
+
+        // Manager-facing read-only Business Profile presentation.
+        function renderBusinessProfileReadOnly(profile) {
+            const grid = document.getElementById("business-profile-readonly-grid");
+            if (!grid) return;
+            const b = profile || businessProfile || {};
+            grid.innerHTML = [
+                _profileRow(t("settings.businessName"), b.company_name),
+                _profileRow(t("profile.businessId"), b.business_code),
+                _profileRow(t("settings.businessEmail"), b.email),
+                _profileRow(t("settings.businessPhone"), b.phone),
+                _profileRow(t("settings.businessAddress"), b.address),
+                _profileRow(t("settings.countryRegion"), b.country),
+                _profileRow(t("settings.currency"), b.currency),
+                _profileRow(t("settings.taxId"), b.tax_id),
+                _profileRow(t("settings.timezone"), b.timezone),
+            ].join("");
+        }
+
         function renderAuthButton() {
             const container = document.getElementById("sidebar-auth-container");
             if (!container) return;
@@ -16841,18 +17290,26 @@
             if (hasAuthenticatedBusinessContext()) {
                 const userNameUpper = (currentUserProfile.username || "").toUpperCase();
                 const positionText = currentUserProfile.position || "";
-                const displayName = positionText ? `${userNameUpper} (${positionText})` : userNameUpper;
-                
+                const roleLabel = hubRoleLabel((currentUserProfile.role || "").toLowerCase());
+                const avatar = profileAvatarMarkup("w-8 h-8", "text-[10px]");
+
+                // V30: the identity block is an intentional account control that opens
+                // My Profile. Sign Out stays a SEPARATE button so pressing the identity
+                // area can never sign the user out by accident.
                 container.innerHTML = `
                     <div class="space-y-2">
-                        <div class="flex items-center justify-between px-3 py-2.5 rounded-xl bg-cardBg border border-borderCol text-xs font-medium">
-                            <div class="flex items-center gap-2.5 min-w-0 flex-1 mr-2">
-                                <div class="w-7 h-7 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
-                                    <i class="fa-solid fa-user-shield text-xs"></i>
-                                </div>
-                                <span class="text-textMain font-semibold truncate block max-w-[100px]" title="${displayName}">${displayName}</span>
-                            </div>
-                            <button type="button" onclick="confirmSignOut()" class="w-8 h-8 rounded-lg bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30 transition flex items-center justify-center shrink-0 cursor-pointer" title="${t('common.signOut')}">
+                        <div class="flex items-center gap-2 px-1.5 py-1.5 rounded-xl bg-cardBg border border-borderCol text-xs font-medium">
+                            <button type="button" onclick="openMyProfileModal()" aria-haspopup="dialog"
+                                    class="group flex items-center gap-2.5 min-w-0 flex-1 text-left px-1.5 py-1 rounded-lg hover:bg-cardHover focus:outline-none focus:ring-2 focus:ring-primary/50 transition cursor-pointer"
+                                    title="${escapeHtml(t('profile.title'))}">
+                                ${avatar}
+                                <span class="min-w-0 flex-1">
+                                    <span class="block text-textMain font-semibold truncate">${escapeHtml(userNameUpper)}</span>
+                                    <span class="block text-[10px] text-textSec truncate">${escapeHtml(positionText || roleLabel)}</span>
+                                </span>
+                                <i class="fa-solid fa-chevron-right text-[9px] text-textSec group-hover:text-textMain shrink-0"></i>
+                            </button>
+                            <button type="button" onclick="confirmSignOut()" class="w-8 h-8 rounded-lg bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30 transition flex items-center justify-center shrink-0 cursor-pointer" title="${escapeHtml(t('common.signOut'))}" aria-label="${escapeHtml(t('common.signOut'))}">
                                 <i class="fa-solid fa-right-from-bracket text-xs"></i>
                             </button>
                         </div>
@@ -16907,7 +17364,12 @@
             if (nav && source) {
                 const clone = source.cloneNode(true);
                 clone.className = 'space-y-1';
-                clone.querySelector('#sidebar-refresh-btn')?.removeAttribute('id');
+                // Strip EVERY id from the clone. The drawer is a copy of the desktop
+                // nav, so keeping ids produced duplicate ids document-wide and
+                // document.getElementById() could only ever reach the desktop copy -
+                // which is why role gating never reached the drawer. Gating now uses
+                // [data-nav] (deliberately preserved by the clone) instead.
+                clone.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
                 clone.querySelectorAll('button, a').forEach(btn => {
                     btn.classList.add('py-3');
                     if (!signedIn) {
@@ -16937,6 +17399,8 @@
                 });
                 nav.innerHTML = '';
                 nav.appendChild(clone);
+                // The freshly mounted clone must obey the same role rules.
+                try { applySettingsMenuPermissions(); } catch (_) {}
 
                 if (signedIn) {
                     const utility = document.createElement('div');
@@ -16958,6 +17422,10 @@
             const side = document.getElementById('sidebar-auth-container');
             if (auth) {
                 auth.innerHTML = side ? side.innerHTML : '';
+                // The drawer's auth block is a COPY of the sidebar's, so any id it
+                // carried would be duplicated document-wide (e.g. #auth-btn-text) and
+                // getElementById would only ever reach the sidebar copy.
+                auth.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
                 auth.querySelectorAll('button').forEach(btn => {
                     if (!signedIn) {
                         btn.classList.remove('guest-preview-disabled');
@@ -18154,6 +18622,7 @@
                     if (currentUserProfile) currentUserProfile.must_change_password = false;
 
                     document.getElementById("password-change-modal").classList.add("hidden");
+                    document.getElementById("pw-change-cancel-btn")?.classList.add("hidden");
                     showToast(t("auth.passwordUpdatedSuccess"), "success");
                     await loadData();
                 } else {
@@ -18245,14 +18714,18 @@
                 return;
             }
             applyRoleRestrictions();
-            if (role === 'admin') {
+            // Admin and Manager both READ the profile; only Admin gets the editable
+            // form. The backend enforces the same split independently:
+            // GET /business-profile/ is admin+manager, POST is admin-only.
+            if (['admin', 'manager'].includes(role)) {
                 try {
                     const res = await fetch(`${API_URL}/business-profile/`, { headers: { "Authorization": `Bearer ${authToken}` } });
                     if (res.ok) {
                         businessProfile = await res.json();
 
                         syncLanguageFromProfile(businessProfile);
-                        populateBusinessForm(businessProfile);
+                        if (role === 'admin') populateBusinessForm(businessProfile);
+                        else renderBusinessProfileReadOnly(businessProfile);
                     }
                 } catch (e) {}
             }

@@ -494,6 +494,30 @@ class User(Base):
     must_change_password = Column(Boolean, default=False, nullable=False)
     disabled = Column(Boolean, default=False, nullable=False)
     auth_version = Column(Integer, default=1, nullable=False)
+    # --- V30 personal profile ------------------------------------------------
+    # The INDIVIDUAL's language preference. Distinct from BusinessProfile.language
+    # (which stays as the business-document/default language): an Admin, a
+    # Manager and two Staff in the same business can each use Cauldra in a
+    # different language at the same time. NULL = no personal choice yet, fall
+    # back to the business language (see syncLanguageFromProfile in app.js).
+    preferred_language = Column(String, nullable=True)
+    # Avatar is stored through the EXISTING private upload pipeline
+    # (persist_upload -> StoredUpload -> storage provider). Only an id is kept
+    # here; bytes are never public and are served by GET /users/me/avatar.
+    # Deliberately a plain Integer, NOT a ForeignKey: stored_uploads already
+    # has an FK back to users (uploaded_by_id), and a second FK the other way
+    # creates a mutually-dependent table cycle that breaks
+    # Base.metadata.create_all() (see migration 0001). Ownership is enforced on
+    # every read instead - the lookup is always filtered by business_id.
+    avatar_upload_id = Column(Integer, nullable=True)
+    # MIRROR of Supabase's own verification state. Only ever written by trusted
+    # backend logic after _supabase_email_confirmed() says True - never
+    # settable from a request body.
+    email_verified_at = Column(SQLDateTime, nullable=True)
+    # An email change the user has requested but not yet verified. `email`
+    # keeps the currently trusted address until Supabase confirms the new one,
+    # so account recovery is never weakened by an unverified address.
+    pending_email = Column(String, nullable=True)
 
     business_rel = relationship("BusinessProfile", back_populates="users")
     # No ownership cascade: business data survives user deletion.
@@ -3195,11 +3219,19 @@ def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
 
 def serialize_user(u: User) -> dict:
+    """SAFE user fields only. Never returns password, previous_password_hash,
+    refresh-token hashes, or any provider secret."""
     return {
         "id": u.id, "username": u.username, "role": u.role, "email": u.email, "phone": u.phone,
         "firstname": u.firstname, "lastname": u.lastname, "position": u.position,
         "must_change_password": u.must_change_password, "disabled": u.disabled,
         "auth_version": int(u.auth_version or 1),
+        # V30 personal profile (safe, non-authorization fields)
+        "preferred_language": (u.preferred_language or None),
+        "has_avatar": bool(u.avatar_upload_id),
+        "avatar_url": ("/users/me/avatar" if u.avatar_upload_id else None),
+        "email_verified": bool(u.email_verified_at),
+        "pending_email": (u.pending_email or None),
     }
 
 def serialize_business(b: BusinessProfile) -> dict:
@@ -4685,6 +4717,15 @@ def reset_password(payload: PasswordResetRequest, db: Session = Depends(get_db))
 # -----------------------------------------------------------------------------
 @app.get("/business-profile/", response_model=BusinessProfileSchema)
 def get_business_profile(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    """Read the CALLER'S OWN business profile.
+
+    Authorization (V30): Admin and Manager may read; Staff may not - Business
+    Profile is company-level information, not personal account information, and
+    a Staff member has no Business Profile menu entry at all. Tenant is always
+    user.business_id, never a client-supplied id, so no business can read
+    another's profile. Modification remains Admin-only (see the POST below)."""
+    if user.role not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Business information is managed by an Admin.")
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not biz: raise HTTPException(status_code=404, detail="Business profile is unavailable.")
     return BusinessProfileSchema(**serialize_business(biz))
@@ -4785,6 +4826,236 @@ def clear_client_session(response: Response):
     """Clear only the browser's Cauldra refresh cookie. No business or session row is deleted."""
     clear_refresh_cookie(response)
     return {"message": "Client session cookie cleared."}
+
+class UserProfileUpdate(BaseModel):
+    """Fields an individual may change about THEMSELVES. Deliberately does NOT
+    include role, business_id, disabled, position, username, id or email -
+    authorization fields are never editable from a personal profile, and email
+    changes go through the verified flow below."""
+    firstname: Optional[str] = Field(default=None, max_length=80)
+    lastname: Optional[str] = Field(default=None, max_length=80)
+    phone: Optional[str] = Field(default=None, max_length=40)
+    preferred_language: Optional[str] = Field(default=None, max_length=12)
+
+
+class UserAvatarUpload(BaseModel):
+    file_name: Optional[str] = Field(default=None, max_length=180)
+    file_data: str          # data: URL, validated server-side by decode_base64_upload
+
+
+class UserEmailChangeRequest(BaseModel):
+    new_email: EmailStr
+
+
+AVATAR_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+AVATAR_MAX_BYTES = 2 * 1024 * 1024      # 2 MB is plenty for a profile photo
+
+
+def _refresh_email_verified_mirror(db: Session, user: User) -> None:
+    """Supabase Auth is the ONLY source of truth for email verification. This
+    refreshes our local mirror from it; it can never be set by a request body.
+    Failures are non-fatal - the mirror simply stays as it was."""
+    try:
+        confirmed = _supabase_email_confirmed(user.email)
+    except Exception:
+        return
+    if confirmed is True and not user.email_verified_at:
+        user.email_verified_at = datetime.utcnow()
+    elif confirmed is False and user.email_verified_at:
+        user.email_verified_at = None
+
+
+def _user_profile_payload(db: Session, user: User) -> dict:
+    biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    return {
+        "user": serialize_user(user),
+        # Business MEMBERSHIP context - informational only. This is not a
+        # Business Profile editor and returns no business settings a Staff
+        # member is not entitled to (name/code only).
+        "membership": {
+            "business_name": (biz.company_name if biz else None),
+            "business_code": (biz.business_code if biz else None),
+            "role": user.role,
+            "position": user.position,
+            # Whether THIS user is allowed to open the Business Profile screen
+            # at all - the frontend uses it to decide if the "View Business
+            # Profile" link is shown. Server-side authorization is still
+            # enforced independently on /business-profile/.
+            "can_view_business_profile": user.role in ("admin", "manager"),
+            "can_edit_business_profile": user.role == "admin",
+        },
+    }
+
+
+@app.get("/users/me/profile")
+def get_my_profile(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    """The authenticated user's OWN profile. `me` is resolved from the token -
+    there is no user_id parameter, so one user can never read another's."""
+    _refresh_email_verified_mirror(db, user)
+    db.commit()
+    return _user_profile_payload(db, user)
+
+
+@app.patch("/users/me/profile")
+def update_my_profile(data: UserProfileUpdate, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    """Update only the authenticated user's own personal fields.
+
+    Authorization-bearing fields (role / business_id / disabled / position /
+    username / id) are NOT part of UserProfileUpdate at all, so a Staff member
+    cannot promote themselves or move business by any request body - there is
+    no field to send."""
+    changes = data.model_dump(exclude_unset=True)
+    touched = []
+
+    if "firstname" in changes:
+        user.firstname = (changes["firstname"] or "").strip()[:80] or None
+        touched.append("first name")
+    if "lastname" in changes:
+        user.lastname = (changes["lastname"] or "").strip()[:80] or None
+        touched.append("last name")
+    if "phone" in changes:
+        raw_phone = (changes["phone"] or "").strip()
+        if raw_phone:
+            biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+            user.phone = canonical_phone_for_country(raw_phone, (biz.phone_country_code if biz else None))
+        else:
+            user.phone = ""
+        touched.append("phone number")
+    if "preferred_language" in changes:
+        lang = str(changes["preferred_language"] or "").strip().lower()
+        user.preferred_language = (lang[:12] or None)
+        touched.append("preferred language")
+
+    if touched:
+        add_audit(db, user, "USER_PROFILE_UPDATED", "Updated own profile: " + ", ".join(touched) + ".")
+    db.commit()
+    db.refresh(user)
+    return _user_profile_payload(db, user)
+
+
+@app.post("/users/me/avatar")
+def upload_my_avatar(payload: UserAvatarUpload, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    """Server-side validated profile photo. The browser's declared MIME type is
+    NOT trusted: decode_base64_upload re-parses the data URL header against an
+    image-only allow-list, and the filename is sanitized by persist_upload's
+    safe_upload_name (no arbitrary paths). Bytes go to the existing PRIVATE
+    upload store - never a public URL."""
+    raw, content_type = decode_base64_upload(payload.file_data, AVATAR_CONTENT_TYPES)
+    if len(raw) > AVATAR_MAX_BYTES:
+        raise HTTPException(status_code=422, detail="Profile photo must be 2 MB or smaller.")
+    previous_id = user.avatar_upload_id
+    row = persist_upload(db, user, "avatar", (payload.file_name or "avatar"), content_type, raw)
+    user.avatar_upload_id = row.id
+    if previous_id and previous_id != row.id:
+        _delete_stored_upload(db, user, previous_id)
+    add_audit(db, user, "USER_AVATAR_UPDATED", "Updated own profile photo.")
+    db.commit()
+    db.refresh(user)
+    return {"message": "Profile photo updated.", "avatar_url": "/users/me/avatar", "has_avatar": True}
+
+
+@app.get("/users/me/avatar")
+def get_my_avatar(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    """Streams ONLY the authenticated user's own avatar."""
+    if not user.avatar_upload_id:
+        raise HTTPException(status_code=404, detail="No profile photo set.")
+    row = db.query(StoredUpload).filter(
+        StoredUpload.id == user.avatar_upload_id,
+        StoredUpload.business_id == user.business_id,
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No profile photo set.")
+    path = (UPLOAD_STORAGE_DIR / row.storage_key).resolve()
+    if UPLOAD_STORAGE_DIR not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="No profile photo set.")
+    return FileResponse(str(path), media_type=row.content_type, content_disposition_type="inline")
+
+
+def _delete_stored_upload(db: Session, user: User, upload_id: int) -> None:
+    row = db.query(StoredUpload).filter(
+        StoredUpload.id == upload_id, StoredUpload.business_id == user.business_id
+    ).first()
+    if not row:
+        return
+    try:
+        path = (UPLOAD_STORAGE_DIR / row.storage_key).resolve()
+        if UPLOAD_STORAGE_DIR in path.parents and path.is_file():
+            path.unlink()
+    except Exception:
+        pass          # metadata row still goes; a stray blob is not worth a 500
+    db.delete(row)
+
+
+@app.delete("/users/me/avatar")
+def delete_my_avatar(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    upload_id = user.avatar_upload_id
+    user.avatar_upload_id = None
+    if upload_id:
+        _delete_stored_upload(db, user, upload_id)
+        add_audit(db, user, "USER_AVATAR_REMOVED", "Removed own profile photo.")
+    db.commit()
+    return {"message": "Profile photo removed.", "has_avatar": False}
+
+
+@app.post("/users/me/email-change")
+def start_my_email_change(payload: UserEmailChangeRequest, request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    """Begin a VERIFIED email change. The currently trusted address is kept
+    until Supabase confirms the new one, so account recovery is never weakened
+    by an unverified address."""
+    new_email = str(payload.new_email).strip().lower()
+    if not new_email or new_email == (user.email or "").strip().lower():
+        raise HTTPException(status_code=400, detail="Enter a different email address.")
+    if db.query(User).filter(func.lower(User.email) == new_email, User.id != user.id).first():
+        raise HTTPException(status_code=409, detail="That email address is already in use.")
+    check_rate_limit(db, "user-email-change", new_email)
+    auth = _supabase_auth_or_503()
+    try:
+        auth.sign_in_with_otp({
+            "email": new_email,
+            "options": {"email_redirect_to": _supabase_email_verify_redirect(request, "", ""), "should_create_user": True},
+        })
+    except Exception as exc:
+        detail = str(getattr(exc, "message", "") or exc).lower()
+        record_failure(db, "user-email-change", new_email)
+        db.commit()
+        if any(m in detail for m in ("rate", "limit", "too many", "seconds", "429")):
+            raise HTTPException(status_code=429, detail="Please wait a little before requesting another verification email.") from exc
+        raise HTTPException(status_code=502, detail="We couldn't send the verification email right now. Please try again.") from exc
+    user.pending_email = new_email
+    add_audit(db, user, "USER_EMAIL_CHANGE_REQUESTED", "Requested an email address change (pending verification).")
+    db.commit()
+    return {"message": "Verification email sent. Your current email stays active until you confirm the new one.",
+            "pending_email": new_email}
+
+
+@app.post("/users/me/email-change/confirm")
+def confirm_my_email_change(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    """Swap in the pending address ONLY after Supabase itself reports it
+    confirmed. The browser can never assert verification - this endpoint takes
+    no body at all and re-checks with Supabase every time."""
+    pending = (user.pending_email or "").strip().lower()
+    if not pending:
+        raise HTTPException(status_code=400, detail="There is no pending email change.")
+    confirmed = _supabase_email_confirmed(pending)
+    if confirmed is not True:
+        raise HTTPException(status_code=409, detail="That email address has not been verified yet. Open the link we emailed you, then try again.")
+    if db.query(User).filter(func.lower(User.email) == pending, User.id != user.id).first():
+        raise HTTPException(status_code=409, detail="That email address is already in use.")
+    user.email = pending
+    user.pending_email = None
+    user.email_verified_at = datetime.utcnow()
+    add_audit(db, user, "USER_EMAIL_CHANGED", "Email address changed and verified.")
+    db.commit()
+    db.refresh(user)
+    return _user_profile_payload(db, user)
+
+
+@app.delete("/users/me/email-change")
+def cancel_my_email_change(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    user.pending_email = None
+    db.commit()
+    return {"message": "Email change cancelled."}
+
 
 @app.get("/users")
 def list_users(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), user: User = Depends(get_current_user), db: Session = Depends(get_db)):

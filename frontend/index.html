@@ -242,18 +242,21 @@
                 <div class="px-2 pb-1 text-[10px] font-bold text-textSec uppercase tracking-wider" data-i18n="navigation.groupSystem">System</div>
                 <div class="space-y-1 pb-4">
                     <div class="settings-nav-group">
-                        <button type="button" id="nav-btn-settings" onclick="toggleSettingsSubmenu(this)" aria-expanded="false" class="w-full text-left flex items-center justify-between gap-2.5 px-2.5 py-2 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer">
+                        <button type="button" id="nav-btn-settings" data-nav="settings" onclick="toggleSettingsSubmenu(this)" aria-expanded="false" class="w-full text-left flex items-center justify-between gap-2.5 px-2.5 py-2 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer">
                             <span class="flex items-center gap-2.5"><i class="fa-solid fa-gear w-4"></i> Settings</span>
                             <i class="fa-solid fa-chevron-down text-[10px] settings-caret transition-transform duration-200"></i>
                         </button>
                         <div class="settings-submenu hidden mt-1 ml-3.5 pl-3 space-y-1 border-l border-borderCol">
-                            <button type="button" id="nav-btn-business-profile" data-settings-view="profile" onclick="openSettingsModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
+                            <button type="button" id="nav-btn-my-profile" data-nav="my-profile" data-settings-view="my-profile" onclick="openMyProfileModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
+                                <i class="fa-solid fa-circle-user w-4"></i> <span data-i18n="navigation.myProfile">My Profile</span>
+                            </button>
+                            <button type="button" id="nav-btn-business-profile" data-nav="business-profile" data-settings-view="profile" onclick="openSettingsModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
                                 <i class="fa-solid fa-building w-4"></i> <span data-i18n="navigation.businessProfile">Business Profile</span>
                             </button>
-                            <button type="button" id="nav-btn-billing" data-settings-view="billing" onclick="openBillingModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
+                            <button type="button" id="nav-btn-billing" data-nav="billing" data-settings-view="billing" onclick="openBillingModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
                                 <i class="fa-solid fa-credit-card w-4"></i> <span>Subscription &amp; Billing</span>
                             </button>
-                            <button type="button" id="nav-btn-activity-history" data-settings-view="activity" onclick="openActivityHistoryModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
+                            <button type="button" id="nav-btn-activity-history" data-nav="activity-history" data-settings-view="activity" onclick="openActivityHistoryModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
                                 <i class="fa-solid fa-clock-rotate-left w-4"></i> <span>Activity History</span>
                             </button>
                         </div>
@@ -626,7 +629,7 @@
         <div class="bg-cardBg border border-primary/40 rounded-2xl p-6 max-w-sm w-full shadow-2xl flex flex-col space-y-4 text-xs">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-2">
-                    <i class="fa-solid fa-lock text-warning"></i> Password Change Required
+                    <i class="fa-solid fa-lock text-warning"></i> <span id="password-change-title">Password Change Required</span>
                 </h3>
             </div>
             
@@ -645,7 +648,11 @@
                     <label class="block font-medium text-textSec mb-1">Confirm New Password <span class="text-danger">*</span></label>
                     <div class="relative"><input type="password" id="pw-change-confirm" required placeholder="••••••••" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 pr-9 text-xs text-textMain focus:outline-none focus:border-primary"><button type="button" onclick="togglePasswordVisibility('pw-change-confirm', this)" class="absolute right-2.5 top-2.5 text-textSec hover:text-textMain cursor-pointer" aria-label="Show password"><i class="fa-solid fa-eye text-xs"></i></button></div>
                 </div>
-                <div class="pt-3 border-t border-borderCol flex justify-end">
+                <div class="pt-3 border-t border-borderCol flex justify-end gap-2">
+                    <!-- Shown ONLY for a voluntary change started from My Profile.
+                         The mandatory (temporary-password) flow leaves it hidden so
+                         that path stays non-dismissable exactly as before. -->
+                    <button type="button" id="pw-change-cancel-btn" onclick="closeVoluntaryPasswordChange()" class="hidden bg-bgMain hover:bg-cardHover text-textSec px-4 py-2.5 rounded-xl font-semibold transition border border-borderCol cursor-pointer" data-i18n="common.cancel">Cancel</button>
                     <button type="submit" class="w-full bg-primary hover:bg-primaryHover text-white py-2.5 rounded-xl font-semibold transition shadow-md shadow-primary/20 cursor-pointer">Save New Password</button>
                 </div>
             </form>
@@ -1132,6 +1139,19 @@
 
             <div data-dynamic-status></div>
 
+            <!-- MANAGER READ-ONLY VIEW. Rendered INSTEAD of the editable form
+                 whenever the signed-in user is not an Admin: a genuine read-only
+                 presentation with no inputs and no Save/Edit affordance at all.
+                 The backend independently rejects any non-Admin write to
+                 /business-profile/ (see update_business_profile), so this is UX,
+                 not the security boundary. -->
+            <div id="business-profile-readonly-section" class="hidden flex-1 overflow-y-auto pr-1 text-xs space-y-3">
+                <div class="flex items-start gap-2 px-3 py-2.5 rounded-xl border border-borderCol bg-bgMain text-[11px] text-textSec">
+                    <i class="fa-solid fa-lock mt-0.5 text-primary shrink-0"></i>
+                    <span data-i18n="settings.managedByAdmin">Business information is managed by an Admin.</span>
+                </div>
+                <dl id="business-profile-readonly-grid" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5"></dl>
+            </div>
             <form id="business-settings-form" onsubmit="saveCompanySettings(event)" class="space-y-3 text-xs flex-1 overflow-y-auto pr-1">
                 <div id="business-profile-edit-section">
                     <label class="block font-medium text-textSec mb-1">Business Name</label>
@@ -1220,6 +1240,128 @@
                     <button type="submit" id="settings-save-btn" class="bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-semibold transition shadow-md cursor-pointer">Save Profile</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- MY PROFILE (personal account) - deliberately separate from the Business
+         Profile modal. User Profile = the individual person; Business Profile =
+         the company. Available to Admin, Manager AND Staff alike: a Staff
+         member having no Business Profile access never affects this. -->
+    <div id="my-profile-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-[120] hidden flex items-center justify-center p-3 sm:p-4">
+        <div class="bg-cardBg border border-borderCol rounded-2xl w-full max-w-2xl shadow-2xl flex flex-col max-h-[92vh]">
+            <div class="flex items-start justify-between gap-3 p-4 sm:p-5 pb-3 border-b border-borderCol shrink-0">
+                <div class="min-w-0">
+                    <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5">
+                        <i class="fa-solid fa-circle-user text-primary"></i> <span data-i18n="profile.title">My Profile</span>
+                    </h3>
+                    <p class="text-[11px] text-textSec mt-0.5" data-i18n="profile.subtitle">Manage your personal Cauldra account</p>
+                </div>
+                <button type="button" onclick="closeMyProfileModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer shrink-0" aria-label="Close"><i class="fa-solid fa-xmark text-base"></i></button>
+            </div>
+
+            <div data-dynamic-status class="px-4 sm:px-5 pt-3"></div>
+
+            <div class="flex-1 overflow-y-auto custom-scrollbar px-4 sm:px-5 py-4 space-y-4 text-xs">
+                <div class="flex items-center gap-3.5">
+                    <div class="relative shrink-0">
+                        <div id="profile-avatar-wrap" class="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-primary/15 border border-primary/25 text-primary flex items-center justify-center overflow-hidden">
+                            <span id="profile-avatar-initials" class="text-lg sm:text-xl font-extrabold tracking-wide"></span>
+                            <img id="profile-avatar-img" alt="" class="hidden w-full h-full object-cover">
+                        </div>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                        <div id="profile-display-name" class="text-sm font-bold text-textMain truncate"></div>
+                        <div id="profile-role-line" class="text-[11px] text-primary font-semibold mt-0.5"></div>
+                        <div id="profile-position-line" class="text-[11px] text-textSec truncate"></div>
+                        <div class="flex flex-wrap items-center gap-1.5 mt-2">
+                            <button type="button" id="profile-avatar-upload-btn" onclick="document.getElementById('profile-avatar-file').click()" class="bg-primary/15 hover:bg-primary/25 text-primary border border-primary/30 px-2.5 py-1 rounded-lg text-[10px] font-semibold transition cursor-pointer">
+                                <i class="fa-solid fa-camera mr-1"></i><span data-i18n="profile.changePhoto">Change Photo</span>
+                            </button>
+                            <button type="button" id="profile-avatar-remove-btn" onclick="removeMyAvatar()" class="hidden bg-bgMain hover:bg-cardHover text-textSec border border-borderCol px-2.5 py-1 rounded-lg text-[10px] font-semibold transition cursor-pointer">
+                                <span data-i18n="profile.removePhoto">Remove Photo</span>
+                            </button>
+                            <input type="file" id="profile-avatar-file" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden" onchange="handleMyAvatarSelected(event)">
+                        </div>
+                    </div>
+                </div>
+
+                <section class="rounded-xl border border-borderCol bg-bgMain p-3.5 space-y-3">
+                    <h4 class="text-[11px] font-bold text-textMain uppercase tracking-wider" data-i18n="profile.personalInfo">Personal Information</h4>
+                    <form id="my-profile-form" onsubmit="saveMyProfile(event)" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div>
+                            <label class="block font-medium text-textSec mb-1" for="profile-firstname" data-i18n="profile.firstName">First Name</label>
+                            <input type="text" id="profile-firstname" maxlength="80" class="w-full bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                        </div>
+                        <div>
+                            <label class="block font-medium text-textSec mb-1" for="profile-lastname" data-i18n="profile.lastName">Last Name</label>
+                            <input type="text" id="profile-lastname" maxlength="80" class="w-full bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                        </div>
+                        <div>
+                            <label class="block font-medium text-textSec mb-1" for="profile-username" data-i18n="profile.username">Username</label>
+                            <input type="text" id="profile-username" readonly class="w-full bg-cardBg/60 border border-borderCol rounded-xl px-3 py-2 text-textSec cursor-not-allowed">
+                        </div>
+                        <div>
+                            <label class="block font-medium text-textSec mb-1" for="profile-phone" data-i18n="profile.phone">Phone</label>
+                            <input type="tel" id="profile-phone" maxlength="40" class="w-full bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label class="block font-medium text-textSec mb-1" for="profile-email" data-i18n="profile.email">Email</label>
+                            <div class="flex flex-col sm:flex-row gap-2">
+                                <div class="relative flex-1 min-w-0">
+                                    <input type="email" id="profile-email" readonly class="w-full bg-cardBg/60 border border-borderCol rounded-xl px-3 py-2 pr-24 text-textSec cursor-not-allowed">
+                                    <span id="profile-email-status" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] font-semibold"></span>
+                                </div>
+                                <button type="button" onclick="startMyEmailChange()" class="shrink-0 bg-bgMain hover:bg-cardHover text-textSec border border-borderCol px-3 py-2 rounded-xl text-[11px] font-semibold transition cursor-pointer" data-i18n="profile.changeEmail">Change Email</button>
+                            </div>
+                            <div id="profile-pending-email" class="hidden mt-2 flex flex-wrap items-center gap-2 px-3 py-2 rounded-xl border border-warning/30 bg-warning/10 text-[11px] text-amber-200">
+                                <i class="fa-solid fa-hourglass-half"></i>
+                                <span id="profile-pending-email-text" class="flex-1 min-w-0"></span>
+                                <button type="button" onclick="confirmMyEmailChange()" class="underline font-semibold" data-i18n="profile.iVerified">I have verified it</button>
+                                <button type="button" onclick="cancelMyEmailChange()" class="text-textSec hover:text-textMain" data-i18n="common.cancel">Cancel</button>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-2 flex justify-end pt-0.5">
+                            <button type="submit" id="profile-save-btn" class="bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-semibold transition shadow-md shadow-primary/20 cursor-pointer" data-i18n="common.saveChanges">Save Changes</button>
+                        </div>
+                    </form>
+                </section>
+
+                <section class="rounded-xl border border-borderCol bg-bgMain p-3.5 space-y-3">
+                    <h4 class="text-[11px] font-bold text-textMain uppercase tracking-wider" data-i18n="profile.businessMembership">Business Membership</h4>
+                    <dl id="profile-membership-grid" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5"></dl>
+                    <button type="button" id="profile-view-business-btn" onclick="closeMyProfileModal(); openSettingsModal();" class="hidden text-[11px] text-primary font-semibold hover:underline cursor-pointer">
+                        <span data-i18n="profile.viewBusinessProfile">View Business Profile</span> <i class="fa-solid fa-arrow-right text-[9px]"></i>
+                    </button>
+                </section>
+
+                <section class="rounded-xl border border-borderCol bg-bgMain p-3.5 space-y-3">
+                    <h4 class="text-[11px] font-bold text-textMain uppercase tracking-wider" data-i18n="profile.preferences">Preferences</h4>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div>
+                            <label class="block font-medium text-textSec mb-1" for="profile-language" data-i18n="profile.preferredLanguage">Preferred Language</label>
+                            <select id="profile-language" onchange="saveMyPreferredLanguage(this.value)" class="w-full bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary cursor-pointer"></select>
+                            <p class="text-[10px] text-textSec mt-1 leading-relaxed" data-i18n="profile.languageHint">Saved to your personal account, not the business.</p>
+                        </div>
+                        <div>
+                            <label class="block font-medium text-textSec mb-1" data-i18n="profile.notifications">Notifications</label>
+                            <button type="button" onclick="closeMyProfileModal(); openNotificationPreferencesModal();" class="w-full text-left bg-cardBg hover:bg-cardHover border border-borderCol rounded-xl px-3 py-2 text-textMain transition cursor-pointer flex items-center justify-between">
+                                <span data-i18n="profile.manage">Manage</span> <i class="fa-solid fa-arrow-right text-[9px] text-textSec"></i>
+                            </button>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="rounded-xl border border-borderCol bg-bgMain p-3.5 space-y-2">
+                    <h4 class="text-[11px] font-bold text-textMain uppercase tracking-wider" data-i18n="profile.accountSecurity">Account &amp; Security</h4>
+                    <button type="button" onclick="openChangePasswordFromProfile()" class="w-full text-left bg-cardBg hover:bg-cardHover border border-borderCol rounded-xl px-3 py-2.5 text-textMain transition cursor-pointer flex items-center justify-between">
+                        <span class="flex items-center gap-2"><i class="fa-solid fa-key text-primary text-[11px]"></i> <span data-i18n="profile.changePassword">Change Password</span></span>
+                        <i class="fa-solid fa-arrow-right text-[9px] text-textSec"></i>
+                    </button>
+                    <button type="button" onclick="closeMyProfileModal(); confirmSignOut();" class="w-full text-left bg-danger/10 hover:bg-danger/20 border border-danger/30 rounded-xl px-3 py-2.5 text-danger transition cursor-pointer flex items-center justify-between">
+                        <span class="flex items-center gap-2"><i class="fa-solid fa-right-from-bracket text-[11px]"></i> <span data-i18n="common.signOut">Sign Out</span></span>
+                    </button>
+                </section>
+            </div>
         </div>
     </div>
 
