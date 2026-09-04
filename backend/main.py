@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from typing import Optional, List, Dict, Any, Tuple, Literal
 
 from fastapi import FastAPI, Depends, HTTPException, status, Query, Request, Response, Cookie
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -72,6 +72,11 @@ INDEX_PATH = FRONTEND_DIR / "index.html"
 ASSETS_DIR = FRONTEND_DIR / "assets"
 CSS_DIR = FRONTEND_DIR / "css"
 JS_DIR = FRONTEND_DIR / "js"
+# Platform Owner Control Panel (V31): a COMPLETELY SEPARATE static bundle,
+# never mounted under /frontend, /assets, /css or /js, and never linked from
+# the customer app. See the "CAULDRA PLATFORM OWNER CONTROL PANEL" section
+# near the end of this file for the auth model and API routes.
+PLATFORM_DIR = PROJECT_DIR / "platform"
 ENVIRONMENT = os.getenv("SUPPLY_AI_ENV", "development").strip().lower()
 IS_PRODUCTION = ENVIRONMENT == "production"
 
@@ -518,6 +523,18 @@ class User(Base):
     # keeps the currently trusted address until Supabase confirms the new one,
     # so account recovery is never weakened by an unverified address.
     pending_email = Column(String, nullable=True)
+    # --- V31 platform-owner analytics (see PLATFORM CONTROL PANEL section) --
+    # created_at is nullable: existing accounts predate this column and their
+    # real join date is genuinely unknown, so it is left NULL (never
+    # backfilled with "now" - that would be fabricated data) rather than
+    # defaulted. New accounts always get a real value (see register_business
+    # and create_user). last_active_at is the ONE cheap, already-throttled
+    # activity signal in the app - the SAME /presence/heartbeat call the
+    # frontend already fires once every 60s (see startPresenceHeartbeat in
+    # app.js) writes this column too, so platform-wide "who is active" never
+    # needs a second write path or a join against presence_sessions.
+    created_at = Column(SQLDateTime, nullable=True, index=True)
+    last_active_at = Column(SQLDateTime, nullable=True, index=True)
 
     business_rel = relationship("BusinessProfile", back_populates="users")
     # No ownership cascade: business data survives user deletion.
@@ -3759,18 +3776,30 @@ async def notification_sweep_loop():
 async def _start_notification_sweep():
     asyncio.create_task(notification_sweep_loop())
 
-def gemini_text_response(system_prompt: str, user_prompt: str) -> str:
+def gemini_text_response(system_prompt: str, user_prompt: str, usage_out: Optional[dict] = None) -> str:
+    """usage_out (V31): an optional dict the caller passes in and this
+    populates with real token counts from Gemini's own response - never
+    estimated/guessed - so run_billable_ai() can compute an actual provider
+    cost afterward (see the Platform Owner AI & Costs section). Callers that
+    don't need cost tracking simply omit it; behavior is unchanged."""
     if not gemini_client:
         raise HTTPException(status_code=503, detail="Gemini AI is not configured. Add GEMINI_API_KEY to the server environment.")
     try:
         response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=f"{system_prompt}\n\n{user_prompt}")
         text = getattr(response, "text", None) or ""
         if not text.strip(): raise ValueError("Empty Gemini response")
+        if usage_out is not None:
+            meta = getattr(response, "usage_metadata", None)
+            if meta is not None:
+                usage_out["input_tokens"] = getattr(meta, "prompt_token_count", None)
+                usage_out["output_tokens"] = getattr(meta, "candidates_token_count", None)
         return text.strip()
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Gemini could not complete that AI operation right now. Please try again.") from exc
 
-def openai_json_response(prompt: str, image_data: Optional[str] = None) -> dict:
+def openai_json_response(prompt: str, image_data: Optional[str] = None, usage_out: Optional[dict] = None) -> dict:
+    """usage_out (V31): see gemini_text_response's docstring - same contract,
+    populated from OpenAI's own resp.usage."""
     if not openai_client:
         raise HTTPException(status_code=503, detail="OpenAI integration is not configured. Add OPENAI_API_KEY to the server environment.")
     content = [{"type": "input_text", "text": prompt}]
@@ -3795,6 +3824,11 @@ def openai_json_response(prompt: str, image_data: Optional[str] = None) -> dict:
         input=[{"role": "user", "content": content}],
         text={"format": {"type": "json_schema", "name": "invoice_extraction", "schema": schema, "strict": True}},
     )
+    if usage_out is not None:
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            usage_out["input_tokens"] = getattr(usage, "input_tokens", None)
+            usage_out["output_tokens"] = getattr(usage, "output_tokens", None)
     text = getattr(resp, "output_text", "")
     try:
         return json.loads(text)
@@ -4216,7 +4250,7 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
             username=data.username.strip(), password=hashed_password, role="admin",
             firstname=data.firstname, lastname=data.lastname, position=data.position or "Admin",
             email=str(data.owner_email), phone=canonical_owner_phone, business_id=new_biz.id,
-            must_change_password=False, disabled=False, auth_version=1
+            must_change_password=False, disabled=False, auth_version=1, created_at=now,
         )
         db.add(admin)
         db.flush()
@@ -4349,6 +4383,10 @@ def authenticate_user_for_business(db: Session, business_code: str, username: st
         raise HTTPException(status_code=401, detail="Incorrect username or password.")
     clear_failures(db, scope, key)
     if client_ip: clear_failures(db, scope + "-ip", client_ip)
+    # V31: cheap activity signal - piggybacks on this already-happening login,
+    # no extra write path. The heartbeat (every 60s while the app is open) is
+    # the primary signal; this just covers the moment before the first one.
+    user.last_active_at = datetime.utcnow()
     if role and user.role != role:
         print(f"[auth-diag {diag_id}] RESULT status=403 reason=role_mismatch expected={role} actual={user.role}")
         raise HTTPException(status_code=403, detail="This account does not have the selected role.")
@@ -5083,6 +5121,7 @@ def create_user(data: CreateUserRequest, user: User = Depends(get_current_user),
         username=data.username.strip(), password=hash_password(data.password), role=role,
         firstname=data.firstname, lastname=data.lastname, email=str(data.email), phone=data.phone, position=data.position,
         business_id=user.business_id, must_change_password=True, disabled=False, auth_version=1,
+        created_at=datetime.utcnow(),
     )
     db.add(new_user); db.flush()
     add_audit(db, user, "USER_CREATED", f"Created {role} account.", new_user)
@@ -8537,7 +8576,10 @@ def presence_heartbeat(payload: PresenceHeartbeatRequest, user: User = Depends(g
     session_id = payload.session_id or secrets.token_urlsafe(18)
     row = db.query(PresenceSession).filter(PresenceSession.session_id == session_id, PresenceSession.user_id == user.id).first()
     if not row: row = PresenceSession(session_id=session_id, business_id=user.business_id, user_id=user.id); db.add(row)
-    row.last_seen_at = datetime.utcnow(); row.signed_out_at = None; db.commit(); return {"session_id": session_id}
+    now = datetime.utcnow()
+    row.last_seen_at = now; row.signed_out_at = None
+    user.last_active_at = now   # V31: the one write platform-wide "active users" reads
+    db.commit(); return {"session_id": session_id}
 
 @app.post("/presence/logout")
 def presence_logout(payload: PresenceHeartbeatRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -10696,27 +10738,40 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
     return {"status": "received"}
 
 def run_billable_ai(db: Session, user: User, operation: str, provider: str, model: str, callback):
-    """Record all external-AI outcomes; only successful work consumes credits."""
+    """Record all external-AI outcomes; only successful work consumes credits.
+
+    V31: `callback` now takes one argument - a mutable `usage` dict it may
+    populate with real input_tokens/output_tokens (see gemini_text_response /
+    openai_json_response). Those, plus the central, operator-configured
+    AIProviderPricing rate for this exact provider/model, are what
+    estimate_ai_cost_usd() turns into a REAL estimated_provider_cost - never a
+    number derived from Cauldra credits, and never a fabricated one when
+    pricing has not been configured (see that function's docstring)."""
+    usage: dict = {}
     try:
-        result = callback()
+        result = callback(usage)
     except Exception:
         record_ai_usage(db, user, operation, False, provider, model)
         db.commit()
         raise
-    credits = record_ai_usage(db, user, operation, True, provider, model)
+    cost_usd = estimate_ai_cost_usd(db, provider, model, usage.get("input_tokens"), usage.get("output_tokens"))
+    credits = record_ai_usage(db, user, operation, True, provider, model,
+                               input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
+                               estimated_provider_cost=cost_usd)
     db.commit()
     try:
         business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
         if business:
             check_ai_credit_notifications(db, business)
+        check_ai_budget_alerts(db, provider)
         db.commit()
     except Exception:
-        db.rollback()  # never let a notification failure affect an already-successful AI call
+        db.rollback()  # never let a notification/alert failure affect an already-successful AI call
     return result, credits
 
 @app.post("/ai/suggest-margin")
 def suggest_margin(req: MarginRequest, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
-    text, credits = run_billable_ai(db, user, "margin_advisor", "gemini", GEMINI_MODEL, lambda: gemini_text_response("You are Cauldra's category-aware pricing advisor. Give useful, practical business pricing guidance without inventing facts.", f"Product: {req.name}\nCategory: {req.category}\nCost price: {req.cost_price}\nGive recommended wholesale and retail prices and explain the reasoning briefly."))
+    text, credits = run_billable_ai(db, user, "margin_advisor", "gemini", GEMINI_MODEL, lambda u: gemini_text_response("You are Cauldra's category-aware pricing advisor. Give useful, practical business pricing guidance without inventing facts.", f"Product: {req.name}\nCategory: {req.category}\nCost price: {req.cost_price}\nGive recommended wholesale and retail prices and explain the reasoning briefly.", usage_out=u))
     nums=[float(x) for x in re.findall(r"(?<![A-Za-z])(?:\d+(?:\.\d+)?)", text)]
     return {"suggested_wholesale": round(nums[0],2) if nums else round(req.cost_price*1.15,2), "suggested_retail": round(nums[1],2) if len(nums)>1 else round(req.cost_price*1.30,2), "advice": text, "credits_consumed": credits}
 
@@ -10726,8 +10781,8 @@ def scan_invoice(req: InvoiceScanRequest, user: User = Depends(require_ai_access
     upload = persist_upload(db, user, "invoice", req.file_name or "invoice-scan", content_type, raw_bytes)
     add_audit(db, user, "INVOICE_UPLOADED", f"Uploaded invoice image {upload.original_name} for review.")
     db.commit()
-    data, credits = run_billable_ai(db, user, "invoice_ocr", "openai", OPENAI_MODEL, lambda: openai_json_response(
-        "Extract this invoice or receipt into the exact schema. Do not invent values. If uncertain, use empty strings or zero. This endpoint is for review; do not make database mutations yourself.", req.image_data))
+    data, credits = run_billable_ai(db, user, "invoice_ocr", "openai", OPENAI_MODEL, lambda u: openai_json_response(
+        "Extract this invoice or receipt into the exact schema. Do not invent values. If uncertain, use empty strings or zero. This endpoint is for review; do not make database mutations yourself.", req.image_data, usage_out=u))
     return {"upload_id": upload.id, "supplier_name": data.get("supplier_name") or "", "invoice_number": data.get("invoice_number") or "", "invoice_date": data.get("invoice_date") or "", "items_count": len(data.get("items") or []), "items": data.get("items") or [], "subtotal": data.get("subtotal") or 0, "total": data.get("total") or 0, "requires_confirmation": True, "credits_consumed": credits}
 
 @app.get("/uploads")
@@ -10754,15 +10809,954 @@ def download_upload(upload_id: int, user: User = Depends(get_current_user), db: 
 def ai_insights(user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     products=db.query(Product).filter(Product.business_id==user.business_id).all()
     snapshot=[{"name":p.name,"category":p.category,"qty":p.quantity,"min":p.min_stock_level,"retail":p.retail_price,"cost":p.cost_price} for p in products]
-    insight, credits = run_billable_ai(db, user, "inventory_insight", "gemini", GEMINI_MODEL, lambda: gemini_text_response("You are Cauldra's inventory intelligence engine. Analyze only the provided inventory snapshot and give concise, actionable insights.", json.dumps(snapshot)))
+    insight, credits = run_billable_ai(db, user, "inventory_insight", "gemini", GEMINI_MODEL, lambda u: gemini_text_response("You are Cauldra's inventory intelligence engine. Analyze only the provided inventory snapshot and give concise, actionable insights.", json.dumps(snapshot), usage_out=u))
     return {"insight": insight, "credits_consumed": credits}
 
 @app.post("/ai/chat")
 def ai_chat(req: ChatRequest, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     products=db.query(Product).filter(Product.business_id==user.business_id).all()
     snapshot=[{"name":p.name,"sku":p.sku,"category":p.category,"qty":p.quantity,"min":p.min_stock_level,"retail":p.retail_price,"cost":p.cost_price} for p in products]
-    reply, credits = run_billable_ai(db, user, "chat", "gemini", GEMINI_MODEL, lambda: gemini_text_response("You are Cauldra's business and inventory assistant. Use only the supplied business data. Be practical and concise; state when data is insufficient.", f"User question: {req.message}\nInventory snapshot: {json.dumps(snapshot)}"))
+    reply, credits = run_billable_ai(db, user, "chat", "gemini", GEMINI_MODEL, lambda u: gemini_text_response("You are Cauldra's business and inventory assistant. Use only the supplied business data. Be practical and concise; state when data is insufficient.", f"User question: {req.message}\nInventory snapshot: {json.dumps(snapshot)}", usage_out=u))
     return {"reply":reply, "credits_consumed": credits}
+
+# =============================================================================
+# CAULDRA PLATFORM OWNER CONTROL PANEL (V31)
+# =============================================================================
+# Internal, Cauldra-level analytics/ops surface for the PEOPLE WHO RUN
+# CAULDRA - completely separate from "Customer Admin" (a business's own
+# owner). The two permission systems never overlap:
+#
+#   Customer Admin  -> a row in `users`, role="admin", scoped to ONE
+#                       business_id, authenticated via /auth/* + issue_token()
+#                       (payload carries business_id + role, no `scope` claim).
+#   Platform Owner  -> a row in the NEW `platform_owners` table below, no
+#                       business_id at all, authenticated via
+#                       /api/platform/auth/* + issue_platform_token() (payload
+#                       carries `"scope": "platform_owner"`, no business_id).
+#
+# get_platform_owner() (the dependency every /api/platform/* route uses)
+# decodes with PLATFORM_SECRET_KEY, a key cryptographically DISTINCT from the
+# customer SECRET_KEY (derived from it by default so no extra required env
+# var, but overridable), and additionally requires the `scope` claim. A
+# customer access token can never satisfy it (wrong signature, and even in
+# the pathological case of an operator setting the two keys identical, it
+# still has no `scope` claim). Symmetrically, get_current_user()/
+# get_authenticated_user() require an int business_id in the payload, which a
+# platform token never carries, so a platform token can never authenticate a
+# customer endpoint either. This is enforced on every request, not just at
+# login - manipulating a frontend route changes nothing.
+#
+# No public registration exists for platform_owners. Accounts are created only
+# by scripts/create_platform_owner.py, run directly on the server (see that
+# file). MFA (TOTP) is mandatory: an account with no TOTP secret configured
+# cannot complete login at all (see platform_login()).
+#
+# The Control Panel UI is a separate static bundle under platform/ (its own
+# index.html + js/app.js - NOT frontend/js/app.js), served only from
+# PLATFORM_PANEL_PATH (an unlisted, non-guessable path, configurable via the
+# PLATFORM_PANEL_PATH env var) and never linked from the customer UI. Per the
+# spec, that path is UX obscurity only, never the security boundary - every
+# /api/platform/* endpoint independently re-verifies platform authorization
+# regardless of how the request found its way there.
+# =============================================================================
+
+# --- TOTP (RFC 6238), Google-Authenticator-compatible - stdlib only, no new
+# dependency. SHA1 / 6 digits / 30s step is what every authenticator app
+# (Google Authenticator, Authy, 1Password, Microsoft Authenticator) expects. --
+def _totp_new_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+def _totp_uri(secret: str, email: str, issuer: str = "Cauldra Platform") -> str:
+    label = urllib.parse.quote(f"{issuer}:{email}")
+    query = urllib.parse.urlencode({"secret": secret, "issuer": issuer, "algorithm": "SHA1", "digits": "6", "period": "30"})
+    return f"otpauth://totp/{label}?{query}"
+
+def _totp_code_for_counter(secret_b32: str, counter: int) -> str:
+    padded = secret_b32.strip().upper() + "=" * (-len(secret_b32.strip()) % 8)
+    key = base64.b32decode(padded)
+    digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code_int = (int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF) % 1_000_000
+    return f"{code_int:06d}"
+
+def _totp_verify(secret_b32: Optional[str], code: Optional[str], valid_window: int = 1) -> bool:
+    """valid_window=1 tolerates +/-30s of clock drift between server and the
+    authenticator app - standard practice, still a 90s total acceptance
+    window at 30s steps."""
+    if not secret_b32 or not code or not re.fullmatch(r"\d{6}", code.strip()):
+        return False
+    try:
+        counter = int(time.time() // 30)
+        return any(
+            hmac.compare_digest(_totp_code_for_counter(secret_b32, counter + offset), code.strip())
+            for offset in range(-valid_window, valid_window + 1)
+        )
+    except Exception:
+        return False
+
+# --- Models (all additive; none carry a business_id - see PlatformAuditLog's
+# docstring for why platform actions do NOT reuse the customer AuditLog
+# table). No table here has a ForeignKey to `users`/`business_profile` or vice
+# versa, by design: a platform_owners row must never be reachable by
+# traversing FROM customer data, and customer data must never be reachable by
+# traversing FROM a platform table. ---
+class PlatformOwner(Base):
+    __tablename__ = "platform_owners"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    password = Column(String, nullable=False)
+    totp_secret = Column(String, nullable=True)
+    totp_enabled = Column(Boolean, nullable=False, default=False)
+    disabled = Column(Boolean, nullable=False, default=False)
+    # Bumped on password change / explicit "sign out everywhere" - mirrors
+    # User.auth_version's role for customer accounts.
+    platform_auth_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
+    last_login_at = Column(SQLDateTime, nullable=True)
+    # Set ONLY by scripts/create_platform_owner.py after Supabase itself
+    # confirms the address (same trusted pattern as User.email_verified_at /
+    # _supabase_email_confirmed - see that column's docstring). NOT a login
+    # gate (a Platform Owner created on a box with Supabase unconfigured would
+    # otherwise be permanently locked out); password + mandatory TOTP already
+    # fully secure sign-in. This is an audit/attestation record: "was this
+    # email address actually verified as owned by this operator at creation
+    # time", answerable from the Control Panel without trusting a claim.
+    email_verified_at = Column(SQLDateTime, nullable=True)
+
+class PlatformOwnerSessionRevocation(Base):
+    """Mirrors SessionRevocation's shape/role for platform tokens - one row
+    per signed-out jti, checked on every request until it naturally expires."""
+    __tablename__ = "platform_owner_session_revocations"
+    id = Column(Integer, primary_key=True, index=True)
+    jti = Column(String, unique=True, index=True, nullable=False)
+    platform_owner_id = Column(Integer, nullable=False, index=True)
+    expires_at = Column(SQLDateTime, nullable=False)
+
+class PlatformAuditLog(Base):
+    """A SEPARATE trail from the customer AuditLog table on purpose:
+    add_audit() requires a business_id (returns early without one) and every
+    existing reader of AuditLog is business-scoped - forcing platform actions
+    through it would mean inventing a fake business_id (polluting real
+    per-business audit views) or weakening that table's tenant scoping. This
+    table has no business_id at all; only a Platform Owner ever reads it."""
+    __tablename__ = "platform_audit_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    platform_owner_id = Column(Integer, nullable=True, index=True)
+    platform_owner_email = Column(String, nullable=True)
+    action = Column(String, nullable=False)
+    description = Column(Text, nullable=False)
+    created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False, index=True)
+
+class PlatformAlert(Base):
+    """Platform-level alerts (AI budget thresholds, infra issues) - distinct
+    from the customer `notifications` table, whose business_id/recipient_user_id
+    are both NOT NULL and scoped to one business's own users; a platform-wide
+    event has no single business or recipient to attach to. dedup_key (unique)
+    is what stops the same condition re-alerting - see check_ai_budget_alerts()."""
+    __tablename__ = "platform_alerts"
+    id = Column(Integer, primary_key=True, index=True)
+    alert_type = Column(String, nullable=False, index=True)
+    provider = Column(String, nullable=True)
+    severity = Column(String, nullable=False, default="info")  # info | important | critical
+    title = Column(String, nullable=False)
+    message = Column(Text, nullable=False)
+    dedup_key = Column(String, nullable=True, unique=True, index=True)
+    created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False, index=True)
+    acknowledged_at = Column(SQLDateTime, nullable=True)
+    acknowledged_by_id = Column(Integer, nullable=True)
+
+class AIProviderPricing(Base):
+    """THE single, central place a $/1,000-token rate lives for one exact
+    provider+model pair - see estimate_ai_cost_usd(). Never hardcoded inline
+    at a call site. Editable by the Platform Owner (PUT /api/platform/ai-pricing)
+    because provider pricing changes over time and Cauldra cannot know a real
+    number for a model it has never been told the rate for (see that
+    function's docstring on why an unconfigured rate returns None, not a
+    guess)."""
+    __tablename__ = "ai_provider_pricing"
+    __table_args__ = (UniqueConstraint("provider", "model", name="uq_ai_pricing_provider_model"),)
+    id = Column(Integer, primary_key=True, index=True)
+    provider = Column(String, nullable=False, index=True)
+    model = Column(String, nullable=False)
+    input_price_per_1k_usd = Column(Float, nullable=True)
+    output_price_per_1k_usd = Column(Float, nullable=True)
+    updated_at = Column(SQLDateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+class PlatformSetting(Base):
+    """Small key/value store for platform-level configuration that isn't
+    per-model pricing: the USD->NGN conversion rate, the two provider monthly
+    monitoring budgets, and the alert threshold percentages. One table instead
+    of one single-purpose column/table per setting - all read through
+    get_platform_setting()/get_platform_setting_float(), all written through
+    set_platform_setting(), so there is exactly one code path for each."""
+    __tablename__ = "platform_settings"
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=True)
+    updated_at = Column(SQLDateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+# --- Settings helpers ---
+def get_platform_setting(db: Session, key: str) -> Optional[str]:
+    row = db.query(PlatformSetting).filter(PlatformSetting.key == key).first()
+    return row.value if row else None
+
+def get_platform_setting_float(db: Session, key: str) -> Optional[float]:
+    raw = get_platform_setting(db, key)
+    try:
+        return float(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+def set_platform_setting(db: Session, key: str, value: Optional[str]) -> None:
+    row = db.query(PlatformSetting).filter(PlatformSetting.key == key).first()
+    if not row:
+        row = PlatformSetting(key=key)
+        db.add(row)
+    row.value = value
+
+DEFAULT_AI_ALERT_THRESHOLDS = [75, 85, 95]
+
+def get_ai_alert_thresholds(db: Session) -> List[int]:
+    raw = get_platform_setting(db, "ai_alert_thresholds")
+    if not raw:
+        return list(DEFAULT_AI_ALERT_THRESHOLDS)
+    try:
+        vals = sorted({int(x) for x in json.loads(raw) if 0 < int(x) <= 100})
+        return vals or list(DEFAULT_AI_ALERT_THRESHOLDS)
+    except Exception:
+        return list(DEFAULT_AI_ALERT_THRESHOLDS)
+
+def usd_to_ngn(db: Session, usd: Optional[float]) -> Optional[float]:
+    if usd is None:
+        return None
+    rate = get_platform_setting_float(db, "usd_to_ngn_rate")
+    if rate is None:
+        return None
+    return round(usd * rate, 2)
+
+# --- Central AI provider pricing / cost estimation ---
+def get_ai_pricing_row(db: Session, provider: str, model: str) -> Optional["AIProviderPricing"]:
+    return db.query(AIProviderPricing).filter(AIProviderPricing.provider == provider, AIProviderPricing.model == model).first()
+
+def estimate_ai_cost_usd(db: Session, provider: str, model: str, input_tokens: Optional[int], output_tokens: Optional[int]) -> Optional[float]:
+    """The ONE place a provider dollar cost is ever calculated. Uses ONLY real
+    token counts returned by the provider itself x an operator-configured
+    $/1,000-token rate for this exact provider+model (see AIProviderPricing).
+    Deliberately returns None - never a guessed number - when either the
+    token counts are missing or pricing has not yet been configured for this
+    model, so the AI & Costs page can show "cost tracking not configured"
+    instead of a fabricated figure (see spec: no fake AI costs in production).
+    NEVER derives cost from Cauldra credits - those are a separate, unrelated
+    internal product-allowance system (see AI_CREDIT_WEIGHTS)."""
+    if not provider or not model:
+        return None
+    if input_tokens is None and output_tokens is None:
+        return None
+    row = get_ai_pricing_row(db, provider, model)
+    if not row or (row.input_price_per_1k_usd is None and row.output_price_per_1k_usd is None):
+        return None
+    cost = 0.0
+    if input_tokens and row.input_price_per_1k_usd is not None:
+        cost += (input_tokens / 1000.0) * row.input_price_per_1k_usd
+    if output_tokens and row.output_price_per_1k_usd is not None:
+        cost += (output_tokens / 1000.0) * row.output_price_per_1k_usd
+    return round(cost, 6)
+
+def check_ai_budget_alerts(db: Session, provider: str) -> None:
+    """Fires a PlatformAlert the first time this month's real spend (sum of
+    AIUsageLedger.estimated_provider_cost, itself only ever a real
+    token-derived number - see estimate_ai_cost_usd) crosses each configured
+    threshold (default 75/85/95%) of that provider's configured monthly
+    budget. dedup_key embeds the provider, the threshold, AND the current
+    "YYYY-MM" period, so: (a) the SAME threshold never re-fires twice within
+    one month (the unique constraint + existence check below is the guard),
+    and (b) next month's dedup_key is a different string, so thresholds
+    naturally "reset" without any explicit cleanup job. No-ops silently if the
+    budget or the USD->NGN rate has not been configured yet - an alert about a
+    budget nobody set would be noise, not signal."""
+    budget_ngn = get_platform_setting_float(db, f"{provider}_monthly_budget_ngn")
+    if not budget_ngn or budget_ngn <= 0:
+        return
+    rate = get_platform_setting_float(db, "usd_to_ngn_rate")
+    if not rate:
+        return
+    now = datetime.utcnow()
+    period_key = now.strftime("%Y-%m")
+    month_start = datetime(now.year, now.month, 1)
+    spent_usd = db.query(func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0)).filter(
+        AIUsageLedger.provider == provider, AIUsageLedger.success == True,
+        AIUsageLedger.created_at >= month_start, AIUsageLedger.estimated_provider_cost.isnot(None),
+    ).scalar() or 0.0
+    spent_ngn = float(spent_usd) * rate
+    pct = (spent_ngn / budget_ngn) * 100.0
+    for threshold in get_ai_alert_thresholds(db):
+        if pct < threshold:
+            continue
+        dedup_key = f"ai_budget_{provider}_{threshold}_{period_key}"
+        if db.query(PlatformAlert).filter(PlatformAlert.dedup_key == dedup_key).first():
+            continue
+        db.add(PlatformAlert(
+            alert_type="ai_budget_threshold", provider=provider,
+            severity="critical" if threshold >= 95 else "important",
+            title=f"{provider.title()} spend at {threshold}% of budget",
+            message=(f"{provider.title()} AI expenditure has reached {threshold}% of the configured "
+                     f"monthly budget (\u20a6{budget_ngn:,.0f}). Estimated spend so far this month: \u20a6{spent_ngn:,.0f}."),
+            dedup_key=dedup_key,
+        ))
+
+# --- Platform auth ---
+# Deliberately a DIFFERENT signing key from the customer SECRET_KEY. If
+# PLATFORM_OWNER_SECRET_KEY is not set, one is derived deterministically from
+# SECRET_KEY with a fixed domain-separation label, so this never becomes a
+# required new env var, but a customer-signed token still can never verify
+# against it (different key) - and even in the deliberately-configured-equal
+# edge case, the mandatory `scope` claim below still blocks it (customer
+# tokens never carry one). Setting a dedicated PLATFORM_OWNER_SECRET_KEY in
+# production is still recommended (see the deployment note in the report).
+PLATFORM_SECRET_KEY = os.getenv("PLATFORM_OWNER_SECRET_KEY", "").strip()
+if not PLATFORM_SECRET_KEY:
+    PLATFORM_SECRET_KEY = hmac.new(SECRET_KEY.encode(), b"cauldra-platform-owner-domain-separation", hashlib.sha256).hexdigest()
+
+PLATFORM_ACCESS_TOKEN_MINUTES = int(os.getenv("PLATFORM_OWNER_ACCESS_TOKEN_MINUTES", "60"))
+PLATFORM_MFA_TOKEN_MINUTES = 5
+# Unlisted UI entry point - never linked from the customer app. Change this in
+# production (env var, no redeploy needed) any time the URL should rotate.
+# This is UX obscurity only; every /api/platform/* call below independently
+# re-verifies the bearer token regardless of how the caller reached it.
+PLATFORM_PANEL_PATH = "/" + os.getenv("PLATFORM_PANEL_PATH", "cauldra-ops-9182").strip().strip("/")
+
+def issue_platform_token(owner: "PlatformOwner") -> str:
+    exp = datetime.utcnow() + timedelta(minutes=PLATFORM_ACCESS_TOKEN_MINUTES)
+    jti = secrets.token_urlsafe(24)
+    payload = {"sub": str(owner.id), "scope": "platform_owner", "jti": jti, "pav": int(owner.platform_auth_version or 1), "exp": exp}
+    return jwt.encode(payload, PLATFORM_SECRET_KEY, algorithm=ALGORITHM)
+
+def issue_platform_mfa_token(owner: "PlatformOwner") -> str:
+    exp = datetime.utcnow() + timedelta(minutes=PLATFORM_MFA_TOKEN_MINUTES)
+    payload = {"sub": str(owner.id), "scope": "platform_owner_mfa_pending", "exp": exp}
+    return jwt.encode(payload, PLATFORM_SECRET_KEY, algorithm=ALGORITHM)
+
+def get_platform_owner(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> "PlatformOwner":
+    """THE security boundary for every /api/platform/* endpoint below. Signed
+    with PLATFORM_SECRET_KEY (never the customer SECRET_KEY) and requires
+    scope=="platform_owner" - a customer access token (signed with a different
+    key, and never carrying this claim) is rejected outright, regardless of
+    that user's role. See the module docstring above for the full argument."""
+    try:
+        payload = jwt.decode(token, PLATFORM_SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Platform session could not be verified. Please sign in again.")
+    if payload.get("scope") != "platform_owner":
+        raise HTTPException(status_code=403, detail="This account does not have Platform Owner access.")
+    jti = payload.get("jti")
+    if not jti or db.query(PlatformOwnerSessionRevocation).filter(PlatformOwnerSessionRevocation.jti == jti).first():
+        raise HTTPException(status_code=401, detail="Platform session is no longer valid. Please sign in again.")
+    try:
+        oid = int(payload.get("sub"))
+        pav = int(payload.get("pav", 0))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Platform session could not be verified. Please sign in again.")
+    owner = db.query(PlatformOwner).filter(PlatformOwner.id == oid).first()
+    if not owner or owner.disabled:
+        raise HTTPException(status_code=401, detail="Platform session could not be verified. Please sign in again.")
+    if pav and pav != int(owner.platform_auth_version or 1):
+        raise HTTPException(status_code=401, detail="Platform session is no longer valid. Please sign in again.")
+    return owner
+
+def add_platform_audit(db: Session, owner: Optional["PlatformOwner"], action: str, description: str) -> None:
+    db.add(PlatformAuditLog(
+        platform_owner_id=owner.id if owner else None,
+        platform_owner_email=owner.email if owner else None,
+        action=action, description=description,
+    ))
+
+# --- request models ---
+class PlatformLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+class PlatformMfaVerifyRequest(BaseModel):
+    mfa_token: str
+    code: str
+
+class PlatformAIPricingUpdate(BaseModel):
+    provider: str
+    model: str
+    input_price_per_1k_usd: Optional[float] = Field(default=None, ge=0)
+    output_price_per_1k_usd: Optional[float] = Field(default=None, ge=0)
+
+class PlatformSettingsUpdate(BaseModel):
+    usd_to_ngn_rate: Optional[float] = Field(default=None, gt=0)
+    gemini_monthly_budget_ngn: Optional[float] = Field(default=None, ge=0)
+    openai_monthly_budget_ngn: Optional[float] = Field(default=None, ge=0)
+    ai_alert_thresholds: Optional[List[int]] = None
+
+# --- reusable UTC date-range resolver for platform-wide analytics ---
+# (mirrors resolve_financial_period()'s validation semantics/messages exactly,
+# but anchored in UTC rather than one business's local timezone - platform
+# data spans every business/timezone Cauldra has, so there is no single
+# "local" time that would be meaningful here.)
+PLATFORM_REVENUE_PERIODS = {"month", "six_months", "year", "all", "custom"}
+
+def resolve_platform_period(period: str, custom_start: Optional[str] = None, custom_end: Optional[str] = None) -> Tuple[Optional[datetime], Optional[datetime]]:
+    period = (period or "month").strip().lower()
+    if period not in PLATFORM_REVENUE_PERIODS:
+        raise HTTPException(status_code=400, detail=f"Unknown period '{period}'. Use one of: {', '.join(sorted(PLATFORM_REVENUE_PERIODS))}.")
+    now = datetime.utcnow()
+    today = datetime(now.year, now.month, now.day)
+    if period == "all":
+        return None, None
+    if period == "month":
+        return today.replace(day=1), now
+    if period == "six_months":
+        y, m = today.year, today.month - 6
+        while m <= 0:
+            m += 12; y -= 1
+        return datetime(y, m, 1), now
+    if period == "year":
+        y, m = today.year, today.month - 12
+        while m <= 0:
+            m += 12; y -= 1
+        return datetime(y, m, 1), now
+    # custom - REQUIRED to carry both boundaries; never silently substituted
+    # for a predefined range (see spec). End boundary is exclusive
+    # (custom_end + 1 day) so a transaction recorded anywhere on the end date
+    # itself is still included - same convention resolve_financial_period()
+    # already uses for the customer-facing Custom Date Range picker.
+    if not custom_start and not custom_end:
+        raise HTTPException(status_code=400, detail="Select a start date and end date.")
+    if not custom_start:
+        raise HTTPException(status_code=400, detail="Select a start date.")
+    if not custom_end:
+        raise HTTPException(status_code=400, detail="Select an end date.")
+    try:
+        start_dt = datetime.strptime(custom_start, "%Y-%m-%d")
+        end_dt = datetime.strptime(custom_end, "%Y-%m-%d") + timedelta(days=1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Custom dates must be in YYYY-MM-DD format.")
+    if end_dt <= start_dt:
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date.")
+    return start_dt, end_dt
+
+def _revenue_base_query(db: Session, start: Optional[datetime], end: Optional[datetime]):
+    """Real, collected revenue ONLY: PaymentRecord.status=="success" (the
+    field every existing webhook/verification handler sets exactly once
+    payment is actually confirmed - see run_billable_ai's neighbors in the
+    Paystack section) and purpose != "card_verification" (a trivial,
+    typically-refunded charge used only to verify a card at onboarding, never
+    real subscription revenue). Never counts failed/abandoned/pending/
+    projected amounts."""
+    q = db.query(PaymentRecord).filter(PaymentRecord.status == "success", PaymentRecord.purpose != "card_verification")
+    if start is not None:
+        q = q.filter(PaymentRecord.paid_at >= start)
+    if end is not None:
+        q = q.filter(PaymentRecord.paid_at < end)
+    return q
+
+# =============================================================================
+# /api/platform/* ENDPOINTS - every one below requires get_platform_owner.
+# =============================================================================
+
+@app.post("/api/platform/auth/login")
+def platform_login(data: PlatformLoginRequest, request: Request, db: Session = Depends(get_db)):
+    email = str(data.email).strip().lower()
+    client_ip = request.client.host if request and request.client else "unknown"
+    check_rate_limit(db, "platform-owner-login", email)
+    check_rate_limit(db, "platform-owner-login-ip", client_ip)
+    owner = db.query(PlatformOwner).filter(func.lower(PlatformOwner.email) == email).first()
+    if not owner or owner.disabled or not verify_password(data.password, owner.password):
+        record_failure(db, "platform-owner-login", email)
+        record_failure(db, "platform-owner-login-ip", client_ip)
+        db.commit()
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    clear_failures(db, "platform-owner-login", email)
+    clear_failures(db, "platform-owner-login-ip", client_ip)
+    db.commit()
+    if not owner.totp_enabled or not owner.totp_secret:
+        # Mandatory MFA (spec): an account without MFA configured cannot sign
+        # in at all - there is no password-only fallback.
+        raise HTTPException(status_code=403, detail="Multi-factor authentication has not been configured for this account.")
+    return {"mfa_required": True, "mfa_token": issue_platform_mfa_token(owner)}
+
+@app.post("/api/platform/auth/verify-mfa")
+def platform_verify_mfa(data: PlatformMfaVerifyRequest, request: Request, db: Session = Depends(get_db)):
+    client_ip = request.client.host if request and request.client else "unknown"
+    check_rate_limit(db, "platform-owner-mfa-ip", client_ip)
+    try:
+        payload = jwt.decode(data.mfa_token, PLATFORM_SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Your sign-in attempt has expired. Please start again.")
+    if payload.get("scope") != "platform_owner_mfa_pending":
+        raise HTTPException(status_code=401, detail="Your sign-in attempt has expired. Please start again.")
+    try:
+        oid = int(payload.get("sub"))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Your sign-in attempt has expired. Please start again.")
+    owner = db.query(PlatformOwner).filter(PlatformOwner.id == oid).first()
+    if not owner or owner.disabled or not owner.totp_secret:
+        raise HTTPException(status_code=401, detail="Your sign-in attempt has expired. Please start again.")
+    if not _totp_verify(owner.totp_secret, data.code):
+        record_failure(db, "platform-owner-mfa-ip", client_ip)
+        db.commit()
+        raise HTTPException(status_code=401, detail="Incorrect authentication code.")
+    clear_failures(db, "platform-owner-mfa-ip", client_ip)
+    owner.last_login_at = datetime.utcnow()
+    add_platform_audit(db, owner, "PLATFORM_LOGIN", "Signed in to the Platform Owner Control Panel.")
+    db.commit()
+    return {"access_token": issue_platform_token(owner), "token_type": "bearer",
+            "expires_in_minutes": PLATFORM_ACCESS_TOKEN_MINUTES,
+            "owner": {"id": owner.id, "email": owner.email}}
+
+@app.post("/api/platform/auth/logout")
+def platform_logout(token: str = Depends(oauth2_scheme), owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, PLATFORM_SECRET_KEY, algorithms=[ALGORITHM])
+        jti = payload.get("jti")
+        exp_ts = payload.get("exp")
+        exp_dt = datetime.utcfromtimestamp(exp_ts) if exp_ts else datetime.utcnow() + timedelta(minutes=PLATFORM_ACCESS_TOKEN_MINUTES)
+        if jti and not db.query(PlatformOwnerSessionRevocation).filter(PlatformOwnerSessionRevocation.jti == jti).first():
+            db.add(PlatformOwnerSessionRevocation(jti=jti, platform_owner_id=owner.id, expires_at=exp_dt))
+    except JWTError:
+        pass
+    add_platform_audit(db, owner, "PLATFORM_LOGOUT", "Signed out of the Platform Owner Control Panel.")
+    db.commit()
+    return {"message": "Signed out."}
+
+@app.get("/api/platform/overview")
+def platform_overview(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    """"What is happening across Cauldra right now?" - a deliberately SHORT
+    list of headline numbers; every deeper breakdown lives on its own page
+    (see the other endpoints below)."""
+    now = datetime.utcnow()
+    month_start = datetime(now.year, now.month, 1)
+    today_start = datetime(now.year, now.month, now.day)
+    active_now_cutoff = now - timedelta(minutes=5)
+
+    total_businesses = db.query(func.count(BusinessProfile.id)).scalar() or 0
+    total_users = db.query(func.count(User.id)).scalar() or 0
+    active_now = db.query(func.count(User.id)).filter(User.last_active_at >= active_now_cutoff).scalar() or 0
+    active_today = db.query(func.count(User.id)).filter(User.last_active_at >= today_start).scalar() or 0
+    new_businesses_month = db.query(func.count(BusinessProfile.id)).filter(BusinessProfile.trial_started_at >= month_start).scalar() or 0
+    new_users_month = db.query(func.count(User.id)).filter(User.created_at >= month_start).scalar() or 0
+
+    revenue_month_kobo = _revenue_base_query(db, month_start, now).with_entities(func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
+
+    paying_businesses = db.query(func.count(func.distinct(BusinessSubscription.business_id))).filter(BusinessSubscription.status == "active").scalar() or 0
+    trial_businesses = db.query(func.count(BusinessSubscription.id)).filter(BusinessSubscription.status == "trialing").scalar() or 0
+
+    unresolved_alerts = db.query(func.count(PlatformAlert.id)).filter(PlatformAlert.acknowledged_at.is_(None)).scalar() or 0
+    critical_alerts = db.query(func.count(PlatformAlert.id)).filter(PlatformAlert.acknowledged_at.is_(None), PlatformAlert.severity == "critical").scalar() or 0
+
+    ai_spend_usd_month = db.query(func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0)).filter(
+        AIUsageLedger.success == True, AIUsageLedger.created_at >= month_start, AIUsageLedger.estimated_provider_cost.isnot(None),
+    ).scalar() or 0.0
+
+    return {
+        "generated_at": to_utc_iso(now),
+        "businesses": {"total": total_businesses, "new_this_month": new_businesses_month, "trial": trial_businesses, "paying": paying_businesses},
+        "users": {"total": total_users, "new_this_month": new_users_month, "active_now": active_now, "active_today": active_today},
+        "revenue": {"this_month_naira": round(revenue_month_kobo / 100, 2), "currency": "NGN"},
+        "ai_spend": {"this_month_usd": round(ai_spend_usd_month, 2), "this_month_ngn": usd_to_ngn(db, ai_spend_usd_month)},
+        "alerts": {"unresolved": unresolved_alerts, "critical": critical_alerts},
+        # Documented, fixed definitions (spec: keep meanings consistent) -
+        # not a live presence system, just this heartbeat-derived window.
+        "activity_definitions": {
+            "active_now": "Authenticated user whose last /presence/heartbeat was within the last 5 minutes.",
+            "active_today": "Authenticated user with a heartbeat since 00:00 UTC today.",
+        },
+    }
+
+@app.get("/api/platform/businesses")
+def platform_businesses(
+    q: Optional[str] = Query(None), plan: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+    owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db),
+):
+    """Summary table. Per-business aggregates are computed with grouped
+    aggregate queries against just the businesses on THIS page - never a
+    Python loop issuing one query per row, and never loading every business's
+    full history into memory (see spec: performance)."""
+    query = db.query(BusinessProfile)
+    if q:
+        like = f"%{q.strip()}%"
+        query = query.filter(or_(BusinessProfile.company_name.ilike(like), BusinessProfile.business_code.ilike(like), BusinessProfile.email.ilike(like)))
+    if plan:
+        query = query.filter(BusinessProfile.subscription_plan == plan.strip().lower())
+    total = query.count()
+    rows = query.order_by(BusinessProfile.trial_started_at.desc()).offset(offset).limit(limit).all()
+    biz_ids = [b.id for b in rows]
+
+    user_counts = dict(db.query(User.business_id, func.count(User.id)).filter(User.business_id.in_(biz_ids)).group_by(User.business_id).all()) if biz_ids else {}
+    revenue_rows = dict(_revenue_base_query(db, None, None).filter(PaymentRecord.business_id.in_(biz_ids)).with_entities(
+        PaymentRecord.business_id, func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).group_by(PaymentRecord.business_id).all()) if biz_ids else {}
+    credit_rows = dict(db.query(AIUsageLedger.business_id, func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0)).filter(
+        AIUsageLedger.business_id.in_(biz_ids), AIUsageLedger.success == True).group_by(AIUsageLedger.business_id).all()) if biz_ids else {}
+    cost_rows = dict(db.query(AIUsageLedger.business_id, func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0)).filter(
+        AIUsageLedger.business_id.in_(biz_ids), AIUsageLedger.success == True, AIUsageLedger.estimated_provider_cost.isnot(None),
+    ).group_by(AIUsageLedger.business_id).all()) if biz_ids else {}
+    last_active_rows = dict(db.query(User.business_id, func.max(User.last_active_at)).filter(User.business_id.in_(biz_ids)).group_by(User.business_id).all()) if biz_ids else {}
+    subs = {s.business_id: s for s in db.query(BusinessSubscription).filter(BusinessSubscription.business_id.in_(biz_ids)).all()} if biz_ids else {}
+
+    items = []
+    for b in rows:
+        sub = subs.get(b.id)
+        cost_usd = cost_rows.get(b.id, 0.0)
+        items.append({
+            "id": b.id, "business_code": b.business_code, "company_name": b.company_name,
+            "joined_at": to_utc_iso(b.trial_started_at),
+            "plan": (sub.plan if sub else b.subscription_plan) or "starter",
+            "subscription_status": sub.status if sub else None,
+            "is_trial": bool(sub and sub.status == "trialing"),
+            "user_count": int(user_counts.get(b.id, 0)),
+            "last_active_at": to_utc_iso(last_active_rows.get(b.id)),
+            "lifetime_revenue_naira": round(revenue_rows.get(b.id, 0) / 100, 2),
+            "ai_credits_consumed": int(credit_rows.get(b.id, 0)),
+            "ai_provider_cost_usd": round(cost_usd, 2),
+            "ai_provider_cost_ngn": usd_to_ngn(db, cost_usd),
+        })
+    return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+@app.get("/api/platform/businesses/{business_id}")
+def platform_business_detail(business_id: int, owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    biz = db.query(BusinessProfile).filter(BusinessProfile.id == business_id).first()
+    if not biz:
+        raise HTTPException(status_code=404, detail="Business not found.")
+    sub = db.query(BusinessSubscription).filter(BusinessSubscription.business_id == business_id).first()
+    users = db.query(User).filter(User.business_id == business_id).order_by(User.id).all()
+
+    revenue_total = _revenue_base_query(db, None, None).filter(PaymentRecord.business_id == business_id).with_entities(
+        func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
+    last_payment = _revenue_base_query(db, None, None).filter(PaymentRecord.business_id == business_id).order_by(PaymentRecord.paid_at.desc()).first()
+    credits_total = db.query(func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0)).filter(
+        AIUsageLedger.business_id == business_id, AIUsageLedger.success == True).scalar() or 0
+    cost_total_usd = db.query(func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0)).filter(
+        AIUsageLedger.business_id == business_id, AIUsageLedger.success == True, AIUsageLedger.estimated_provider_cost.isnot(None),
+    ).scalar() or 0.0
+    last_active = db.query(func.max(User.last_active_at)).filter(User.business_id == business_id).scalar()
+
+    return {
+        "id": biz.id, "business_code": biz.business_code, "company_name": biz.company_name,
+        "email": biz.email, "phone": biz.phone, "country": biz.country, "currency": biz.currency,
+        "joined_at": to_utc_iso(biz.trial_started_at),
+        "plan": (sub.plan if sub else biz.subscription_plan),
+        "subscription_status": sub.status if sub else None,
+        "billing_interval": (sub.billing_interval if sub else biz.billing_interval),
+        "trial_end_at": to_utc_iso(sub.trial_end_at) if sub else None,
+        "current_period_end": to_utc_iso(sub.current_period_end) if sub else None,
+        "cancel_at_period_end": bool(sub.cancel_at_period_end) if sub else False,
+        "last_active_at": to_utc_iso(last_active),
+        "users": [{
+            "id": u.id, "username": u.username, "role": u.role,
+            "firstname": u.firstname, "lastname": u.lastname, "email": u.email, "disabled": u.disabled,
+            "created_at": to_utc_iso(u.created_at), "last_active_at": to_utc_iso(u.last_active_at),
+        } for u in users],
+        "lifetime_revenue_naira": round(revenue_total / 100, 2),
+        "last_payment_at": to_utc_iso(last_payment.paid_at) if last_payment else None,
+        "ai_credits_consumed": int(credits_total),
+        "ai_provider_cost_usd": round(cost_total_usd, 2),
+        "ai_provider_cost_ngn": usd_to_ngn(db, cost_total_usd),
+    }
+
+@app.get("/api/platform/users")
+def platform_users(
+    q: Optional[str] = Query(None), role: Optional[str] = Query(None), business_id: Optional[int] = Query(None),
+    active_only: bool = Query(False), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+    owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db),
+):
+    query = db.query(User)
+    if q:
+        like = f"%{q.strip()}%"
+        query = query.filter(or_(User.username.ilike(like), User.email.ilike(like), User.firstname.ilike(like), User.lastname.ilike(like)))
+    if role:
+        query = query.filter(User.role == role.strip().lower())
+    if business_id:
+        query = query.filter(User.business_id == business_id)
+    now = datetime.utcnow()
+    if active_only:
+        query = query.filter(User.last_active_at >= now - timedelta(minutes=5))
+    total = query.count()
+    rows = query.order_by(User.id.desc()).offset(offset).limit(limit).all()
+
+    biz_ids = [u.business_id for u in rows]
+    biz_names = dict(db.query(BusinessProfile.id, BusinessProfile.company_name).filter(BusinessProfile.id.in_(biz_ids)).all()) if biz_ids else {}
+    items = [{
+        "id": u.id, "username": u.username, "firstname": u.firstname, "lastname": u.lastname, "email": u.email,
+        "role": u.role, "business_id": u.business_id, "business_name": biz_names.get(u.business_id),
+        "disabled": u.disabled, "created_at": to_utc_iso(u.created_at), "last_active_at": to_utc_iso(u.last_active_at),
+        "currently_active": bool(u.last_active_at and u.last_active_at >= now - timedelta(minutes=5)),
+    } for u in rows]
+
+    month_start = datetime(now.year, now.month, 1)
+    today_start = datetime(now.year, now.month, now.day)
+    summary = {
+        "total_users": db.query(func.count(User.id)).scalar() or 0,
+        "new_this_month": db.query(func.count(User.id)).filter(User.created_at >= month_start).scalar() or 0,
+        "active_today": db.query(func.count(User.id)).filter(User.last_active_at >= today_start).scalar() or 0,
+        "active_this_month": db.query(func.count(User.id)).filter(User.last_active_at >= month_start).scalar() or 0,
+        # "Returning" = has been active on a day AFTER their creation day - a
+        # user who has only ever used Cauldra on the same day they joined is
+        # not yet counted as returning. Documented here as the one definition.
+        "returning": db.query(func.count(User.id)).filter(
+            User.last_active_at.isnot(None), User.created_at.isnot(None),
+            User.last_active_at >= User.created_at + timedelta(days=1),
+        ).scalar() or 0,
+    }
+    return {"total": total, "limit": limit, "offset": offset, "items": items, "summary": summary,
+            "activity_definitions": {
+                "currently_active": "last_active_at within the last 5 minutes.",
+                "active_today": "last_active_at since 00:00 UTC today.",
+                "active_this_month": "last_active_at since the 1st of the current UTC month.",
+                "returning": "Has a last_active_at at least 24 hours after created_at.",
+            }}
+
+@app.get("/api/platform/subscriptions")
+def platform_subscriptions(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    """Uses Cauldra's OWN existing subscription states (BusinessSubscription.status)
+    and plan ids (PLAN_CONFIG) - grouped straight from the database, never a
+    separately invented status list."""
+    by_status = dict(db.query(BusinessSubscription.status, func.count(BusinessSubscription.id)).group_by(BusinessSubscription.status).all())
+    by_plan = dict(db.query(BusinessSubscription.plan, func.count(BusinessSubscription.id)).group_by(BusinessSubscription.plan).all())
+    total = db.query(func.count(BusinessSubscription.id)).scalar() or 0
+    return {"total": total, "by_status": by_status, "by_plan": by_plan}
+
+@app.get("/api/platform/revenue")
+def platform_revenue(
+    period: str = Query("month"), start_date: Optional[str] = Query(None, alias="start"), end_date: Optional[str] = Query(None, alias="end"),
+    owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db),
+):
+    start, end = resolve_platform_period(period, start_date, end_date)
+    base = _revenue_base_query(db, start, end)
+
+    total_kobo = base.with_entities(func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
+    successful_payments = base.with_entities(func.count(PaymentRecord.id)).scalar() or 0
+    paying_businesses = base.with_entities(func.count(func.distinct(PaymentRecord.business_id))).scalar() or 0
+    avg_per_business_kobo = (total_kobo / paying_businesses) if paying_businesses else 0
+
+    by_plan = [{"plan": p, "revenue_naira": round(amt / 100, 2), "payments": cnt}
+               for p, amt, cnt in base.with_entities(PaymentRecord.plan, func.coalesce(func.sum(PaymentRecord.amount_kobo), 0), func.count(PaymentRecord.id)).group_by(PaymentRecord.plan).all()]
+
+    by_business_rows = (
+        base.with_entities(PaymentRecord.business_id, func.coalesce(func.sum(PaymentRecord.amount_kobo), 0), func.count(PaymentRecord.id), func.max(PaymentRecord.paid_at))
+        .group_by(PaymentRecord.business_id).order_by(func.sum(PaymentRecord.amount_kobo).desc()).limit(50).all()
+    )
+    biz_ids = [r[0] for r in by_business_rows]
+    biz_lookup = {b.id: b for b in db.query(BusinessProfile).filter(BusinessProfile.id.in_(biz_ids)).all()} if biz_ids else {}
+    by_business = [{
+        "business_id": bid, "company_name": (biz_lookup[bid].company_name if bid in biz_lookup else None),
+        "business_code": (biz_lookup[bid].business_code if bid in biz_lookup else None),
+        "revenue_naira": round(amt / 100, 2), "payments": cnt, "last_payment_at": to_utc_iso(last_paid),
+    } for bid, amt, cnt, last_paid in by_business_rows]
+
+    all_time_kobo = _revenue_base_query(db, None, None).with_entities(func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
+
+    return {
+        "period": period, "start": to_utc_iso(start), "end": to_utc_iso(end),
+        "revenue_naira": round(total_kobo / 100, 2),
+        "successful_payments": successful_payments,
+        "paying_businesses": paying_businesses,
+        "average_revenue_per_business_naira": round(avg_per_business_kobo / 100, 2),
+        "by_plan": by_plan,
+        "by_business": by_business,
+        "all_time_revenue_naira": round(all_time_kobo / 100, 2),
+        "currency": "NGN",
+    }
+
+@app.get("/api/platform/ai-usage")
+def platform_ai_usage(
+    period: str = Query("month"), start_date: Optional[str] = Query(None, alias="start"), end_date: Optional[str] = Query(None, alias="end"),
+    owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db),
+):
+    start, end = resolve_platform_period(period, start_date, end_date)
+    q = db.query(AIUsageLedger).filter(AIUsageLedger.success == True)
+    if start is not None:
+        q = q.filter(AIUsageLedger.created_at >= start)
+    if end is not None:
+        q = q.filter(AIUsageLedger.created_at < end)
+
+    providers: Dict[str, Any] = {}
+    for provider, requests, credits, cost_usd in q.with_entities(
+        AIUsageLedger.provider, func.count(AIUsageLedger.id), func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0),
+        func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0),
+    ).group_by(AIUsageLedger.provider).all():
+        key = provider or "unknown"
+        budget_ngn = get_platform_setting_float(db, f"{key}_monthly_budget_ngn")
+        cost_ngn = usd_to_ngn(db, cost_usd)
+        pct = (cost_ngn / budget_ngn * 100.0) if (budget_ngn and cost_ngn is not None) else None
+        providers[key] = {
+            "requests": requests, "credits_consumed": int(credits),
+            "provider_cost_usd": round(cost_usd, 2) if cost_usd else 0.0,
+            "provider_cost_ngn": cost_ngn,
+            "monthly_budget_ngn": budget_ngn,
+            "budget_consumed_pct": round(pct, 1) if pct is not None else None,
+            "budget_remaining_ngn": round(budget_ngn - cost_ngn, 2) if (budget_ngn and cost_ngn is not None) else None,
+        }
+
+    by_operation = []
+    for op, provider, requests, credits, cost_usd in q.with_entities(
+        AIUsageLedger.operation_type, AIUsageLedger.provider, func.count(AIUsageLedger.id),
+        func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0), func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0),
+    ).group_by(AIUsageLedger.operation_type, AIUsageLedger.provider).all():
+        by_operation.append({
+            "operation": op, "provider": provider, "requests": requests, "credits_consumed": int(credits),
+            "provider_cost_usd": round(cost_usd, 2) if cost_usd else 0.0,
+            "provider_cost_ngn": usd_to_ngn(db, cost_usd),
+            "average_cost_per_request_usd": round((cost_usd / requests), 4) if requests and cost_usd else 0.0,
+        })
+
+    failed_q = db.query(func.count(AIUsageLedger.id)).filter(AIUsageLedger.success == False)
+    if start is not None:
+        failed_q = failed_q.filter(AIUsageLedger.created_at >= start)
+    if end is not None:
+        failed_q = failed_q.filter(AIUsageLedger.created_at < end)
+
+    return {"period": period, "start": to_utc_iso(start), "end": to_utc_iso(end),
+            "providers": providers, "by_operation": by_operation, "failed_requests": failed_q.scalar() or 0}
+
+@app.get("/api/platform/ai-pricing")
+def platform_ai_pricing_list(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    rows = db.query(AIProviderPricing).order_by(AIProviderPricing.provider, AIProviderPricing.model).all()
+    configured = [{"provider": r.provider, "model": r.model, "input_price_per_1k_usd": r.input_price_per_1k_usd,
+                   "output_price_per_1k_usd": r.output_price_per_1k_usd, "updated_at": to_utc_iso(r.updated_at)} for r in rows]
+    configured_keys = {(r.provider, r.model) for r in rows}
+    # The models Cauldra is ACTUALLY configured to call right now, even before
+    # pricing has been set for them - so the owner sees exactly what needs
+    # configuring instead of an empty page.
+    active_models = [("gemini", GEMINI_MODEL), ("openai", OPENAI_MODEL)]
+    missing = [{"provider": p, "model": m} for p, m in active_models if (p, m) not in configured_keys]
+    return {"configured": configured, "unconfigured_active_models": missing}
+
+@app.put("/api/platform/ai-pricing")
+def platform_ai_pricing_set(data: PlatformAIPricingUpdate, owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    provider = data.provider.strip().lower()
+    model = data.model.strip()
+    if not provider or not model:
+        raise HTTPException(status_code=400, detail="Provider and model are required.")
+    row = get_ai_pricing_row(db, provider, model)
+    if not row:
+        row = AIProviderPricing(provider=provider, model=model)
+        db.add(row)
+    row.input_price_per_1k_usd = data.input_price_per_1k_usd
+    row.output_price_per_1k_usd = data.output_price_per_1k_usd
+    add_platform_audit(db, owner, "AI_PRICING_UPDATED",
+                        f"Set pricing for {provider}/{model}: input=${data.input_price_per_1k_usd}/1k, output=${data.output_price_per_1k_usd}/1k.")
+    db.commit()
+    return {"message": "Pricing updated.", "provider": provider, "model": model}
+
+@app.get("/api/platform/settings")
+def platform_settings_get(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    return {
+        "usd_to_ngn_rate": get_platform_setting_float(db, "usd_to_ngn_rate"),
+        "gemini_monthly_budget_ngn": get_platform_setting_float(db, "gemini_monthly_budget_ngn"),
+        "openai_monthly_budget_ngn": get_platform_setting_float(db, "openai_monthly_budget_ngn"),
+        "ai_alert_thresholds": get_ai_alert_thresholds(db),
+    }
+
+@app.put("/api/platform/settings")
+def platform_settings_set(data: PlatformSettingsUpdate, owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    changed = []
+    if data.usd_to_ngn_rate is not None:
+        set_platform_setting(db, "usd_to_ngn_rate", str(data.usd_to_ngn_rate)); changed.append("USD\u2192NGN rate")
+    if data.gemini_monthly_budget_ngn is not None:
+        set_platform_setting(db, "gemini_monthly_budget_ngn", str(data.gemini_monthly_budget_ngn)); changed.append("Gemini budget")
+    if data.openai_monthly_budget_ngn is not None:
+        set_platform_setting(db, "openai_monthly_budget_ngn", str(data.openai_monthly_budget_ngn)); changed.append("OpenAI budget")
+    if data.ai_alert_thresholds is not None:
+        vals = sorted({int(x) for x in data.ai_alert_thresholds if 0 < int(x) <= 100})
+        if not vals:
+            raise HTTPException(status_code=400, detail="Provide at least one threshold between 1 and 100.")
+        set_platform_setting(db, "ai_alert_thresholds", json.dumps(vals)); changed.append("alert thresholds")
+    if changed:
+        add_platform_audit(db, owner, "PLATFORM_SETTINGS_UPDATED", "Updated: " + ", ".join(changed) + ".")
+    db.commit()
+    return platform_settings_get(owner, db)
+
+@app.get("/api/platform/alerts")
+def platform_alerts_list(resolved: Optional[bool] = Query(None), limit: int = Query(50, ge=1, le=200),
+                          owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    q = db.query(PlatformAlert)
+    if resolved is True:
+        q = q.filter(PlatformAlert.acknowledged_at.isnot(None))
+    elif resolved is False:
+        q = q.filter(PlatformAlert.acknowledged_at.is_(None))
+    rows = q.order_by(PlatformAlert.created_at.desc()).limit(limit).all()
+    return {"items": [{
+        "id": a.id, "type": a.alert_type, "provider": a.provider, "severity": a.severity, "title": a.title,
+        "message": a.message, "created_at": to_utc_iso(a.created_at), "acknowledged_at": to_utc_iso(a.acknowledged_at),
+    } for a in rows]}
+
+@app.post("/api/platform/alerts/{alert_id}/acknowledge")
+def platform_alert_acknowledge(alert_id: int, owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    row = db.query(PlatformAlert).filter(PlatformAlert.id == alert_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Alert not found.")
+    if not row.acknowledged_at:
+        row.acknowledged_at = datetime.utcnow()
+        row.acknowledged_by_id = owner.id
+        add_platform_audit(db, owner, "PLATFORM_ALERT_ACKNOWLEDGED", f"Acknowledged alert #{alert_id}: {row.title}")
+    db.commit()
+    return {"message": "Alert acknowledged."}
+
+@app.get("/api/platform/system-health")
+def platform_system_health(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    """A useful SUMMARY, not a raw log viewer (spec) - detailed technical logs
+    stay in Railway's own log stream."""
+    now = datetime.utcnow()
+    last_24h = now - timedelta(hours=24)
+    try:
+        _ping_database()
+        db_ok = True
+    except Exception:
+        db_ok = False
+    failed_ai_24h = db.query(func.count(AIUsageLedger.id)).filter(AIUsageLedger.success == False, AIUsageLedger.created_at >= last_24h).scalar() or 0
+    failed_payments_24h = db.query(func.count(PaymentRecord.id)).filter(PaymentRecord.status == "failed", PaymentRecord.created_at >= last_24h).scalar() or 0
+    webhook_events_24h = db.query(func.count(PaystackWebhookEvent.id)).filter(PaystackWebhookEvent.received_at >= last_24h).scalar() or 0
+    critical_alerts_unresolved = db.query(func.count(PlatformAlert.id)).filter(PlatformAlert.severity == "critical", PlatformAlert.acknowledged_at.is_(None)).scalar() or 0
+    return {
+        "checked_at": to_utc_iso(now),
+        "database": {"status": "ok" if db_ok else "degraded"},
+        "ai": {"failed_requests_24h": failed_ai_24h},
+        "payments": {"failed_24h": failed_payments_24h},
+        "webhooks": {"received_24h": webhook_events_24h},
+        "alerts": {"unresolved_critical": critical_alerts_unresolved},
+    }
+
+@app.get("/api/platform/infrastructure")
+def platform_infrastructure(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    """Only metrics Cauldra can reliably calculate from its own database.
+    Deliberately does NOT scrape Railway/Supabase/provider dashboards or
+    invent numbers for anything this backend cannot verify itself (spec)."""
+    storage_bytes = db.query(func.coalesce(func.sum(StoredUpload.size_bytes), 0)).scalar() or 0
+    upload_count = db.query(func.count(StoredUpload.id)).scalar() or 0
+    return {
+        "note": ("Only metrics Cauldra can reliably compute from its own database are shown here. "
+                 "Railway/Supabase/provider dashboard-only metrics (compute usage, bandwidth, disk size) "
+                 "are not scraped and are not shown."),
+        "database": {"backend": "postgresql", "host": engine.url.host},
+        "storage": {"total_bytes_used": int(storage_bytes), "total_files": upload_count},
+        "ai_providers_configured": {"gemini": bool(gemini_client), "openai": bool(openai_client)},
+    }
+
+# --- Hidden Platform Owner Control Panel UI. NOT under /frontend, /assets,
+# /css or /js, NOT linked from index.html, and served only from
+# PLATFORM_PANEL_PATH. See platform/index.html + platform/js/app.js. ---
+@app.get(PLATFORM_PANEL_PATH)
+def serve_platform_panel_redirect():
+    # The page's relative <script src="app.js"> only resolves correctly under
+    # a trailing-slash URL - redirect once, serve the real page from there.
+    return RedirectResponse(url=PLATFORM_PANEL_PATH + "/")
+
+@app.get(PLATFORM_PANEL_PATH + "/")
+def serve_platform_panel():
+    path = PLATFORM_DIR / "index.html"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Not found.")
+    return FileResponse(str(path))
+
+@app.get(PLATFORM_PANEL_PATH + "/app.js")
+def serve_platform_panel_js():
+    path = PLATFORM_DIR / "js" / "app.js"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Not found.")
+    return FileResponse(str(path), media_type="application/javascript")
 
 # -----------------------------------------------------------------------------
 # PRODUCTION ROOT / HEALTH

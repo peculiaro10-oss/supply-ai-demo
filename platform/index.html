@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>Cauldra Ops Console</title>
+<script src="/assets/vendor/tailwindcss-3.4.17.js"></script>
+<link rel="stylesheet" href="/assets/vendor/fontawesome/css/all.min.css">
+<script>
+    tailwind.config = {
+        darkMode: 'class',
+        theme: {
+            extend: {
+                colors: {
+                    bgMain: '#070B14', sidebarBg: '#0A0F1D', cardBg: '#0D1322', cardHover: '#131C31',
+                    borderCol: '#172033', primary: '#436BEE', primaryHover: '#375BCC',
+                    textMain: '#E2E8F0', textSec: '#7C8BA1',
+                    success: '#1CA850', warning: '#EAB308', danger: '#D94141',
+                },
+                fontFamily: { sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'] },
+            },
+        },
+    };
+</script>
+<style>
+    body { background: #070B14; color: #E2E8F0; font-family: Inter, system-ui, -apple-system, sans-serif; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #070B14; }
+    ::-webkit-scrollbar-thumb { background: #172033; border-radius: 4px; }
+    .bar-track { background: #131C31; border-radius: 999px; overflow: hidden; height: 8px; }
+    .bar-fill { height: 100%; border-radius: 999px; transition: width .3s ease; }
+    [data-view] { display: none; }
+    [data-view].active { display: block; }
+    .stat-card { background: #0D1322; border: 1px solid #172033; border-radius: 1rem; padding: 1rem 1.15rem; }
+    .stat-value { font-size: 1.5rem; font-weight: 800; color: #E2E8F0; line-height: 1.15; }
+    .stat-label { font-size: 11px; color: #7C8BA1; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+    table.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table.data-table th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #7C8BA1; font-weight: 700; padding: 8px 10px; border-bottom: 1px solid #172033; white-space: nowrap; }
+    table.data-table td { padding: 9px 10px; border-bottom: 1px solid #131C31; color: #E2E8F0; vertical-align: middle; }
+    table.data-table tbody tr:hover { background: #0D1322; }
+    .table-scroll { overflow-x: auto; border: 1px solid #172033; border-radius: .85rem; }
+    .pill { display: inline-flex; align-items: center; gap: .3rem; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .02em; }
+</style>
+</head>
+<body class="min-h-screen">
+
+<!-- ============================== LOGIN ============================== -->
+<div id="login-screen" class="min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-sm">
+        <div class="flex items-center gap-2.5 justify-center mb-6">
+            <img src="/assets/cauldra-logo.png" alt="" class="w-9 h-9 rounded-lg object-contain">
+            <span class="font-extrabold text-sm tracking-wide uppercase text-textMain">Cauldra Ops</span>
+        </div>
+        <div class="bg-cardBg border border-borderCol rounded-2xl p-6 shadow-2xl">
+            <div id="login-status" class="hidden mb-3 px-3 py-2 rounded-xl border text-[11px]"></div>
+
+            <!-- Step 1: email + password -->
+            <form id="login-form-password" class="space-y-3">
+                <h1 class="font-bold text-sm text-textMain mb-1">Platform Owner Sign In</h1>
+                <div>
+                    <label class="block font-medium text-textSec mb-1 text-xs">Email</label>
+                    <input type="email" id="login-email" required autocomplete="username" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
+                </div>
+                <div>
+                    <label class="block font-medium text-textSec mb-1 text-xs">Password</label>
+                    <input type="password" id="login-password" required autocomplete="current-password" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
+                </div>
+                <button type="submit" id="login-submit-btn" class="w-full bg-primary hover:bg-primaryHover text-white py-2.5 rounded-xl font-semibold text-xs transition shadow-md cursor-pointer">Continue</button>
+            </form>
+
+            <!-- Step 2: TOTP -->
+            <form id="login-form-mfa" class="space-y-3 hidden">
+                <h1 class="font-bold text-sm text-textMain mb-1">Authentication Code</h1>
+                <p class="text-[11px] text-textSec leading-relaxed">Enter the 6-digit code from your authenticator app.</p>
+                <div>
+                    <input type="text" id="login-mfa-code" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"
+                           class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-center text-lg tracking-[0.4em] font-mono text-textMain focus:outline-none focus:border-primary" placeholder="000000">
+                </div>
+                <button type="submit" id="mfa-submit-btn" class="w-full bg-primary hover:bg-primaryHover text-white py-2.5 rounded-xl font-semibold text-xs transition shadow-md cursor-pointer">Verify</button>
+                <button type="button" id="mfa-back-btn" class="w-full text-textSec hover:text-textMain text-[11px] font-medium cursor-pointer">Back</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- ============================== APP SHELL ============================== -->
+<div id="app-shell" class="hidden min-h-screen flex">
+    <div id="mobile-nav-overlay" class="fixed inset-0 bg-black/60 z-40 hidden"></div>
+
+    <aside id="sidebar" class="fixed md:sticky top-0 h-screen w-[220px] bg-sidebarBg border-r border-borderCol flex flex-col shrink-0 z-50 -translate-x-full md:translate-x-0 transition-transform duration-200">
+        <div class="shrink-0 px-4 pt-4 pb-3 border-b border-borderCol/60">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2.5">
+                    <img src="/assets/cauldra-logo.png" alt="" class="w-7 h-7 rounded-lg object-contain">
+                    <span class="font-extrabold text-xs tracking-wide uppercase text-textMain">Cauldra Ops</span>
+                </div>
+                <button type="button" id="sidebar-close-btn" class="md:hidden w-7 h-7 rounded-lg bg-cardBg border border-borderCol text-textSec flex items-center justify-center"><i class="fa-solid fa-xmark text-xs"></i></button>
+            </div>
+        </div>
+        <nav class="flex-1 min-h-0 overflow-y-auto py-3 px-3 space-y-0.5 text-xs">
+            <button type="button" data-nav-link="overview" class="nav-link w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg font-medium cursor-pointer"><i class="fa-solid fa-gauge-high w-4"></i> Overview</button>
+            <button type="button" data-nav-link="businesses" class="nav-link w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg font-medium cursor-pointer"><i class="fa-solid fa-building w-4"></i> Businesses</button>
+            <button type="button" data-nav-link="users" class="nav-link w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg font-medium cursor-pointer"><i class="fa-solid fa-users w-4"></i> Users</button>
+            <button type="button" data-nav-link="subscriptions" class="nav-link w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg font-medium cursor-pointer"><i class="fa-solid fa-credit-card w-4"></i> Subscriptions</button>
+            <button type="button" data-nav-link="revenue" class="nav-link w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg font-medium cursor-pointer"><i class="fa-solid fa-sack-dollar w-4"></i> Revenue</button>
+            <button type="button" data-nav-link="ai-costs" class="nav-link w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg font-medium cursor-pointer"><i class="fa-solid fa-wand-magic-sparkles w-4"></i> AI &amp; Costs</button>
+            <button type="button" data-nav-link="alerts" class="nav-link w-full text-left flex items-center justify-between gap-2.5 px-2.5 py-2 rounded-lg font-medium cursor-pointer">
+                <span class="flex items-center gap-2.5"><i class="fa-solid fa-bell w-4"></i> Alerts</span>
+                <span id="alerts-nav-badge" class="hidden bg-danger text-white text-[9px] px-1.5 py-0.5 rounded-full font-bold">0</span>
+            </button>
+            <button type="button" data-nav-link="system-health" class="nav-link w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg font-medium cursor-pointer"><i class="fa-solid fa-heart-pulse w-4"></i> System Health</button>
+            <button type="button" data-nav-link="infrastructure" class="nav-link w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg font-medium cursor-pointer"><i class="fa-solid fa-server w-4"></i> Infrastructure</button>
+        </nav>
+        <div class="shrink-0 border-t border-borderCol px-3 py-3">
+            <div class="flex items-center justify-between px-2.5 py-2 rounded-lg bg-cardBg border border-borderCol text-xs">
+                <span id="sidebar-owner-email" class="text-textSec truncate max-w-[110px]"></span>
+                <button type="button" id="sign-out-btn" class="w-7 h-7 rounded-lg bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30 flex items-center justify-center shrink-0 cursor-pointer" title="Sign out"><i class="fa-solid fa-right-from-bracket text-xs"></i></button>
+            </div>
+        </div>
+    </aside>
+
+    <div class="flex-1 flex flex-col min-w-0">
+        <header class="h-14 border-b border-borderCol bg-sidebarBg/90 backdrop-blur-md px-3 sm:px-5 flex items-center justify-between sticky top-0 z-30">
+            <div class="flex items-center gap-3">
+                <button type="button" id="mobile-menu-btn" class="md:hidden w-8 h-8 rounded-lg bg-cardBg border border-borderCol text-textMain flex items-center justify-center"><i class="fa-solid fa-bars text-xs"></i></button>
+                <h1 id="page-title" class="font-bold text-sm text-textMain">Overview</h1>
+            </div>
+            <button type="button" id="refresh-btn" class="text-textSec hover:text-textMain w-8 h-8 rounded-lg bg-cardBg border border-borderCol flex items-center justify-center cursor-pointer" title="Refresh"><i class="fa-solid fa-rotate text-xs"></i></button>
+        </header>
+
+        <main class="flex-1 min-w-0 p-3 sm:p-5 space-y-4">
+            <div id="global-error" class="hidden px-3 py-2.5 rounded-xl border border-danger/30 bg-danger/10 text-danger text-xs"></div>
+
+            <!-- OVERVIEW -->
+            <div data-view="overview" class="space-y-4">
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div class="stat-card"><div class="stat-label">Total Businesses</div><div class="stat-value" data-ov="businesses.total">&mdash;</div><div class="text-[10px] text-textSec mt-1"><span data-ov="businesses.new_this_month">0</span> new this month</div></div>
+                    <div class="stat-card"><div class="stat-label">Total User Accounts</div><div class="stat-value" data-ov="users.total">&mdash;</div><div class="text-[10px] text-textSec mt-1"><span data-ov="users.new_this_month">0</span> new this month</div></div>
+                    <div class="stat-card"><div class="stat-label">Active Now</div><div class="stat-value" data-ov="users.active_now">&mdash;</div><div class="text-[10px] text-textSec mt-1"><span data-ov="users.active_today">0</span> active today</div></div>
+                    <div class="stat-card"><div class="stat-label">Paying Businesses</div><div class="stat-value" data-ov="businesses.paying">&mdash;</div><div class="text-[10px] text-textSec mt-1"><span data-ov="businesses.trial">0</span> on trial</div></div>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div class="stat-card">
+                        <div class="stat-label">Revenue This Month</div>
+                        <div class="stat-value" data-ov-money="revenue.this_month_naira">&mdash;</div>
+                        <button type="button" data-nav-link="revenue" class="text-[10px] text-primary font-semibold mt-2 cursor-pointer">View Revenue &rarr;</button>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">AI Spend This Month</div>
+                        <div class="stat-value" data-ov-money-usd="ai_spend.this_month_usd">&mdash;</div>
+                        <div class="text-[10px] text-textSec mt-1" data-ov-money="ai_spend.this_month_ngn">&nbsp;</div>
+                        <button type="button" data-nav-link="ai-costs" class="text-[10px] text-primary font-semibold mt-2 cursor-pointer">View AI &amp; Costs &rarr;</button>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Unresolved Alerts</div>
+                        <div class="stat-value" data-ov="alerts.unresolved">&mdash;</div>
+                        <div class="text-[10px] text-textSec mt-1"><span data-ov="alerts.critical">0</span> critical</div>
+                        <button type="button" data-nav-link="alerts" class="text-[10px] text-primary font-semibold mt-2 cursor-pointer">View Alerts &rarr;</button>
+                    </div>
+                </div>
+                <p class="text-[10px] text-textSec" id="overview-generated-at"></p>
+            </div>
+
+            <!-- BUSINESSES -->
+            <div data-view="businesses" class="space-y-3">
+                <div class="flex flex-col sm:flex-row gap-2">
+                    <input type="text" id="biz-search" placeholder="Search business name, code, or email&hellip;" class="flex-1 bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
+                    <select id="biz-plan-filter" class="bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
+                        <option value="">All plans</option>
+                        <option value="core">Core</option><option value="starter">Starter</option><option value="business">Business</option><option value="enterprise">Premium</option>
+                    </select>
+                </div>
+                <div class="table-scroll"><table class="data-table" id="businesses-table">
+                    <thead><tr><th>Business</th><th>Joined</th><th>Plan</th><th>Status</th><th>Users</th><th>Last Active</th><th>Lifetime Rev.</th><th>AI Credits</th><th>AI Cost</th></tr></thead>
+                    <tbody></tbody>
+                </table></div>
+                <div id="businesses-empty" class="hidden text-center py-8 text-textSec text-xs">No businesses found.</div>
+                <div class="flex items-center justify-between text-[11px] text-textSec">
+                    <span id="businesses-count"></span>
+                    <div class="flex gap-2"><button type="button" id="businesses-prev" class="px-3 py-1.5 rounded-lg bg-cardBg border border-borderCol cursor-pointer">Prev</button><button type="button" id="businesses-next" class="px-3 py-1.5 rounded-lg bg-cardBg border border-borderCol cursor-pointer">Next</button></div>
+                </div>
+            </div>
+
+            <!-- BUSINESS DETAIL -->
+            <div data-view="business-detail" class="space-y-4">
+                <button type="button" data-nav-link="businesses" class="text-[11px] text-primary font-semibold cursor-pointer"><i class="fa-solid fa-arrow-left mr-1"></i> Back to Businesses</button>
+                <div id="business-detail-content"></div>
+            </div>
+
+            <!-- USERS -->
+            <div data-view="users" class="space-y-3">
+                <div class="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                    <div class="stat-card !p-2.5"><div class="stat-label text-[9px]">Total</div><div class="stat-value !text-base" data-users-summary="total_users">&mdash;</div></div>
+                    <div class="stat-card !p-2.5"><div class="stat-label text-[9px]">New (mo.)</div><div class="stat-value !text-base" data-users-summary="new_this_month">&mdash;</div></div>
+                    <div class="stat-card !p-2.5"><div class="stat-label text-[9px]">Active Today</div><div class="stat-value !text-base" data-users-summary="active_today">&mdash;</div></div>
+                    <div class="stat-card !p-2.5"><div class="stat-label text-[9px]">Active (mo.)</div><div class="stat-value !text-base" data-users-summary="active_this_month">&mdash;</div></div>
+                    <div class="stat-card !p-2.5"><div class="stat-label text-[9px]">Returning</div><div class="stat-value !text-base" data-users-summary="returning">&mdash;</div></div>
+                </div>
+                <div class="flex flex-col sm:flex-row gap-2">
+                    <input type="text" id="users-search" placeholder="Search name, username, or email&hellip;" class="flex-1 bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
+                    <select id="users-role-filter" class="bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
+                        <option value="">All roles</option><option value="admin">Admin</option><option value="manager">Manager</option><option value="staff">Staff</option>
+                    </select>
+                    <label class="flex items-center gap-1.5 bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textSec cursor-pointer"><input type="checkbox" id="users-active-only"> Active now only</label>
+                </div>
+                <div class="table-scroll"><table class="data-table" id="users-table">
+                    <thead><tr><th>Name</th><th>Username</th><th>Email</th><th>Business</th><th>Role</th><th>Joined</th><th>Last Active</th><th></th></tr></thead>
+                    <tbody></tbody>
+                </table></div>
+                <div id="users-empty" class="hidden text-center py-8 text-textSec text-xs">No users found.</div>
+                <div class="flex items-center justify-between text-[11px] text-textSec">
+                    <span id="users-count"></span>
+                    <div class="flex gap-2"><button type="button" id="users-prev" class="px-3 py-1.5 rounded-lg bg-cardBg border border-borderCol cursor-pointer">Prev</button><button type="button" id="users-next" class="px-3 py-1.5 rounded-lg bg-cardBg border border-borderCol cursor-pointer">Next</button></div>
+                </div>
+            </div>
+
+            <!-- SUBSCRIPTIONS -->
+            <div data-view="subscriptions" class="space-y-4">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div class="stat-card">
+                        <div class="stat-label mb-2">By Status</div>
+                        <div id="subs-by-status" class="space-y-2"></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label mb-2">By Plan</div>
+                        <div id="subs-by-plan" class="space-y-2"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- REVENUE -->
+            <div data-view="revenue" class="space-y-4">
+                <div id="revenue-period-bar"></div>
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div class="stat-card"><div class="stat-label">Revenue (period)</div><div class="stat-value" data-rev-money="revenue_naira">&mdash;</div></div>
+                    <div class="stat-card"><div class="stat-label">Successful Payments</div><div class="stat-value" data-rev="successful_payments">&mdash;</div></div>
+                    <div class="stat-card"><div class="stat-label">Paying Businesses</div><div class="stat-value" data-rev="paying_businesses">&mdash;</div></div>
+                    <div class="stat-card"><div class="stat-label">Avg / Business</div><div class="stat-value" data-rev-money="average_revenue_per_business_naira">&mdash;</div></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label mb-1">All-Time Revenue</div>
+                    <div class="text-2xl font-extrabold text-primary" data-rev-money="all_time_revenue_naira">&mdash;</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label mb-2">Revenue by Plan</div>
+                    <div id="revenue-by-plan" class="space-y-2.5"></div>
+                </div>
+                <div>
+                    <div class="stat-label mb-2">Revenue by Business (top 50, this period)</div>
+                    <div class="table-scroll"><table class="data-table">
+                        <thead><tr><th>Business</th><th>Revenue</th><th>Payments</th><th>Last Payment</th></tr></thead>
+                        <tbody id="revenue-by-business-body"></tbody>
+                    </table></div>
+                    <div id="revenue-by-business-empty" class="hidden text-center py-8 text-textSec text-xs">No revenue recorded for this period.</div>
+                </div>
+            </div>
+
+            <!-- AI & COSTS -->
+            <div data-view="ai-costs" class="space-y-4">
+                <div id="ai-period-bar"></div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4" id="ai-provider-cards"></div>
+
+                <div class="stat-card">
+                    <div class="flex items-center justify-between mb-2">
+                        <div class="stat-label">By Feature</div>
+                    </div>
+                    <div class="table-scroll"><table class="data-table">
+                        <thead><tr><th>Feature</th><th>Provider</th><th>Requests</th><th>Cauldra Credits</th><th>Provider Cost</th><th>Avg / Request</th></tr></thead>
+                        <tbody id="ai-by-operation-body"></tbody>
+                    </table></div>
+                    <div id="ai-by-operation-empty" class="hidden text-center py-6 text-textSec text-xs">No AI usage recorded for this period.</div>
+                </div>
+
+                <div class="stat-card"><div class="stat-label">Failed AI Requests (period)</div><div class="stat-value" id="ai-failed-count">&mdash;</div></div>
+
+                <div class="stat-card space-y-3">
+                    <div class="stat-label">Settings &amp; Budgets</div>
+                    <p class="text-[10px] text-textSec leading-relaxed">Internal monitoring budgets and the USD&rarr;NGN rate used to estimate provider spend. These are NOT customer AI-credit allowances.</p>
+                    <form id="platform-settings-form" class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                        <div><label class="block font-medium text-textSec mb-1">USD &rarr; NGN rate</label><input type="number" step="0.01" min="0.01" id="setting-usd-ngn" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary"></div>
+                        <div></div>
+                        <div><label class="block font-medium text-textSec mb-1">Gemini monthly budget (NGN)</label><input type="number" step="1" min="0" id="setting-gemini-budget" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary"></div>
+                        <div><label class="block font-medium text-textSec mb-1">OpenAI monthly budget (NGN)</label><input type="number" step="1" min="0" id="setting-openai-budget" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary"></div>
+                        <div class="sm:col-span-2"><label class="block font-medium text-textSec mb-1">Alert thresholds (% of budget, comma-separated)</label><input type="text" id="setting-thresholds" placeholder="75, 85, 95" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary"></div>
+                        <div class="sm:col-span-2 flex justify-end"><button type="submit" class="bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-semibold transition cursor-pointer">Save Settings</button></div>
+                    </form>
+                </div>
+
+                <div class="stat-card space-y-3">
+                    <div class="stat-label">Provider Pricing ($ per 1,000 tokens)</div>
+                    <p class="text-[10px] text-textSec leading-relaxed">The ONLY inputs used to estimate provider cost from real token usage. Unconfigured models show no cost until set here.</p>
+                    <div id="ai-pricing-list" class="space-y-2"></div>
+                    <form id="ai-pricing-form" class="grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs pt-2 border-t border-borderCol">
+                        <input type="text" id="pricing-provider" placeholder="provider (e.g. gemini)" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                        <input type="text" id="pricing-model" placeholder="model" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                        <input type="number" step="0.0001" min="0" id="pricing-input-rate" placeholder="$/1k input" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                        <input type="number" step="0.0001" min="0" id="pricing-output-rate" placeholder="$/1k output" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                        <button type="submit" class="sm:col-span-4 bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-semibold transition cursor-pointer text-xs">Save Pricing</button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- ALERTS -->
+            <div data-view="alerts" class="space-y-3">
+                <div class="flex gap-2 text-xs">
+                    <button type="button" data-alert-filter="unresolved" class="alert-filter-btn px-3 py-1.5 rounded-lg border border-borderCol cursor-pointer">Unresolved</button>
+                    <button type="button" data-alert-filter="all" class="alert-filter-btn px-3 py-1.5 rounded-lg border border-borderCol cursor-pointer">All</button>
+                </div>
+                <div id="alerts-list" class="space-y-2"></div>
+                <div id="alerts-empty" class="hidden text-center py-8 text-textSec text-xs">No alerts.</div>
+            </div>
+
+            <!-- SYSTEM HEALTH -->
+            <div data-view="system-health" class="space-y-3">
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    <div class="stat-card"><div class="stat-label">Database</div><div class="stat-value" id="health-db-status">&mdash;</div></div>
+                    <div class="stat-card"><div class="stat-label">Failed AI (24h)</div><div class="stat-value" id="health-ai-failed">&mdash;</div></div>
+                    <div class="stat-card"><div class="stat-label">Failed Payments (24h)</div><div class="stat-value" id="health-payments-failed">&mdash;</div></div>
+                    <div class="stat-card"><div class="stat-label">Webhooks (24h)</div><div class="stat-value" id="health-webhooks">&mdash;</div></div>
+                    <div class="stat-card"><div class="stat-label">Critical Alerts</div><div class="stat-value" id="health-critical-alerts">&mdash;</div></div>
+                </div>
+                <p class="text-[10px] text-textSec" id="health-checked-at"></p>
+            </div>
+
+            <!-- INFRASTRUCTURE -->
+            <div data-view="infrastructure" class="space-y-3">
+                <div id="infra-note" class="px-3 py-2.5 rounded-xl border border-borderCol bg-cardBg text-[11px] text-textSec leading-relaxed"></div>
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    <div class="stat-card"><div class="stat-label">Storage Used</div><div class="stat-value" id="infra-storage">&mdash;</div></div>
+                    <div class="stat-card"><div class="stat-label">Files Stored</div><div class="stat-value" id="infra-files">&mdash;</div></div>
+                    <div class="stat-card"><div class="stat-label">Database</div><div class="stat-value !text-sm" id="infra-db-host">&mdash;</div></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label mb-2">AI Providers Configured</div>
+                    <div class="flex gap-3 text-xs" id="infra-ai-providers"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
