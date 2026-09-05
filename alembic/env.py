@@ -30,6 +30,26 @@ def run_migrations_offline() -> None:
     with context.begin_transaction():
         context.run_migrations()
 
+def _ensure_wide_alembic_version_column(connection) -> None:
+    """Alembic's own alembic_version.version_num column defaults to
+    VARCHAR(32) (see alembic.ddl.impl.DefaultImpl.version_table_impl) — too
+    narrow for this project's descriptive revision ids: several already
+    exceed 32 characters (e.g. "0018_platform_owner_control_panel" at 33,
+    "0019_general_catalog_identity_hardening" at 40), which makes Alembic's
+    own internal `UPDATE alembic_version SET version_num=...` fail with
+    "value too long for type character varying(32)" partway through ANY
+    fresh `alembic upgrade head` run — discovered while verifying migration
+    0019 against a disposable test database. Fixed here, once, for every
+    invocation: idempotent and safe whether the table is missing, already
+    narrower, or already wide enough. Touches only Alembic's own bookkeeping
+    table — never an application table, never Base.metadata."""
+    connection.exec_driver_sql(
+        "CREATE TABLE IF NOT EXISTS alembic_version ("
+        "version_num VARCHAR(255) NOT NULL, "
+        "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+    )
+    connection.exec_driver_sql("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)")
+
 def run_migrations_online() -> None:
     connectable = config.attributes.get("connection")
     if connectable is None:
@@ -51,10 +71,13 @@ def run_migrations_online() -> None:
                 explicit_schemas = connection.exec_driver_sql("SELECT current_schemas(false)").scalar_one()
                 if current_schema != test_schema or list(explicit_schemas or []) != [test_schema]:
                     raise RuntimeError("Alembic did not bind exclusively to the isolated test schema.")
+                _ensure_wide_alembic_version_column(connection)
                 context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
                 with context.begin_transaction():
                     context.run_migrations()
         else:
+            with connection.begin():
+                _ensure_wide_alembic_version_column(connection)
             context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
             with context.begin_transaction():
                 context.run_migrations()

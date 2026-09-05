@@ -34,6 +34,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from passlib.context import CryptContext
 import jwt
 from jwt.exceptions import InvalidTokenError as JWTError
@@ -1279,6 +1280,19 @@ class GeneralCatalog(Base):
     forward. The column stays physically present (nullable-safe default)
     rather than being dropped, so existing PostgreSQL rows and any pending
     Alembic history are never disturbed by a purely behavioral change.
+
+    Identity rules (see general_catalog_key_for() / auto_upsert_general_
+    catalog() / upsert_general_catalog_identity()): a barcode, when present,
+    is the EXACT shared identity (never fuzzy). Without a barcode, identity
+    is a normalized (name, size) pair — `category` is excluded entirely, and
+    `size` is unit-normalized (50cl == 500ml == 0.5L) but a vague word like
+    "medium"/"large"/"family" is NEVER treated as a physical measurement.
+    Fuzzy name similarity is used only to SUGGEST possible existing rows for
+    manual/future review — it never causes an automatic merge. Once a field
+    here is non-empty, only a strictly more-trusted source (an external
+    provider lookup outranks a business's own submission) may replace it —
+    a later, lower-trust submission that disagrees is silently ignored for
+    that field rather than corrupting an already-established identity.
     """
     __tablename__ = "general_catalog"
     id = Column(Integer, primary_key=True, index=True)
@@ -3364,24 +3378,284 @@ def serialize_business(b: BusinessProfile) -> dict:
         "subscription_plan": (b.subscription_plan or "starter").lower(), "billing_interval": b.billing_interval or "monthly",
     }
 
-def auto_upsert_general_catalog(db: Session, product: Product):
+# =============================================================================
+# GENERAL CATALOG IDENTITY (hardening pass)
+#
+# Canonical-identity rules for the shared, business-agnostic product registry
+# (see the GeneralCatalog class docstring for what this table may/may not
+# contain). Two identity regimes:
+#
+#   BARCODE products: the normalized barcode IS the identity. Exact match
+#   only, never fuzzy. catalog_key = f"barcode:{normalized_barcode}".
+#
+#   NO-BARCODE products: identity is a normalized (name, size) pair.
+#   `category` is deliberately EXCLUDED (see GeneralCatalog docstring — a
+#   business's category choice is not shared identity: two businesses can
+#   file the same charger under "Electronics" and "Accessories" and it must
+#   still be the SAME catalog identity). Size is unit-normalized (50cl ==
+#   500ml == 0.5L) so equivalent measurements match, but vague words
+#   ("medium", "large", "family"...) are NEVER treated as a size — an
+#   un-parseable size falls back to "no verified size" rather than guessing.
+#   catalog_key = f"name:{normalized_name}|size:{normalized_size_or_none}".
+#
+#   This EXACT-KEY match is intentionally the ONLY thing that ever causes an
+#   automatic reuse/merge. A near-miss (similar but not identical name/size)
+#   is, at most, logged for future manual/human review (see
+#   find_general_catalog_candidates()) — it is NEVER silently auto-merged.
+#   That asymmetry (exact merge vs. logged-only near-miss) is deliberate:
+#   "Coca-Cola Original 500ml" and "Coca-Cola Zero 500ml" must never become
+#   the same identity just because they are mostly textually similar, and
+#   "Medium Coca-Cola" (no verified size) must never be assumed to be the
+#   500ml Coca-Cola some other business already registered.
+# =============================================================================
+
+# A small, fixed set of unit spellings this project is willing to convert
+# between, because the conversion is exact and unambiguous. Deliberately
+# does NOT include vague, non-physical size words ("medium", "large",
+# "family", "regular", "big", "small", "jumbo", ...) — those describe a
+# business's own packaging tier, not a verifiable physical measurement, and
+# guessing a number for them would fabricate identity that was never there.
+_CATALOG_SIZE_UNIT_TO_ML = {"ml": 1.0, "cl": 10.0, "l": 1000.0, "litre": 1000.0, "liter": 1000.0}
+_CATALOG_SIZE_UNIT_TO_G = {"g": 1.0, "gram": 1.0, "kg": 1000.0, "kilogram": 1000.0}
+_CATALOG_SIZE_RE = re.compile(r"^(\d+(?:[.,]\d+)?)(ml|cl|l|litre|liter|g|gram|kg|kilogram)s?$", re.IGNORECASE)
+_CATALOG_VAGUE_SIZE_WORDS = {
+    "small", "medium", "large", "big", "family", "regular", "jumbo", "mini",
+    "extra large", "xl", "xs", "sm", "md", "lg", "standard", "value", "party",
+}
+
+
+def normalize_catalog_size(value: Optional[str]) -> Optional[str]:
+    """Canonical form for GENERAL CATALOG identity matching ONLY — a
+    deliberately separate concern from the business-scoped duplicate
+    detector's _dup_norm_size() (which skips unit conversion on purpose for
+    a different reason; see its own docstring). Converts a recognized
+    "<number><unit>" size to one canonical string in that measurement
+    family's base unit (ml for volume, g for weight) — "50cl", "500ml" and
+    "0.5l" all normalize to "500ml"; "1kg" and "1000g" both normalize to
+    "1000g".
+
+    Returns None for anything that isn't a confidently-parsed physical
+    measurement: blank input, a vague packaging word ("medium", "family",
+    ...), or free text that doesn't match "<number><unit>" at all. None
+    means "no verified size" and is never assumed to match another None as
+    if they were proven identical (see general_catalog_key_for(), which
+    encodes this explicitly as its own 'size:none' bucket rather than
+    treating two unknown sizes as evidence of sameness).
+    """
+    raw = (value or "").strip().casefold()
+    if not raw:
+        return None
+    compact_spaced = re.sub(r"\s+", " ", raw).strip()
+    if compact_spaced in _CATALOG_VAGUE_SIZE_WORDS:
+        return None
+    no_space = raw.replace(" ", "")
+    match = _CATALOG_SIZE_RE.match(no_space)
+    if not match:
+        return None
+    number_str, unit = match.group(1).replace(",", "."), match.group(2).lower()
+    try:
+        number = float(number_str)
+    except ValueError:
+        return None
+    if number <= 0:
+        return None
+    if unit in _CATALOG_SIZE_UNIT_TO_ML:
+        base_value, base_unit = number * _CATALOG_SIZE_UNIT_TO_ML[unit], "ml"
+    elif unit in _CATALOG_SIZE_UNIT_TO_G:
+        base_value, base_unit = number * _CATALOG_SIZE_UNIT_TO_G[unit], "g"
+    else:
+        return None
+    # Whole numbers print without a decimal point ("500ml" not "500.0ml").
+    if base_value == int(base_value):
+        number_repr = str(int(base_value))
+    else:
+        number_repr = f"{base_value:.3f}".rstrip("0").rstrip(".")
+    return f"{number_repr}{base_unit}"
+
+
+def general_catalog_key_for(barcode: Optional[str], name: Optional[str], size: Optional[str]) -> str:
+    """The one place that decides General Catalog identity. `barcode` must
+    already be normalize_barcode()-normalized by the caller; when present it
+    is authoritative and exact. Otherwise identity is normalized name +
+    normalized size — deliberately never category (see class docstring) and
+    never a fuzzy/similarity score (see the module note above)."""
+    if barcode:
+        return f"barcode:{barcode}"
+    normalized_name = _dup_norm_name(name)
+    normalized_size = normalize_catalog_size(size)
+    return f"name:{normalized_name}|size:{normalized_size or 'none'}"
+
+
+def find_general_catalog_candidates(db: Session, name: Optional[str], size: Optional[str], limit: int = 5) -> List[dict]:
+    """Best-effort, READ-ONLY fuzzy suggestions for a no-barcode identity
+    that did not exactly match an existing catalog_key. NEVER used to
+    auto-merge or auto-reuse anything (see the module note above) — this is
+    operational visibility / a building block for a future confirmation UI,
+    not a decision-maker. Barcode-keyed rows are excluded (barcode identity
+    is exact-only, never fuzzy)."""
+    normalized_size = normalize_catalog_size(size)
+    try:
+        rows = db.query(GeneralCatalog).filter(GeneralCatalog.barcode.is_(None)).all()
+    except Exception:
+        return []
+    candidates = []
+    for row in rows:
+        similarity = _dup_name_similarity(name, row.product_name)
+        if similarity < DUP_NAME_SIMILAR_MIN:
+            continue
+        row_size = normalize_catalog_size(row.size)
+        size_match = bool(normalized_size) and bool(row_size) and normalized_size == row_size
+        candidates.append({
+            "catalog_key": row.catalog_key, "product_name": row.product_name,
+            "brand": row.brand, "size": row.size,
+            "name_similarity": round(similarity, 3), "size_match": size_match,
+        })
+    candidates.sort(key=lambda c: (c["size_match"], c["name_similarity"]), reverse=True)
+    return candidates[:limit]
+
+
+# Trust order for _general_catalog_apply_safe_update(): a value confirmed by
+# an external provider outranks a business's own free-text submission. Used
+# ONLY to decide whether an incoming write may REPLACE an existing non-empty
+# value — filling a genuinely missing field never needs any trust at all.
+_GENERAL_CATALOG_SOURCE_TRUST = {"business_submission": 1, "upcitemdb": 2}
+
+
+def _general_catalog_source_trust(source: Optional[str]) -> int:
+    return _GENERAL_CATALOG_SOURCE_TRUST.get(source or "", 0)
+
+
+def _general_catalog_apply_safe_update(item: "GeneralCatalog", *, product_name: Optional[str],
+                                        brand: Optional[str], size: Optional[str],
+                                        barcode: Optional[str], source: str) -> bool:
+    """THE anti-corruption rule: fills a genuinely missing field from any
+    source, but once a field is non-empty, only a strictly-more-trusted
+    incoming source (upcitemdb > business_submission) may replace it with a
+    DIFFERENT value. A business_submission can never downgrade/overwrite an
+    existing non-empty value it disagrees with — that field is silently left
+    exactly as it was (no error, no data loss: the business's OWN Product
+    row is completely unaffected either way; only the SHARED catalog
+    identity is protected from a later, lower-confidence edit). Returns True
+    if anything was actually written, so callers can skip a pointless
+    updated_at bump when nothing changed."""
+    changed = False
+    incoming_trust = _general_catalog_source_trust(source)
+
+    def _maybe_set(attr: str, new_value):
+        nonlocal changed
+        if new_value is None or (isinstance(new_value, str) and not new_value.strip()):
+            return
+        current = getattr(item, attr)
+        if current is None or (isinstance(current, str) and not current.strip()):
+            setattr(item, attr, new_value)
+            changed = True
+            return
+        if current == new_value:
+            return
+        if incoming_trust > _general_catalog_source_trust(item.source):
+            setattr(item, attr, new_value)
+            changed = True
+        # else: an established, non-empty value — a lower-or-equal-trust
+        # submission that disagrees never overwrites it.
+
+    _maybe_set("product_name", product_name)
+    _maybe_set("brand", brand)
+    _maybe_set("size", size)
+    _maybe_set("barcode", barcode)
+
+    if incoming_trust > _general_catalog_source_trust(item.source):
+        item.source = source
+        changed = True
+    if changed:
+        item.updated_at = datetime.utcnow()
+    return changed
+
+
+def _general_catalog_atomic_get_or_create(db: Session, *, key: str, barcode: Optional[str],
+                                           product_name: str, brand: Optional[str],
+                                           size: Optional[str], source: str) -> "GeneralCatalog":
+    """PostgreSQL-safe upsert: an INSERT ... ON CONFLICT DO NOTHING targeting
+    whichever unique column applies (barcode when present, catalog_key
+    otherwise), immediately followed by the authoritative SELECT. This
+    closes the classic "SELECT finds nothing, then two concurrent requests
+    both INSERT" race (e.g. two businesses scanning the same brand-new
+    barcode within milliseconds of each other) at the database level:
+    whichever request's INSERT actually lands wins, the other silently
+    no-ops and reads back the SAME row, and neither raises an unhandled
+    IntegrityError or a user-facing 500."""
+    now = datetime.utcnow()
+    conflict_column = "barcode" if barcode else "catalog_key"
+    stmt = pg_insert(GeneralCatalog.__table__).values(
+        barcode=barcode, catalog_key=key, product_name=product_name,
+        brand=brand, size=size, source=source, category="General",
+        created_at=now, updated_at=now,
+    ).on_conflict_do_nothing(index_elements=[conflict_column])
+    db.execute(stmt)
+    db.flush()
+
+    item = db.query(GeneralCatalog).filter(GeneralCatalog.catalog_key == key).first()
+    if item is None and barcode:
+        # Extremely unlikely (catalog_key is deterministic from barcode) but
+        # cheap insurance against a legacy row whose catalog_key format
+        # predates this scheme for the same barcode.
+        item = db.query(GeneralCatalog).filter(GeneralCatalog.barcode == barcode).first()
+    if item is None:
+        raise RuntimeError(f"General Catalog upsert did not produce a row for key {key!r}.")
+    return item
+
+
+def auto_upsert_general_catalog(db: Session, product: Product) -> None:
     """Every business's own product create/edit quietly contributes its safe
     IDENTITY (name/barcode/size) to the shared catalog, so a later business
-    scanning the same barcode gets an instant Cauldra-catalog hit instead of
-    needing UPCitemdb. Deliberately never writes `category` (see
-    GeneralCatalog docstring — a business's category choice is not shared
-    identity) and never touches price/quantity/warehouse/supplier/business_id
-    — none of that is part of this model at all."""
-    barcode=normalize_barcode(product.barcode)
-    key=f"barcode:{barcode}" if barcode else f"name:{(product.name or '').strip().casefold()}|category:{(product.category or 'General').strip().casefold()}"
-    item=db.query(GeneralCatalog).filter(GeneralCatalog.catalog_key==key).first()
-    if item:
-        item.product_name=product.name or item.product_name; item.size=product.size or item.size; item.barcode=barcode or item.barcode; item.updated_at=datetime.utcnow(); return
-    if barcode:
-        item=db.query(GeneralCatalog).filter(GeneralCatalog.barcode==barcode).first()
-        if item:
-            item.catalog_key=f"barcode:{barcode}"; item.product_name=product.name or item.product_name; item.size=product.size or item.size; item.updated_at=datetime.utcnow(); return
-    db.add(GeneralCatalog(barcode=barcode,catalog_key=key,product_name=product.name,size=product.size,source="business_submission"))
+    scanning the same barcode or entering the same no-barcode product gets
+    an instant Cauldra-catalog hit. Never writes `category` (see
+    GeneralCatalog docstring) and never touches price/quantity/warehouse/
+    supplier/business_id — none of those exist on this model at all.
+
+    Race-safe (_general_catalog_atomic_get_or_create) and corruption-safe
+    (_general_catalog_apply_safe_update): this business's own submission can
+    create a brand-new shared identity or FILL a missing field on an
+    existing one, but can never overwrite an already-established canonical
+    value it merely disagrees with. Wrapped in its own SAVEPOINT so that a
+    General Catalog hiccup (a race, a transient DB error, a logic bug) can
+    NEVER fail the caller's own product create/edit — only this best-effort
+    shared-knowledge contribution is rolled back, nothing else pending in
+    the session."""
+    barcode = normalize_barcode(product.barcode)
+    if not barcode and not _dup_norm_name(product.name):
+        return  # nothing safely identifiable to contribute (e.g. a blank name)
+    key = general_catalog_key_for(barcode, product.name, product.size)
+    try:
+        with db.begin_nested():
+            existing = db.query(GeneralCatalog).filter(GeneralCatalog.catalog_key == key).first()
+            if existing is None and barcode:
+                existing = db.query(GeneralCatalog).filter(GeneralCatalog.barcode == barcode).first()
+            if existing is not None:
+                _general_catalog_apply_safe_update(
+                    existing, product_name=product.name, brand=None, size=product.size,
+                    barcode=barcode, source="business_submission",
+                )
+                return
+            if not barcode:
+                try:
+                    candidates = find_general_catalog_candidates(db, product.name, product.size, limit=1)
+                    if candidates:
+                        print(f"[general-catalog] new no-barcode identity {key!r} resembles existing "
+                              f"{candidates[0]['catalog_key']!r} (name_similarity={candidates[0]['name_similarity']}, "
+                              f"size_match={candidates[0]['size_match']}) — NOT auto-merged; review manually if needed.")
+                except Exception:
+                    pass
+            _general_catalog_atomic_get_or_create(
+                db, key=key, barcode=barcode, product_name=product.name,
+                brand=None, size=product.size, source="business_submission",
+            )
+    except Exception as exc:
+        # The SAVEPOINT above is already rolled back by this point — only
+        # this catalog contribution is undone; the caller's own pending
+        # product create/edit (and anything else in this session) is
+        # completely unaffected.
+        print(f"[general-catalog] auto-contribution failed (product unaffected): {type(exc).__name__}: {exc}")
+
 
 def lookup_general_catalog(db: Session, barcode: str) -> Optional["GeneralCatalog"]:
     """Exact-barcode General Catalog read — the one query every barcode chain
@@ -3391,27 +3665,31 @@ def lookup_general_catalog(db: Session, barcode: str) -> Optional["GeneralCatalo
     request. `barcode` must already be normalize_barcode()-normalized."""
     return db.query(GeneralCatalog).filter(GeneralCatalog.barcode == barcode).first()
 
+
 def upsert_general_catalog_identity(db: Session, barcode: str, product_name: str, brand: Optional[str], size: Optional[str], source: str) -> "GeneralCatalog":
     """Cache a SAFE identity result (product_name/brand/size only — see
     GeneralCatalog docstring) under an exact barcode key, called after a
     successful UPCitemdb lookup so the same barcode never needs a second
-    external request from any business. Idempotent: a repeat call for the
-    same barcode updates the existing row instead of creating a duplicate
-    (the column's own unique index would reject a duplicate anyway)."""
-    key = f"barcode:{barcode}"
-    item = db.query(GeneralCatalog).filter(GeneralCatalog.catalog_key == key).first()
-    if not item:
-        item = db.query(GeneralCatalog).filter(GeneralCatalog.barcode == barcode).first()
-    if item:
-        item.product_name = product_name or item.product_name
-        item.brand = brand if brand is not None else item.brand
-        item.size = size if size is not None else item.size
-        item.updated_at = datetime.utcnow()
-        return item
-    item = GeneralCatalog(barcode=barcode, catalog_key=key, product_name=product_name, brand=brand, size=size, source=source)
-    db.add(item)
-    db.flush()
-    return item
+    external request from any business. Race-safe
+    (_general_catalog_atomic_get_or_create) and corruption-safe
+    (_general_catalog_apply_safe_update) — the caller (catalog_barcode_lookup)
+    already wraps this call in its own try/except + rollback, so any
+    unexpected failure here degrades to 'return the UPCitemdb identity
+    without caching it' rather than a user-facing error."""
+    key = general_catalog_key_for(barcode, product_name, size)
+    existing = db.query(GeneralCatalog).filter(GeneralCatalog.catalog_key == key).first()
+    if existing is None:
+        existing = db.query(GeneralCatalog).filter(GeneralCatalog.barcode == barcode).first()
+    if existing is not None:
+        _general_catalog_apply_safe_update(
+            existing, product_name=product_name, brand=brand, size=size,
+            barcode=barcode, source=source,
+        )
+        return existing
+    return _general_catalog_atomic_get_or_create(
+        db, key=key, barcode=barcode, product_name=product_name,
+        brand=brand, size=size, source=source,
+    )
 
 def business_local_today(db: Session, business_id: int) -> str:
     business = db.query(BusinessProfile).filter(BusinessProfile.id == business_id).first()
@@ -5974,9 +6252,12 @@ def products_duplicate_check(req: ProductDuplicateCheckRequest, user: User = Dep
     """Read-only, business-scoped. Powers the live non-blocking 'similar
     product already in inventory' hint and the pre-save check. The blocking
     guarantee still lives in the create/edit endpoints (see
-    _dup_enforce_or_raise) - this endpoint only informs the UI."""
-    if user.role == "staff":
-        raise HTTPException(status_code=403, detail="Staff accounts cannot add products.")
+    _dup_enforce_or_raise) - this endpoint only informs the UI.
+
+    Staff MAY call this: it is part of the same Add Product workflow Staff
+    are now allowed to use (see create_product below), and it never
+    mutates anything - only the blocking check in create_product/
+    update_product is authoritative."""
     if not (req.name or "").strip():
         return {"duplicate_detected": False, "duplicate_level": "none", "score": 0,
                 "matched_signals": [], "candidate": None, "candidates": [], "hint_candidate": None}
@@ -5991,7 +6272,9 @@ def products_duplicate_check(req: ProductDuplicateCheckRequest, user: User = Dep
 @app.post("/products/")
 def create_product(data: ProductCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_offline_replay_identity(request, user)
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot add products.")
+    # Staff MAY create products (Add Product is a normal Staff duty) —
+    # Edit (update_product), Delete (delete_product), and Transfer
+    # (transfer_stock) remain Manager/Admin(+approval) only, unchanged.
     client_ref = (data.client_ref or "").strip()[:100] or None
     claim, replay = claim_idempotent_mutation(
         db, user.business_id, "product_create", client_ref,
@@ -9011,7 +9294,10 @@ def upload_price_list(payload: PriceListUploadRequest, user: User = Depends(get_
 # -----------------------------------------------------------------------------
 @app.post("/catalog/barcode-lookup")
 def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot add products.")
+    # Staff MAY use barcode lookup — it is part of the Add Product
+    # workflow Staff are now allowed to use (see create_product). POS/New
+    # Sale scanning never calls this endpoint regardless of role (see the
+    # section comment above).
     barcode = normalize_barcode(req.barcode)
     if not barcode:
         raise HTTPException(status_code=400, detail="Please scan or enter a valid barcode.")
