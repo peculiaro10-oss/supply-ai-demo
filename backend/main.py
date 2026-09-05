@@ -4294,6 +4294,16 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
     if billing_interval not in ("monthly", "annual"):
         billing_interval = "monthly"
 
+    # The account owner's email MUST be the exact address that was actually
+    # Supabase-verified during onboarding (auth_row.email) - never trusted
+    # just because it was typed into this later form. Checked BEFORE the
+    # one-time OnboardingAuthorization row is consumed below, so a genuine
+    # typo can be corrected and resubmitted without burning the already-
+    # verified payment method.
+    verified_email = str(auth_row.email or "").strip().lower()
+    if verified_email and str(data.owner_email).strip().lower() != verified_email:
+        raise HTTPException(status_code=400, detail="The account owner's email must match the email address you verified. Please use that same email, or verify a new one before continuing.")
+
     country_values = canonical_business_country_values(data.country, data.country_code, data.language)
     language = str(data.language or "en").strip().lower() or "en"
     canonical_owner_phone = canonical_phone_for_country(data.owner_phone, country_values["phone_country_code"])
@@ -4352,6 +4362,14 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
             firstname=data.firstname, lastname=data.lastname, position=data.position or "Admin",
             email=str(data.owner_email), phone=canonical_owner_phone, business_id=new_biz.id,
             must_change_password=False, disabled=False, auth_version=1, created_at=now,
+            # Safe to stamp directly (not via a live Supabase call): the
+            # owner_email == auth_row.email match above already proves this
+            # exact address was Supabase-verified earlier in this same
+            # onboarding session, and auth_row.status was independently
+            # confirmed as "verified" before this transaction began. Only
+            # stamped when that match was actually established (never
+            # unconditionally) - see the `verified_email` check above.
+            email_verified_at=(now if verified_email else None),
         )
         db.add(admin)
         db.flush()
@@ -5194,6 +5212,56 @@ def cancel_my_email_change(user: User = Depends(get_authenticated_user), db: Ses
     user.pending_email = None
     db.commit()
     return {"message": "Email change cancelled."}
+
+
+@app.post("/users/me/email-verify")
+def start_my_email_verify(request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    """Send/resend a verification link for the CURRENT account email - distinct
+    from /users/me/email-change above, which only ever verifies a NEW,
+    different address. This is what lets an admin created at registration
+    (self-healed via _refresh_email_verified_mirror on next profile load) or
+    an employee created by create_user (never verified at all until this is
+    used) prove control of the email already on their account. Reuses the
+    exact same Supabase magic-link mechanism, rate-limit helper, and audit
+    trail as every other verification flow in this file - no new mechanism."""
+    _refresh_email_verified_mirror(db, user)
+    if user.email_verified_at:
+        db.commit()
+        return {"message": "Your email is already verified.", "already_verified": True}
+    check_rate_limit(db, "user-email-verify", user.email)
+    auth = _supabase_auth_or_503()
+    try:
+        auth.sign_in_with_otp({
+            "email": user.email,
+            "options": {"email_redirect_to": _supabase_email_verify_redirect(request, "", "", purpose="self_verify"), "should_create_user": True},
+        })
+    except Exception as exc:
+        detail = str(getattr(exc, "message", "") or exc).lower()
+        record_failure(db, "user-email-verify", user.email)
+        db.commit()
+        if any(m in detail for m in ("rate", "limit", "too many", "seconds", "429")):
+            raise HTTPException(status_code=429, detail="Please wait a little before requesting another verification email.") from exc
+        raise HTTPException(status_code=502, detail="We couldn't send the verification email right now. Please try again.") from exc
+    add_audit(db, user, "USER_EMAIL_VERIFICATION_REQUESTED", "Requested a verification email for the current account email.")
+    db.commit()
+    return {"message": "Verification email sent. Check your inbox.", "already_verified": False}
+
+
+@app.post("/users/me/email-verify/confirm")
+def confirm_my_email_verify(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    """The browser can never assert verification - this takes no body at all
+    and re-checks with Supabase every time (via the same mirror-refresh helper
+    /users/me/profile already uses), exactly like /users/me/email-change/confirm."""
+    already = bool(user.email_verified_at)
+    _refresh_email_verified_mirror(db, user)
+    if not user.email_verified_at:
+        db.commit()
+        raise HTTPException(status_code=409, detail="Your email has not been verified yet. Open the link we emailed you, then try again.")
+    if not already:
+        add_audit(db, user, "USER_EMAIL_VERIFIED", "Verified the account email address.")
+    db.commit()
+    db.refresh(user)
+    return _user_profile_payload(db, user)
 
 
 @app.get("/users")
@@ -9894,7 +9962,7 @@ def onboarding_payment_confirm(data: OnboardingPaymentConfirmRequest, request: R
     if row.status == "verified":
         refund = ensure_verification_refund(db, row, reference, row.paystack_transaction_id)
         return {"status": "verified", "plan": row.plan, "billing_interval": row.billing_interval,
-                "card_last4": row.card_last4, "card_type": row.card_type,
+                "card_last4": row.card_last4, "card_type": row.card_type, "email": row.email,
                 "already_processed": True, **refund}
     if row.status == "consumed":
         raise HTTPException(status_code=409, detail="This payment verification has already been used to register a business.")
@@ -9937,7 +10005,7 @@ def onboarding_payment_confirm(data: OnboardingPaymentConfirmRequest, request: R
     db.commit()
     db.refresh(row)
     if rows_updated == 0:
-        return {"status": row.status, "plan": row.plan, "billing_interval": row.billing_interval, "already_processed": True}
+        return {"status": row.status, "plan": row.plan, "billing_interval": row.billing_interval, "email": row.email, "already_processed": True}
 
     try:
         row.paystack_customer_code = paystack_get_or_create_customer(row.email)
@@ -9950,8 +10018,10 @@ def onboarding_payment_confirm(data: OnboardingPaymentConfirmRequest, request: R
 
     # Card brand/last4 only — never the authorization_code, which stays
     # server-side and is only ever used in outbound Paystack API calls.
+    # `email` lets the frontend reliably prefill the registration form's
+    # owner-email field with the address that was actually verified.
     return {"status": "verified", "plan": row.plan, "billing_interval": row.billing_interval,
-            "card_last4": row.card_last4, "card_type": row.card_type, **refund}
+            "card_last4": row.card_last4, "card_type": row.card_type, "email": row.email, **refund}
 
 
 class TrialInitRequest(BaseModel):

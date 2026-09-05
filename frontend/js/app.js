@@ -1231,6 +1231,10 @@
                     emailChangeSent: "Verification email sent. Your current email stays active until you confirm the new one.",
                     emailChangeConfirmed: "Email address updated and verified.",
                     emailNotVerifiedYet: "That address is not verified yet. Open the link we emailed you, then try again.",
+                    verifyNow: "Verify now",
+                    verifyEmailSent: "Verification email sent. Check your inbox.",
+                    emailVerifiedSuccess: "Email verified.",
+                    emailVerifiedReturnSignedOut: "Your email has been verified. Please sign in to Cauldra to continue.",
                 },
                 navigation: {
                     groupMain: "Main", groupManagement: "Management", groupIntelligence: "Intelligence", groupSystem: "System",
@@ -17139,6 +17143,8 @@
                     ? `<span class="text-success"><i class="fa-solid fa-circle-check"></i> ${escapeHtml(t("profile.verified"))}</span>`
                     : `<span class="text-textSec"><i class="fa-solid fa-circle-exclamation"></i> ${escapeHtml(t("profile.unverified"))}</span>`;
             }
+            const verifyBtn = document.getElementById("profile-verify-email-btn");
+            if (verifyBtn) verifyBtn.classList.toggle("hidden", !!u.email_verified);
             const pendingWrap = document.getElementById("profile-pending-email");
             if (pendingWrap) {
                 pendingWrap.classList.toggle("hidden", !u.pending_email);
@@ -17317,6 +17323,51 @@
             currentUserProfile = { ...currentUserProfile, pending_email: null };
             if (myProfileState && myProfileState.user) myProfileState.user.pending_email = null;
             renderMyProfile();
+        }
+
+        // Verifies the CURRENT account email (distinct from startMyEmailChange,
+        // which is only for a NEW, different address). Also doubles as the
+        // "resend" action - clicking it again while unverified simply re-sends,
+        // subject to the same backend rate limiting.
+        async function startMyEmailVerify() {
+            const btn = document.getElementById("profile-verify-email-btn");
+            if (btn) btn.disabled = true;
+            try {
+                const res = await fetch(`${API_URL}/users/me/email-verify`, {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${authToken}` },
+                });
+                const out = await res.json().catch(() => null);
+                if (!res.ok) throw new Error((out && out.detail) || "request failed");
+                showToast(out.message || t("profile.verifyEmailSent"), "success");
+            } catch (err) {
+                showToast(friendlyErrorMessage(err.message, t("profile.profileSaveFailed")), "error");
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        // The browser can never assert verification - this always re-checks
+        // with the backend, which itself re-checks Supabase every time.
+        async function confirmMyEmailVerify() {
+            try {
+                const res = await fetch(`${API_URL}/users/me/email-verify/confirm`, {
+                    method: "POST", headers: { "Authorization": `Bearer ${authToken}` },
+                });
+                const out = await res.json().catch(() => null);
+                if (res.status === 409) { showToast(t("profile.emailNotVerifiedYet"), "info"); return false; }
+                if (!res.ok) throw new Error((out && out.detail) || "confirm failed");
+                myProfileState = out;
+                if (out.user) currentUserProfile = { ...currentUserProfile, ...out.user };
+                renderMyProfile();
+                renderAuthButton();
+                renderMobileNav();
+                showToast(t("profile.emailVerifiedSuccess"), "success");
+                return true;
+            } catch (err) {
+                showToast(friendlyErrorMessage(err.message, t("profile.profileSaveFailed")), "error");
+                return false;
+            }
         }
 
         // Reuses the EXISTING secure change-password flow (current-password
@@ -18296,7 +18347,19 @@
             const accessToken = hashParams.get('access_token') || '';
             const evPlan = params.get('ev_plan') || '';
             const evInterval = params.get('ev_interval') || '';
+            const evPurpose = params.get('ev_purpose') || '';
             window.history.replaceState({}, document.title, window.location.pathname);
+            if (evPurpose === 'self_verify') {
+                // An existing user (admin or employee) verifying their OWN current
+                // email from their profile - completely separate from the
+                // onboarding/register-a-new-business flow below.
+                if (!authToken) {
+                    showToast(t("profile.emailVerifiedReturnSignedOut"), "success");
+                    return;
+                }
+                await confirmMyEmailVerify();
+                return;
+            }
             if (!publicPlanCatalog) { try { await loadPublicPlanCatalog(); } catch (_) {} }
             if (evPlan && publicPlanCatalog && publicPlanCatalog[evPlan]) onboardingSelectedPlan = evPlan;
             if (evInterval === 'annual' || evInterval === 'monthly') onboardingSelectedInterval = evInterval;
@@ -19395,6 +19458,13 @@
                     onboardingSelectedPlan = data.plan;
                     onboardingSelectedInterval = data.billing_interval;
                     verifiedOnboardingReference = reference;
+                    // Prefill (not lock) the owner-email field with the address that
+                    // was actually verified - the backend independently enforces the
+                    // match at registration regardless of what ends up submitted.
+                    if (data.email) {
+                        const ownerEmailInput = document.getElementById('reg-owner-email');
+                        if (ownerEmailInput && !ownerEmailInput.value) ownerEmailInput.value = data.email;
+                    }
 
                     sessionStorage.removeItem('cauldra_pending_onboarding_reference');
 
