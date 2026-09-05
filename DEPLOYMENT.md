@@ -42,8 +42,11 @@ resolves (see the `Dockerfile` CMD and `.claude/launch.json`).
    automatically normalized to the explicit `postgresql+psycopg://` scheme
    (matching the `psycopg[binary]` driver pinned in `requirements.txt`) so
    the driver actually used is never left to chance.
-4. Run this explicit, one-time release step **before** starting or scaling any
-   application containers:
+4. Choose the schema-management path that owns the target database. For the
+   manually installed Supabase schema, run `verify_supabase_schema.sql` in the
+   SQL Editor and require its PASS notice; do **not** also run Alembic against
+   that same project. For a separate environment explicitly owned by Alembic,
+   run this one-time release step before starting or scaling containers:
 
    ```sh
    docker run --rm --env-file .env cauldra alembic upgrade head
@@ -64,20 +67,20 @@ resolves (see the `Dockerfile` CMD and `.claude/launch.json`).
    provider's actual connection limit before raising these for multiple
    workers/replicas. `DATABASE_SSL_MODE` is applied only when `DATABASE_URL`
    doesn't already carry its own `sslmode=` query parameter.
-6. Keep object storage private. Local `/data/uploads` works for one instance;
-   configure the S3-compatible storage variables before deploying multiple app instances.
+6. Keep object storage private. For Supabase deployments, create a private
+   `cauldra-private` bucket, set `SUPABASE_URL`, `SUPABASE_SECRET_KEY` (or the
+   legacy `SUPABASE_SERVICE_ROLE_KEY`), `SUPABASE_STORAGE_BUCKET`, and
+   `SUPPLY_AI_STORAGE_BACKEND=supabase`. Local `/data/uploads` remains suitable
+   only for offline/single-instance development. Never expose the server key in
+   the frontend or make retained business documents public.
 7. Terminate TLS at a trusted reverse proxy (for example Caddy, Nginx, or your
    platform's HTTPS service) and forward traffic to port 8000. The public site
    must be HTTPS because production refresh cookies are marked `Secure`.
 
 ## Docker launch
 
-From this directory, after creating the production `.env` (pointed at
-Supabase) and migrating the existing SQLite data according to
-`DATABASE_MIGRATION.md` — using `alembic upgrade head` against the empty
-Supabase database followed by `scripts/migrate_sqlite_to_postgres.py`, which
-preserves primary-key IDs, copies tables in foreign-key order, verifies row
-counts per table, and resets PostgreSQL sequences afterward:
+From this directory, after creating the production `.env`, configuring the
+private Supabase Storage bucket, and verifying the manually installed schema:
 
 ```sh
 docker build -t cauldra .
@@ -97,9 +100,11 @@ upload, inventory update, and a logout/login on a separate browser session.
 Back up Supabase PostgreSQL before each application update and test a restore
 regularly — Supabase provides point-in-time recovery and scheduled backups on
 paid plans; confirm the retention window meets your needs, and additionally
-keep an independent `pg_dump` off-platform per `DATABASE_MIGRATION.md`'s
-backup section. Keep the original SQLite file (`supply_ai.db`) retained and
-read-only after cutover until the Supabase deployment has been accepted in
-production — do not delete it as part of this or any future deploy.
+keep an independent `pg_dump` off-platform — an automated script for exactly
+this (pg_dump -> Cloudflare R2) is in `scripts/backup_database.py`; see
+`BACKUP_RESTORE.md` for how to run it and how to restore from it. The historical pre-Supabase SQLite
+files and the one-time SQLite→PostgreSQL migration tooling have been moved to
+`archive/sqlite-legacy/` (out of the runtime/deploy path); PostgreSQL is now the
+only supported engine in every environment.
 A launch is complete only after HTTPS, DNS, a real email sender domain, backups,
 and a tested restore procedure have been configured by the deployment owner.
