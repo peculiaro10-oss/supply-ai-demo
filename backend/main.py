@@ -5034,6 +5034,10 @@ def get_my_profile(user: User = Depends(get_authenticated_user), db: Session = D
     db.commit()
     return _user_profile_payload(db, user)
 
+@app.get("/__sentry_test_temp")
+def sentry_test_temp(user: User = Depends(get_current_user)):
+    raise RuntimeError("Sentry backend test")
+
 
 @app.patch("/users/me/profile")
 def update_my_profile(data: UserProfileUpdate, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
