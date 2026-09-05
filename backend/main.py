@@ -80,6 +80,107 @@ PLATFORM_DIR = PROJECT_DIR / "platform"
 ENVIRONMENT = os.getenv("SUPPLY_AI_ENV", "development").strip().lower()
 IS_PRODUCTION = ENVIRONMENT == "production"
 
+# -----------------------------------------------------------------------------
+# SENTRY (backend) — application-exception monitoring only; never a
+# replacement for Railway's infrastructure monitoring or Supabase's own
+# database/auth/storage logs. Initialized here, before `app = FastAPI(...)`
+# below, so it can capture exceptions raised anywhere later in this module
+# (including at import/startup time). Gated on SENTRY_BACKEND_DSN AND
+# IS_PRODUCTION so local/staging development is never noisy and never talks
+# to Sentry by accident — set SENTRY_BACKEND_DSN only where SUPPLY_AI_ENV=
+# production (Railway). Any failure here (missing package, bad DSN, network)
+# must never prevent the app from starting or serving requests. Tracing,
+# profiling and the Sentry Logs feature are deliberately never enabled.
+# -----------------------------------------------------------------------------
+SENTRY_BACKEND_DSN = os.getenv("SENTRY_BACKEND_DSN", "").strip()
+
+_SENTRY_SENSITIVE_KEY_MARKERS = (
+    "password", "passwd", "secret", "token", "authorization", "cookie",
+    "otp", "totp", "mfa", "api_key", "apikey", "access_token",
+    "refresh_token", "service_role", "client_secret", "otpauth", "bearer",
+)
+_SENTRY_FILTERED = "[Filtered]"
+
+def _sentry_key_is_sensitive(key) -> bool:
+    key_lower = str(key or "").strip().lower().replace("-", "_")
+    return any(marker in key_lower for marker in _SENTRY_SENSITIVE_KEY_MARKERS)
+
+def _sentry_scrub(value):
+    """Recursively redacts any dict key whose name suggests sensitive content
+    (password/token/secret/otp/mfa/service_role/... — see
+    _SENTRY_SENSITIVE_KEY_MARKERS), walking nested dicts/lists so it also
+    catches secrets buried in request bodies, form fields, query parameters,
+    exception context, or breadcrumb payloads before they leave this process."""
+    if isinstance(value, dict):
+        return {k: (_SENTRY_FILTERED if _sentry_key_is_sensitive(k) else _sentry_scrub(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sentry_scrub(v) for v in value]
+    return value
+
+def _sentry_scrub_query_string(qs):
+    """request.query_string arrives as a raw 'a=1&token=xyz' string, not a
+    dict — parse it, scrub by key, and rebuild so a secret passed as a query
+    parameter never reaches Sentry."""
+    if not isinstance(qs, str) or not qs:
+        return qs
+    try:
+        pairs = urllib.parse.parse_qsl(qs, keep_blank_values=True)
+    except Exception:
+        return _SENTRY_FILTERED
+    return urllib.parse.urlencode([(k, _SENTRY_FILTERED if _sentry_key_is_sensitive(k) else v) for k, v in pairs])
+
+def _sentry_before_send(event, hint):
+    """Defense-in-depth scrubber on top of sentry_sdk's own send_default_pii=
+    False default: never send Authorization/Cookie headers, tokens, passwords,
+    OTP/MFA codes, or provider secrets, wherever they appear in the event."""
+    try:
+        request = event.get("request")
+        if isinstance(request, dict):
+            if "headers" in request:
+                request["headers"] = _sentry_scrub(request.get("headers"))
+            if "cookies" in request:
+                request["cookies"] = _SENTRY_FILTERED
+            if "data" in request:
+                request["data"] = _sentry_scrub(request.get("data"))
+            if "query_string" in request:
+                request["query_string"] = _sentry_scrub_query_string(request.get("query_string"))
+        if isinstance(event.get("extra"), dict):
+            event["extra"] = _sentry_scrub(event["extra"])
+        if isinstance(event.get("contexts"), dict):
+            event["contexts"] = _sentry_scrub(event["contexts"])
+        for exc_value in ((event.get("exception") or {}).get("values") or []):
+            for frame in (((exc_value or {}).get("stacktrace") or {}).get("frames") or []):
+                if isinstance(frame.get("vars"), dict):
+                    frame["vars"] = _sentry_scrub(frame["vars"])
+    except Exception:
+        pass  # a scrubbing bug must never itself crash error reporting
+    return event
+
+def _sentry_before_breadcrumb(crumb, hint):
+    try:
+        if isinstance(crumb.get("data"), dict):
+            crumb["data"] = _sentry_scrub(crumb["data"])
+    except Exception:
+        pass
+    return crumb
+
+if SENTRY_BACKEND_DSN and IS_PRODUCTION:
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=SENTRY_BACKEND_DSN,
+            environment=ENVIRONMENT,
+            release=(os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip() or None),
+            traces_sample_rate=0,
+            profiles_sample_rate=0,
+            send_default_pii=False,
+            before_send=_sentry_before_send,
+            before_breadcrumb=_sentry_before_breadcrumb,
+        )
+        print("[sentry] backend error monitoring initialized")
+    except Exception as exc:
+        print(f"[sentry] backend init failed (continuing without error monitoring): {exc}")
+
 def resolve_app_path(value: str, default: Path) -> Path:
     """Resolve configurable data paths without allowing an implicit web-root path."""
     candidate = Path(value).expanduser() if value else default
@@ -9568,12 +9669,24 @@ def _supabase_auth_or_503():
         raise HTTPException(status_code=503, detail="Email verification is not available right now. Please contact support.")
     return client.auth
 
-def _supabase_email_verify_redirect(request: Request, plan: str, interval: str) -> str:
+def _supabase_email_verify_redirect(request: Request, plan: str, interval: str, purpose: str = "") -> str:
+    """Centralized redirect-URL builder for every Supabase verification email
+    Cauldra sends (new-business onboarding, existing-user email-change, and
+    employee self-verification below). Base URL resolution stays a single
+    env-driven chain (SUPABASE_EMAIL_REDIRECT_URL -> SUPPLY_AI_FRONTEND_URL ->
+    request-derived fallback) so a future mobile deep link only needs to
+    change the env value, never call sites. `purpose` is an optional,
+    non-sensitive marker (e.g. "self_verify") the frontend's single return
+    handler uses to route to the right confirm step - empty means "onboarding
+    or email-change", matching existing behavior exactly."""
     base = (SUPABASE_EMAIL_REDIRECT_URL or SUPPLY_AI_FRONTEND_URL
             or str(paystack_callback_url(request)).rstrip("/"))
     from urllib.parse import urlencode
-    # plan/interval are public catalogue values, never sensitive data.
-    return base.rstrip("/") + "/?" + urlencode({"cauldra_email_verify": "1", "ev_plan": plan, "ev_interval": interval})
+    # plan/interval/purpose are public, non-sensitive routing hints only.
+    params = {"cauldra_email_verify": "1", "ev_plan": plan, "ev_interval": interval}
+    if purpose:
+        params["ev_purpose"] = purpose
+    return base.rstrip("/") + "/?" + urlencode(params)
 
 def _supabase_email_confirmed(email: str) -> Optional[bool]:
     """True / False from Supabase's own user record for this email; None if
@@ -12009,6 +12122,25 @@ def health_database():
             status_code=503,
             content={"status": "degraded", "database": "postgresql", "connected": False},
         )
+
+SENTRY_FRONTEND_DSN = os.getenv("SENTRY_FRONTEND_DSN", "").strip()
+
+# -----------------------------------------------------------------------------
+# PUBLIC CONFIG — read-only, unauthenticated browser configuration. Mirrors
+# the existing GET /push/vapid-public-key pattern: every value returned here
+# is safe for any anonymous visitor to read (never a secret, credential, or
+# backend-only key). The frontend Sentry DSN is intentionally withheld unless
+# this deployment IS_PRODUCTION, so local/staging development never loads the
+# frontend Sentry SDK. Add new keys ONLY if they are genuinely safe for an
+# anonymous browser to read — never a DSN's backend counterpart, a Railway
+# variable, a Supabase key, or any payment/platform-owner secret.
+# -----------------------------------------------------------------------------
+@app.get("/config/public")
+def get_public_config():
+    return {
+        "sentry_frontend_dsn": SENTRY_FRONTEND_DSN if IS_PRODUCTION else "",
+        "environment": ENVIRONMENT,
+    }
 
 @app.get("/")
 def serve_index():

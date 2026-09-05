@@ -23,6 +23,91 @@
         const API_URL = resolveApiBaseUrl();
 
         // =====================================================================
+        // SENTRY (frontend error monitoring) — errors only: no tracing, no
+        // session replay, no profiling, no logs. The DSN is never hardcoded
+        // here — it is read from the backend's read-only GET /config/public
+        // (see backend/main.py), which only returns a DSN when this
+        // deployment is running in production (SUPPLY_AI_ENV=production).
+        // Initialization is skipped entirely whenever that fetch fails, the
+        // endpoint reports no DSN/non-production environment, or the SDK
+        // script fails to load — Sentry being unavailable must never affect
+        // the app. Uses the plain "bundle.min.js" CDN build, which contains
+        // ONLY core error monitoring (no tracing/replay/profiling code at
+        // all), instead of Sentry's "loader" script, which can silently pull
+        // in tracing/replay based on dashboard settings.
+        // =====================================================================
+        const CAULDRA_SENTRY_SENSITIVE_MARKERS = [
+            "password", "passwd", "secret", "token", "authorization", "cookie",
+            "otp", "totp", "mfa", "api_key", "apikey", "access_token",
+            "refresh_token", "service_role", "client_secret", "otpauth", "bearer"
+        ];
+        function cauldraSentryKeyIsSensitive(key) {
+            const k = String(key || "").toLowerCase().replace(/-/g, "_");
+            return CAULDRA_SENTRY_SENSITIVE_MARKERS.some(function(marker) { return k.indexOf(marker) !== -1; });
+        }
+        function cauldraSentryScrub(value) {
+            if (Array.isArray(value)) return value.map(cauldraSentryScrub);
+            if (value && typeof value === "object") {
+                const out = {};
+                Object.keys(value).forEach(function(k) {
+                    out[k] = cauldraSentryKeyIsSensitive(k) ? "[Filtered]" : cauldraSentryScrub(value[k]);
+                });
+                return out;
+            }
+            return value;
+        }
+        function cauldraSentryBeforeSend(event) {
+            try {
+                if (event.request) {
+                    if (event.request.headers) event.request.headers = cauldraSentryScrub(event.request.headers);
+                    if (event.request.cookies) event.request.cookies = "[Filtered]";
+                    if (event.request.data) event.request.data = cauldraSentryScrub(event.request.data);
+                    if (event.request.query_string) event.request.query_string = "[Filtered]";
+                }
+                if (event.extra) event.extra = cauldraSentryScrub(event.extra);
+                if (event.contexts) event.contexts = cauldraSentryScrub(event.contexts);
+            } catch (_) {}
+            return event;
+        }
+        function cauldraSentryBeforeBreadcrumb(breadcrumb) {
+            try {
+                if (breadcrumb && breadcrumb.data) {
+                    if (breadcrumb.data.url) {
+                        breadcrumb.data.url = breadcrumb.data.url.replace(/([?&])(\w*(?:token|password|secret|otp|api_key|auth)\w*)=[^&]*/gi, "$1$2=[Filtered]");
+                    }
+                    breadcrumb.data = cauldraSentryScrub(breadcrumb.data);
+                }
+            } catch (_) {}
+            return breadcrumb;
+        }
+        (function initSentryFrontend() {
+            fetch(API_URL + "/config/public")
+                .then(function(res) { return res && res.ok ? res.json() : null; })
+                .then(function(config) {
+                    if (!config || !config.sentry_frontend_dsn || config.environment !== "production") return;
+                    const script = document.createElement("script");
+                    script.src = "https://browser.sentry-cdn.com/10.73.0/bundle.min.js";
+                    script.crossOrigin = "anonymous";
+                    script.onload = function() {
+                        if (!window.Sentry || typeof window.Sentry.init !== "function") return;
+                        window.Sentry.init({
+                            dsn: config.sentry_frontend_dsn,
+                            environment: config.environment,
+                            sendDefaultPii: false,
+                            tracesSampleRate: 0,
+                            replaysSessionSampleRate: 0,
+                            replaysOnErrorSampleRate: 0,
+                            beforeSend: cauldraSentryBeforeSend,
+                            beforeBreadcrumb: cauldraSentryBeforeBreadcrumb,
+                        });
+                    };
+                    script.onerror = function() { /* Sentry CDN unreachable — never block the app */ };
+                    document.head.appendChild(script);
+                })
+                .catch(function() { /* Sentry is optional; never block the app */ });
+        })();
+
+        // =====================================================================
         // OFFLINE-FIRST: IndexedDB storage + durable sync outbox + auto-sync
         // =====================================================================
         // Scope of this layer: Products (create/edit/delete), Sales (POS
