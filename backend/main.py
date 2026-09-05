@@ -11028,10 +11028,142 @@ def get_ai_alert_thresholds(db: Session) -> List[int]:
 def usd_to_ngn(db: Session, usd: Optional[float]) -> Optional[float]:
     if usd is None:
         return None
-    rate = get_platform_setting_float(db, "usd_to_ngn_rate")
+    rate = get_effective_usd_ngn_rate(db)
     if rate is None:
         return None
     return round(usd * rate, 2)
+
+# --- Automatic USD->NGN exchange rate ---
+# Reuses the SAME PlatformSetting key/value table above - no new model/table.
+# `usd_to_ngn_rate` (the pre-existing key) is repurposed to mean specifically
+# "the manual override value" (only used when fx_manual_override_enabled is
+# "true"); new keys fx_auto_rate/fx_auto_source/fx_auto_fetched_at hold the
+# last SUCCESSFULLY fetched automatic rate, and fx_auto_last_attempt_at/
+# fx_auto_last_error are an internal bookkeeping pair used only to bound how
+# often a stale rate is retried (never shown as the headline figure).
+FX_PROVIDER_URL = "https://api.frankfurter.dev/v2/rate/USD/NGN"
+FX_RATE_FRESH_SECONDS = 6 * 60 * 60      # treat a fetched rate as fresh for ~6 hours
+FX_RETRY_BACKOFF_SECONDS = 5 * 60        # never attempt a new fetch more than once per 5 min,
+                                          # even across multiple Railway workers/instances,
+                                          # since this gate is read from the database, not memory
+FX_REQUEST_TIMEOUT_SECONDS = 8
+
+def _fetch_usd_ngn_from_provider() -> Tuple[Optional[float], Optional[str], Optional[str]]:
+    """Calls Frankfurter's (frankfurter.dev) v2 rate endpoint for USD->NGN,
+    preferring the CBN (Central Bank of Nigeria) provider where it has
+    published a rate, and falling back to Frankfurter's own blended
+    reference rate if the CBN-pinned request fails or hasn't published yet.
+    No API key - Frankfurter is a free, keyless public reference-rate API.
+    Returns (rate, source_label, error): rate is None - never a guess -
+    unless the response was validated as a real, positive USD->NGN number."""
+    import requests
+    last_error: Optional[str] = None
+    for source_label, params in (
+        ("Frankfurter (CBN)", {"providers": "CBN"}),
+        ("Frankfurter (blended reference)", {}),
+    ):
+        try:
+            resp = requests.get(FX_PROVIDER_URL, params=params, timeout=FX_REQUEST_TIMEOUT_SECONDS)
+        except Exception as exc:
+            last_error = f"Network error contacting the FX provider: {exc}"
+            continue
+        if not resp.ok:
+            last_error = f"FX provider returned HTTP {resp.status_code}."
+            continue
+        try:
+            payload = resp.json()
+        except Exception:
+            last_error = "FX provider returned a non-JSON response."
+            continue
+        if payload.get("base") != "USD" or payload.get("quote") != "NGN":
+            last_error = "FX provider response was not a USD->NGN rate."
+            continue
+        try:
+            rate = float(payload.get("rate"))
+        except (TypeError, ValueError):
+            last_error = "FX provider returned a non-numeric rate."
+            continue
+        if not (rate > 0):
+            last_error = "FX provider returned a non-positive rate."
+            continue
+        return rate, source_label, None
+    return None, None, last_error
+
+def ensure_fresh_fx_rate(db: Session, force: bool = False) -> None:
+    """Request-triggered, database-backed refresh of the automatic USD->NGN
+    rate. Deliberately NOT a background loop/scheduler (see spec: multiple
+    Railway instances/workers must not each run their own poller) - instead,
+    every check reads/writes the SAME PlatformSetting rows every instance
+    shares, so the 5-minute retry backoff naturally throttles the whole
+    fleet, not just one process. A benign race (two instances both decide a
+    refresh is due and both call the provider) only wastes one extra HTTP
+    call; it can never corrupt state, since PlatformSetting rows are
+    upserted by primary key. NEVER raises - an FX provider outage must never
+    break the Platform Owner dashboard or AI cost accounting; on failure the
+    previously stored automatic rate is left completely untouched."""
+    try:
+        now = datetime.utcnow()
+        last_attempt_raw = get_platform_setting(db, "fx_auto_last_attempt_at")
+        last_fetched_raw = get_platform_setting(db, "fx_auto_fetched_at")
+        try:
+            last_attempt = datetime.fromisoformat(last_attempt_raw) if last_attempt_raw else None
+        except ValueError:
+            last_attempt = None
+        try:
+            last_fetched = datetime.fromisoformat(last_fetched_raw) if last_fetched_raw else None
+        except ValueError:
+            last_fetched = None
+
+        is_stale = last_fetched is None or (now - last_fetched).total_seconds() >= FX_RATE_FRESH_SECONDS
+        if not force:
+            if not is_stale:
+                return
+            if last_attempt is not None and (now - last_attempt).total_seconds() < FX_RETRY_BACKOFF_SECONDS:
+                return  # another request/instance already tried recently - don't hammer the provider
+
+        set_platform_setting(db, "fx_auto_last_attempt_at", now.isoformat())
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        rate, source, error = _fetch_usd_ngn_from_provider()
+        if rate is not None:
+            set_platform_setting(db, "fx_auto_rate", str(rate))
+            set_platform_setting(db, "fx_auto_source", source)
+            set_platform_setting(db, "fx_auto_fetched_at", now.isoformat())
+            set_platform_setting(db, "fx_auto_last_error", "")
+            db.commit()
+        else:
+            set_platform_setting(db, "fx_auto_last_error", (error or "Unknown error")[:300])
+            db.commit()
+            print(f"[fx] USD->NGN auto-refresh failed, keeping last known rate: {error}")
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[fx] USD->NGN auto-refresh raised unexpectedly (ignored): {exc}")
+
+def get_effective_usd_ngn_rate(db: Session) -> Optional[float]:
+    """THE one place that decides which USD->NGN rate actually gets used to
+    convert a real provider dollar cost into naira: the Platform Owner's
+    manual override when enabled, otherwise the latest automatically-fetched
+    rate. Never mixes the two. Deliberately does NOT trigger a network
+    fetch itself (pure read) - this is called from run_billable_ai's
+    customer-facing AI-call path via check_ai_budget_alerts, which must
+    never depend on an external FX provider's latency/availability. Callers
+    that want "fetch a fresh rate if stale" call ensure_fresh_fx_rate()
+    explicitly first (done in the Platform-Owner-only read endpoints below,
+    never in a customer-facing code path)."""
+    override_on = (get_platform_setting(db, "fx_manual_override_enabled") or "").strip().lower() == "true"
+    if override_on:
+        override_rate = get_platform_setting_float(db, "usd_to_ngn_rate")
+        if override_rate is not None and override_rate > 0:
+            return override_rate
+        # override switched on but no valid value stored yet - fall through
+        # to the automatic rate rather than silently returning nothing.
+    return get_platform_setting_float(db, "fx_auto_rate")
 
 # --- Central AI provider pricing / cost estimation ---
 def get_ai_pricing_row(db: Session, provider: str, model: str) -> Optional["AIProviderPricing"]:
@@ -11076,7 +11208,10 @@ def check_ai_budget_alerts(db: Session, provider: str) -> None:
     budget_ngn = get_platform_setting_float(db, f"{provider}_monthly_budget_ngn")
     if not budget_ngn or budget_ngn <= 0:
         return
-    rate = get_platform_setting_float(db, "usd_to_ngn_rate")
+    # Pure read (no FX network fetch here) - this runs inside the
+    # customer-facing run_billable_ai() call path, which must never depend
+    # on an external FX provider's latency/availability.
+    rate = get_effective_usd_ngn_rate(db)
     if not rate:
         return
     now = datetime.utcnow()
@@ -11185,7 +11320,8 @@ class PlatformAIPricingUpdate(BaseModel):
     output_price_per_1k_usd: Optional[float] = Field(default=None, ge=0)
 
 class PlatformSettingsUpdate(BaseModel):
-    usd_to_ngn_rate: Optional[float] = Field(default=None, gt=0)
+    usd_to_ngn_rate: Optional[float] = Field(default=None, gt=0)  # the MANUAL OVERRIDE value
+    fx_manual_override_enabled: Optional[bool] = None
     gemini_monthly_budget_ngn: Optional[float] = Field(default=None, ge=0)
     openai_monthly_budget_ngn: Optional[float] = Field(default=None, ge=0)
     ai_alert_thresholds: Optional[List[int]] = None
@@ -11326,6 +11462,7 @@ def platform_overview(owner: PlatformOwner = Depends(get_platform_owner), db: Se
     """"What is happening across Cauldra right now?" - a deliberately SHORT
     list of headline numbers; every deeper breakdown lives on its own page
     (see the other endpoints below)."""
+    ensure_fresh_fx_rate(db)  # best-effort; Overview is the default landing page
     now = datetime.utcnow()
     month_start = datetime(now.year, now.month, 1)
     today_start = datetime(now.year, now.month, now.day)
@@ -11565,6 +11702,7 @@ def platform_ai_usage(
     period: str = Query("month"), start_date: Optional[str] = Query(None, alias="start"), end_date: Optional[str] = Query(None, alias="end"),
     owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db),
 ):
+    ensure_fresh_fx_rate(db)  # best-effort; this page is the main consumer of the NGN conversion
     start, end = resolve_platform_period(period, start_date, end_date)
     q = db.query(AIUsageLedger).filter(AIUsageLedger.success == True)
     if start is not None:
@@ -11641,20 +11779,57 @@ def platform_ai_pricing_set(data: PlatformAIPricingUpdate, owner: PlatformOwner 
     db.commit()
     return {"message": "Pricing updated.", "provider": provider, "model": model}
 
+def _fx_status_block(db: Session) -> Dict[str, Any]:
+    """Everything the Platform Owner UI needs to show the current effective
+    USD->NGN rate, its source, freshness, and override state - without ever
+    guessing a number the backend hasn't actually validated."""
+    override_on = (get_platform_setting(db, "fx_manual_override_enabled") or "").strip().lower() == "true"
+    override_rate = get_platform_setting_float(db, "usd_to_ngn_rate")
+    auto_rate = get_platform_setting_float(db, "fx_auto_rate")
+    auto_source = get_platform_setting(db, "fx_auto_source")
+    auto_fetched_raw = get_platform_setting(db, "fx_auto_fetched_at")
+    auto_last_error = get_platform_setting(db, "fx_auto_last_error") or None
+    auto_fetched_at_dt = None
+    auto_stale = None
+    if auto_fetched_raw:
+        try:
+            auto_fetched_at_dt = datetime.fromisoformat(auto_fetched_raw)
+            auto_stale = (datetime.utcnow() - auto_fetched_at_dt).total_seconds() >= FX_RATE_FRESH_SECONDS
+        except ValueError:
+            auto_fetched_at_dt = None
+    effective_rate = override_rate if (override_on and override_rate) else auto_rate
+    return {
+        "effective_rate": effective_rate,
+        "manual_override_enabled": override_on,
+        "manual_override_rate": override_rate,
+        "auto_rate": auto_rate,
+        "auto_source": auto_source,
+        "auto_fetched_at": to_utc_iso(auto_fetched_at_dt),
+        "auto_stale": auto_stale,
+        "auto_last_error": auto_last_error,
+    }
+
 @app.get("/api/platform/settings")
 def platform_settings_get(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    ensure_fresh_fx_rate(db)  # best-effort; this is the FX status page
     return {
-        "usd_to_ngn_rate": get_platform_setting_float(db, "usd_to_ngn_rate"),
+        "usd_to_ngn_rate": get_platform_setting_float(db, "usd_to_ngn_rate"),  # manual override value
         "gemini_monthly_budget_ngn": get_platform_setting_float(db, "gemini_monthly_budget_ngn"),
         "openai_monthly_budget_ngn": get_platform_setting_float(db, "openai_monthly_budget_ngn"),
         "ai_alert_thresholds": get_ai_alert_thresholds(db),
+        "fx": _fx_status_block(db),
     }
 
 @app.put("/api/platform/settings")
 def platform_settings_set(data: PlatformSettingsUpdate, owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
     changed = []
     if data.usd_to_ngn_rate is not None:
-        set_platform_setting(db, "usd_to_ngn_rate", str(data.usd_to_ngn_rate)); changed.append("USD\u2192NGN rate")
+        set_platform_setting(db, "usd_to_ngn_rate", str(data.usd_to_ngn_rate)); changed.append("manual FX override rate")
+    if data.fx_manual_override_enabled is not None:
+        currently_on = (get_platform_setting(db, "fx_manual_override_enabled") or "").strip().lower() == "true"
+        if data.fx_manual_override_enabled != currently_on:
+            set_platform_setting(db, "fx_manual_override_enabled", "true" if data.fx_manual_override_enabled else "false")
+            changed.append("manual FX override " + ("enabled" if data.fx_manual_override_enabled else "disabled"))
     if data.gemini_monthly_budget_ngn is not None:
         set_platform_setting(db, "gemini_monthly_budget_ngn", str(data.gemini_monthly_budget_ngn)); changed.append("Gemini budget")
     if data.openai_monthly_budget_ngn is not None:
@@ -11668,6 +11843,27 @@ def platform_settings_set(data: PlatformSettingsUpdate, owner: PlatformOwner = D
         add_platform_audit(db, owner, "PLATFORM_SETTINGS_UPDATED", "Updated: " + ", ".join(changed) + ".")
     db.commit()
     return platform_settings_get(owner, db)
+
+@app.post("/api/platform/fx/refresh")
+def platform_fx_refresh(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    """Manual "Refresh rate" action - separate from the main dashboard
+    Refresh button. Always attempts a fresh fetch immediately (bypasses the
+    staleness/backoff gate), but only overwrites the stored automatic rate
+    on a validated success; a failed attempt leaves the previous rate and
+    fetched_at completely untouched."""
+    before_fetched_at = get_platform_setting(db, "fx_auto_fetched_at")
+    ensure_fresh_fx_rate(db, force=True)
+    after_fetched_at = get_platform_setting(db, "fx_auto_fetched_at")
+    succeeded = after_fetched_at is not None and after_fetched_at != before_fetched_at
+    add_platform_audit(db, owner, "FX_RATE_MANUAL_REFRESH",
+                        "Manually triggered a USD\u2192NGN refresh: " + ("succeeded." if succeeded else "failed, previous rate kept."))
+    db.commit()
+    fx = _fx_status_block(db)
+    return {
+        "succeeded": succeeded,
+        "error": None if succeeded else fx.get("auto_last_error"),
+        "fx": fx,
+    }
 
 @app.get("/api/platform/alerts")
 def platform_alerts_list(resolved: Optional[bool] = Query(None), limit: int = Query(50, ge=1, le=200),

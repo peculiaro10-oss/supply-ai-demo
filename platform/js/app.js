@@ -613,12 +613,39 @@ document.getElementById("ai-pricing-form").addEventListener("submit", async (e) 
     } catch (err) { showGlobalError(err.message); }
 });
 
+function renderFxCard(fx) {
+    if (!fx) return;
+    document.getElementById("fx-rate").textContent = fx.effective_rate != null ? fmtMoney(fx.effective_rate, "NGN") : "—";
+    const modePill = document.getElementById("fx-mode-pill");
+    modePill.textContent = fx.manual_override_enabled ? "Manual" : "Automatic";
+    modePill.className = "pill " + (fx.manual_override_enabled ? "bg-warning/15 text-amber-300" : "bg-success/15 text-success");
+    const statusPill = document.getElementById("fx-status-pill");
+    let statusText, statusCls;
+    if (fx.manual_override_enabled) { statusText = "Manual"; statusCls = "bg-warning/15 text-amber-300"; }
+    else if (fx.auto_rate == null) { statusText = "Unavailable"; statusCls = "bg-danger/15 text-danger"; }
+    else if (fx.auto_stale) { statusText = "Stale"; statusCls = "bg-warning/15 text-amber-300"; }
+    else { statusText = "Live"; statusCls = "bg-success/15 text-success"; }
+    statusPill.textContent = statusText;
+    statusPill.className = "pill " + statusCls;
+    document.getElementById("fx-source").textContent = fx.manual_override_enabled ? "Manual override" : (fx.auto_source || "—");
+    document.getElementById("fx-updated").textContent = fx.manual_override_enabled ? "—" : (fx.auto_fetched_at ? fmtDateTime(fx.auto_fetched_at) : "Never");
+    document.getElementById("fx-override-banner").classList.toggle("hidden", !fx.manual_override_enabled);
+    const errEl = document.getElementById("fx-error-banner");
+    if (fx.auto_last_error) {
+        errEl.textContent = "Last automatic refresh attempt failed: " + fx.auto_last_error;
+        errEl.classList.remove("hidden");
+    } else {
+        errEl.classList.add("hidden");
+    }
+}
 async function loadPlatformSettings() {
     const s = await apiGet("/api/platform/settings");
     document.getElementById("setting-usd-ngn").value = s.usd_to_ngn_rate ?? "";
+    document.getElementById("setting-fx-override-enabled").checked = !!(s.fx && s.fx.manual_override_enabled);
     document.getElementById("setting-gemini-budget").value = s.gemini_monthly_budget_ngn ?? "";
     document.getElementById("setting-openai-budget").value = s.openai_monthly_budget_ngn ?? "";
     document.getElementById("setting-thresholds").value = (s.ai_alert_thresholds || []).join(", ");
+    renderFxCard(s.fx);
 }
 document.getElementById("platform-settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -626,6 +653,7 @@ document.getElementById("platform-settings-form").addEventListener("submit", asy
         const thresholdsRaw = document.getElementById("setting-thresholds").value.trim();
         const body = {
             usd_to_ngn_rate: document.getElementById("setting-usd-ngn").value ? parseFloat(document.getElementById("setting-usd-ngn").value) : null,
+            fx_manual_override_enabled: document.getElementById("setting-fx-override-enabled").checked,
             gemini_monthly_budget_ngn: document.getElementById("setting-gemini-budget").value ? parseFloat(document.getElementById("setting-gemini-budget").value) : null,
             openai_monthly_budget_ngn: document.getElementById("setting-openai-budget").value ? parseFloat(document.getElementById("setting-openai-budget").value) : null,
         };
@@ -634,6 +662,24 @@ document.getElementById("platform-settings-form").addEventListener("submit", asy
         await loadPlatformSettings();
         await aiPeriodCtl.applyNow();
     } catch (err) { showGlobalError(err.message); }
+});
+document.getElementById("fx-refresh-btn").addEventListener("click", async () => {
+    const btn = document.getElementById("fx-refresh-btn");
+    const icon = btn.querySelector("i");
+    try {
+        btn.disabled = true;
+        if (icon) icon.classList.add("animate-spin");
+        const resp = await apiPost("/api/platform/fx/refresh");
+        renderFxCard(resp.fx);
+        if (!resp.succeeded) {
+            showGlobalError(resp.error || "Could not refresh the exchange rate right now. The previous rate is still in use.");
+        }
+    } catch (err) {
+        showGlobalError(err.message);
+    } finally {
+        btn.disabled = false;
+        if (icon) icon.classList.remove("animate-spin");
+    }
 });
 
 // =============================================================================
