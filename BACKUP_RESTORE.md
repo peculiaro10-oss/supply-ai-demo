@@ -1,9 +1,11 @@
-# Database Backup & Restore (Cauldra)
+# Database & Storage Backup / Restore (Cauldra)
 
-Independent, off-platform disaster-recovery backups of the production
-Supabase PostgreSQL database, uploaded to a dedicated Cloudflare R2 bucket.
-This is **in addition to** Supabase's own point-in-time recovery / scheduled
-backups (see `DEPLOYMENT.md`) — not a replacement for them.
+Independent, off-platform disaster-recovery backups of production Supabase
+data, uploaded to a dedicated Cloudflare R2 bucket — the PostgreSQL database
+(`scripts/backup_database.py`) and Supabase Storage's private `cauldra-private`
+bucket (`scripts/backup_storage.py`). This is **in addition to** Supabase's
+own point-in-time recovery / scheduled backups (see `DEPLOYMENT.md`) — not a
+replacement for them.
 
 ## How it works
 
@@ -124,6 +126,75 @@ Drop the throwaway database/container once you're done. It only ever
 existed to prove the backup restores cleanly — it is not meant to become a
 long-lived environment.
 
+## Supabase Storage backup
+
+### How it works
+
+`scripts/backup_storage.py`:
+
+1. Reuses the application's EXISTING server-side Supabase credential
+   (`SUPABASE_URL` + `SUPABASE_SECRET_KEY`, or the legacy
+   `SUPABASE_SERVICE_ROLE_KEY` — see `backend/supabase_client.py`) — no new
+   Supabase environment variable was introduced. That credential is already
+   validated as service-role-capable, which is exactly what's needed to read
+   every object in a private bucket regardless of Row Level Security.
+2. Recursively walks every folder in the `cauldra-private` Supabase Storage
+   bucket (or whatever `SUPABASE_STORAGE_BUCKET` is set to, if set),
+   downloading each real object — folder placeholders are walked into, never
+   downloaded.
+3. Uploads each object to the SAME R2 bucket the database backups use
+   (`R2_BACKUP_BUCKET`), under `storage/<supabase bucket>/<original object
+   path>` — the exact original path and filename, never altered.
+4. Verifies each upload with a `HEAD` request, comparing `ContentLength` to
+   the downloaded object's byte length, before counting it as backed up.
+5. Prints a summary (files discovered / uploaded / failed / total bytes) and
+   exits non-zero if any object failed — one bad object never stops the rest
+   of the run; if the bucket has no listing at all, it exits successfully
+   and logs `No files found.`
+
+Backup-only: nothing is ever deleted or overwritten in Supabase, and nothing
+already in R2 is ever touched or deleted. Not scheduled yet, same as
+`backup_database.py`.
+
+### Running a Storage backup manually
+
+```sh
+python scripts/backup_storage.py
+```
+
+Requires `SUPABASE_URL`, `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`),
+and the same four R2 variables `backup_database.py` uses. All of these are
+already configured for this project — no new environment variable is
+required.
+
+### Where Storage backups land
+
+```
+cauldra-backups/storage/cauldra-private/<original object path>
+```
+
+Example: a Supabase Storage object at `invoices/2026/09/receipt-42.pdf` in
+`cauldra-private` lands at `storage/cauldra-private/invoices/2026/09/receipt-42.pdf`
+in R2.
+
+### Restoring a Storage object
+
+Download it with the same R2 pattern as a database backup:
+
+```sh
+aws s3 cp \
+  s3://cauldra-backups/storage/cauldra-private/invoices/2026/09/receipt-42.pdf \
+  ./receipt-42.pdf \
+  --endpoint-url "$R2_ENDPOINT"
+```
+
+To put it back into Supabase Storage at its original path (via the Supabase
+dashboard, or a service-role `client.storage.from_("cauldra-private").upload(...)`
+call), always restore to the exact original path and verify the restored
+object's contents before relying on it. As with database restores, never
+experiment directly against the production bucket — if you need to validate
+a restored object end-to-end, upload it to a disposable/test bucket first.
+
 ## Operational notes
 
 - `DATABASE_URL` currently points at Supabase's **session-mode** pooler
@@ -139,3 +210,6 @@ long-lived environment.
 - The backup credentials (`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`) are
   object-level R2 credentials only — no admin-level Cloudflare API access
   is required or used anywhere in this system.
+- Database backups and Storage backups share the SAME R2 bucket
+  (`R2_BACKUP_BUCKET`), separated only by key prefix (`database/...` vs
+  `storage/...`) — there is only one R2 bucket to configure/monitor for both.
