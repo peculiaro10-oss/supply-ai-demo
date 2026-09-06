@@ -73,6 +73,36 @@ class NormalizeCatalogSizeTests(unittest.TestCase):
         self.assertIsNone(main.normalize_catalog_size("bottle"))
         self.assertIsNone(main.normalize_catalog_size("   "))
 
+    def test_zero_and_negative_values_are_rejected(self):
+        for value in ("0ml", "0g", "-5ml", "-1kg", "-0.5l"):
+            self.assertIsNone(main.normalize_catalog_size(value), value)
+
+    def test_extreme_values_never_crash_and_are_rejected(self):
+        """Regression for a real bug found during the strict integrity audit:
+        a sufficiently long digit string makes float() overflow to inf
+        without raising, and int(inf) then raised an unhandled
+        OverflowError. Extreme values are also physically implausible for a
+        single product identity entry and must never be treated as
+        'verified'."""
+        extreme_cases = (
+            "9" * 400 + "ml",
+            "1" + "0" * 20 + "kg",
+            "99999999999999999999999999999999999999l",
+        )
+        for value in extreme_cases:
+            self.assertIsNone(main.normalize_catalog_size(value), value)  # must not raise
+        # A merely large-but-still-plausible bulk/wholesale size is fine;
+        # the cutoff exists only to reject clearly-impossible input.
+        self.assertEqual(main.normalize_catalog_size("500ml"), "500ml")
+
+    def test_malformed_decimals_are_rejected_not_guessed(self):
+        for value in ("5..5ml", "5,5,5ml", "..5ml", "5.ml"):
+            self.assertIsNone(main.normalize_catalog_size(value), value)
+
+    def test_unsupported_units_are_never_guessed(self):
+        for value in ("5lbs", "5oz", "5pt", "5gal"):
+            self.assertIsNone(main.normalize_catalog_size(value), value)
+
 
 class GeneralCatalogKeyForTests(unittest.TestCase):
     """Task section 2/4/11: the exact-match identity key that decides
@@ -120,6 +150,42 @@ class GeneralCatalogKeyForTests(unittest.TestCase):
         self.assertNotEqual(a, main.general_catalog_key_for(None, "Coca-Cola Zero", "500ml"))
         self.assertNotEqual(a, main.general_catalog_key_for(None, "Coca-Cola", "1L"))
         self.assertNotEqual(main.general_catalog_key_for(None, "Medium Coca-Cola", None), a)
+
+    def test_unverified_size_never_cross_merges_independent_submissions(self):
+        """The known unknown-size problem found in the strict integrity
+        audit: 'Peak Milk' with no verified size from two INDEPENDENT
+        products must never collapse into one shared identity merely
+        because the names match and neither has a verified size."""
+        k1 = main.general_catalog_key_for(None, "Peak Milk", None, uncertain_disambiguator=101)
+        k2 = main.general_catalog_key_for(None, "Peak Milk", None, uncertain_disambiguator=202)
+        self.assertNotEqual(k1, k2)
+
+    def test_unverified_size_same_origin_reuses_the_same_key(self):
+        """The SAME originating product (same disambiguator, e.g. the same
+        Product.id across repeated edits) must keep mapping to the SAME
+        catalog row -- otherwise every edit of an unverified-size product
+        would grow the catalog forever."""
+        k1 = main.general_catalog_key_for(None, "Peak Milk", None, uncertain_disambiguator=101)
+        k2 = main.general_catalog_key_for(None, "Peak Milk", None, uncertain_disambiguator=101)
+        self.assertEqual(k1, k2)
+
+    def test_vague_size_words_never_cross_merge_either(self):
+        k1 = main.general_catalog_key_for(None, "Peak Milk", "large", uncertain_disambiguator=1)
+        k2 = main.general_catalog_key_for(None, "Peak Milk", "family", uncertain_disambiguator=2)
+        self.assertNotEqual(k1, k2)
+
+    def test_missing_disambiguator_still_never_silently_merges(self):
+        """Even if a future/hypothetical caller forgets to pass a
+        disambiguator, the fallback must never be a fixed placeholder that
+        could itself cause cross-submission merging."""
+        k1 = main.general_catalog_key_for(None, "Peak Milk", None)
+        k2 = main.general_catalog_key_for(None, "Peak Milk", None)
+        self.assertNotEqual(k1, k2)
+
+    def test_verified_size_merging_is_unaffected_by_the_disambiguator_fix(self):
+        k1 = main.general_catalog_key_for(None, "Coca-Cola", "500ml", uncertain_disambiguator=1)
+        k2 = main.general_catalog_key_for(None, "Coca Cola", "50cl", uncertain_disambiguator=2)
+        self.assertEqual(k1, k2)
 
 
 class SafeMergeTests(unittest.TestCase):
@@ -477,6 +543,281 @@ class GeneralCatalogPostgresTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         products = self.db.query(pg_main.Product).filter(pg_main.Product.business_id == self.biz_a.id, pg_main.Product.barcode == barcode).all()
         self.assertEqual(len(products), 1)
+
+    def no_barcode_rows_named(self, name):
+        normalized = pg_main._dup_norm_name(name)
+        return [
+            r for r in self.db.query(pg_main.GeneralCatalog).filter(pg_main.GeneralCatalog.barcode.is_(None)).all()
+            if pg_main._dup_norm_name(r.product_name) == normalized
+        ]
+
+    # =========================================================================
+    # STRICT INTEGRITY AUDIT — additional scenarios
+    # =========================================================================
+
+    # -- The known unknown-size problem: independent submissions with no
+    #    verified size must NEVER auto-merge merely because names match. --
+    def test_unverified_size_same_name_different_businesses_does_not_merge(self):
+        r1 = self.create_product(self.token_a, name="Audit Peak Milk", size=None)
+        self.assertEqual(r1.status_code, 200, r1.text)
+        r2 = self.create_product(self.token_b, name="Audit Peak Milk", size=None)
+        self.assertEqual(r2.status_code, 200, r2.text)
+
+        rows = self.no_barcode_rows_named("Audit Peak Milk")
+        self.assertEqual(len(rows), 2, "two independent no-verified-size submissions must NOT share one canonical identity")
+
+    def test_vague_size_words_do_not_merge_across_businesses(self):
+        r1 = self.create_product(self.token_a, name="Audit Vague Widget", size="large")
+        self.assertEqual(r1.status_code, 200, r1.text)
+        r2 = self.create_product(self.token_b, name="Audit Vague Widget", size="family")
+        self.assertEqual(r2.status_code, 200, r2.text)
+        rows = self.no_barcode_rows_named("Audit Vague Widget")
+        self.assertEqual(len(rows), 2)
+
+    def test_unverified_size_same_product_reedited_reuses_the_same_row_not_growing_forever(self):
+        created = self.create_product(self.token_a, name="Audit Re-Edited Widget", size=None)
+        self.assertEqual(created.status_code, 200, created.text)
+        product_id = created.json()["id"]
+
+        for i in range(3):
+            edit = self.client.patch(f"/products/{product_id}", json={"quantity": 5 + i}, headers=self.auth(self.token_a))
+            self.assertEqual(edit.status_code, 200, edit.text)
+
+        rows = self.no_barcode_rows_named("Audit Re-Edited Widget")
+        self.assertEqual(len(rows), 1, "the SAME product re-edited must keep mapping to the SAME catalog row, not grow the catalog every edit")
+
+    # -- Manager-approved deletion must also preserve the catalog row --
+    def test_manager_approved_deletion_preserves_general_catalog(self):
+        barcode = f"{4500000000000 + int(self.suffix[:6], 16) % 900000}"[:13]
+        created = self.create_product(self.token_a, name="Manager Delete Target", barcode=barcode)
+        self.assertEqual(created.status_code, 200, created.text)
+        product_id = created.json()["id"]
+        self.assertEqual(len(self.catalog_rows_for_barcode(barcode)), 1)
+
+        manager = pg_main.User(
+            username=f"Manager Del {self.suffix}", password=pg_main.hash_password("ManagerPass9"), role="manager",
+            email=f"managerdel-{self.suffix}@test.com", phone="9", business_id=self.biz_a.id, disabled=False,
+        )
+        self.db.add(manager)
+        self.db.commit()
+        login = self.client.post("/auth/employee-login", json={
+            "business_id": self.biz_a.business_code, "username": manager.username,
+            "password": "ManagerPass9", "selected_role": "manager",
+        })
+        self.assertEqual(login.status_code, 200, login.text)
+        manager_token = login.json()["access_token"]
+
+        request = self.client.delete(f"/products/{product_id}", headers=self.auth(manager_token))
+        self.assertEqual(request.status_code, 200, request.text)
+        self.assertIn("approval", request.json().get("message", "").lower())
+
+        pending = self.client.get("/product-deletion-requests", headers=self.auth(self.token_a))
+        self.assertEqual(pending.status_code, 200, pending.text)
+        matching = [r for r in pending.json() if r.get("product_name") == "Manager Delete Target"]
+        self.assertEqual(len(matching), 1, pending.text)
+
+        approve = self.client.post(f"/product-deletion-requests/{matching[0]['id']}/approve", headers=self.auth(self.token_a))
+        self.assertEqual(approve.status_code, 200, approve.text)
+
+        self.assertIsNone(self.db.query(pg_main.Product).filter(pg_main.Product.id == product_id).first())
+        rows = self.catalog_rows_for_barcode(barcode)
+        self.assertEqual(len(rows), 1, "General Catalog identity must survive manager-approved deletion")
+
+    # -- Fuzzy similarity must only ever produce a candidate, never a merge --
+    def test_fuzzy_candidates_are_suggestions_only_never_auto_merged(self):
+        r1 = self.create_product(self.token_a, name="Audit Cream Crackers", size="200g")
+        self.assertEqual(r1.status_code, 200, r1.text)
+        r2 = self.create_product(self.token_b, name="Audit Blue Cream Crackers", size="200g")
+        self.assertEqual(r2.status_code, 200, r2.text)
+
+        rows_a = self.no_barcode_rows_named("Audit Cream Crackers")
+        rows_b = self.no_barcode_rows_named("Audit Blue Cream Crackers")
+        self.assertEqual(len(rows_a), 1)
+        self.assertEqual(len(rows_b), 1)
+        self.assertNotEqual(rows_a[0].catalog_key, rows_b[0].catalog_key, "similar-but-different names must never auto-merge")
+
+        candidates = pg_main.find_general_catalog_candidates(self.db, "Audit Cream Crackers", "200g", limit=5)
+        matched = [c for c in candidates if c["catalog_key"] == rows_b[0].catalog_key]
+        self.assertEqual(len(matched), 1, "the similar existing row should still surface as a candidate for manual review")
+
+    # -- General Catalog failure must never fail a valid Product creation --
+    def test_general_catalog_failure_does_not_fail_product_creation(self):
+        with patch("main._general_catalog_atomic_get_or_create", side_effect=RuntimeError("simulated catalog failure")):
+            r = self.create_product(self.token_a, name="Resilient Despite Catalog Failure", size=None)
+        self.assertEqual(r.status_code, 200, f"a General Catalog failure must never surface as a failed product creation: {r.text}")
+        product_id = r.json()["id"]
+        fetched = self.db.query(pg_main.Product).filter(pg_main.Product.id == product_id).first()
+        self.assertIsNotNone(fetched, "the product must be genuinely persisted despite the catalog failure")
+        # The outer session must remain fully usable after the SAVEPOINT
+        # rollback -- prove it by successfully doing something else with it.
+        self.db.add(pg_main.AuditLog(business_id=self.biz_a.id, action="TEST_PROBE", actor_username="test", description="post-failure session usability check"))
+        self.db.commit()
+
+    # -- POS/New Sale isolation regression --
+    def test_pos_related_code_never_references_general_catalog_or_upcitemdb(self):
+        import inspect
+        pos_related_names = [
+            name for name in dir(pg_main)
+            if any(token in name.lower() for token in ("pos_", "sale_barcode", "resolve_scanned"))
+        ]
+        # Nothing in this backend module implements POS scanning server-side
+        # at all (see catalog_barcode_lookup's own section comment) -- this
+        # positively confirms that, rather than assuming it.
+        for name in pos_related_names:
+            obj = getattr(pg_main, name)
+            if callable(obj):
+                source = inspect.getsource(obj)
+                self.assertNotIn("GeneralCatalog", source, name)
+                self.assertNotIn("lookup_upcitemdb", source, name)
+
+    # -- Concurrency: same barcode, conflicting submitted names, through the
+    #    REAL HTTP endpoint (per-thread TestClient — a shared sync TestClient
+    #    is not guaranteed safe to call concurrently from multiple threads;
+    #    each worker below gets its own). Proves the full stack, not just
+    #    the isolated helper function, never 500s under a real race. --
+    def test_concurrent_same_barcode_conflicting_names_via_real_endpoint_never_500s(self):
+        from fastapi.testclient import TestClient as _TestClient
+
+        barcode = f"{4200000000000 + int(self.suffix[:6], 16) % 900000}"[:13]
+        names = ["Race Name Alpha", "Race Name Beta"]
+        tokens = [self.token_a, self.token_b]
+        results, errors = [], []
+
+        def worker(name, token):
+            try:
+                client = _TestClient(pg_main.app)
+                r = client.post("/products/", json={
+                    "name": name, "category": "General", "size": "1 unit", "barcode": barcode,
+                    "warehouse": "Main Central Warehouse", "quantity": 1, "min_stock_level": 1,
+                    "cost_price": 1.0, "wholesale_price": 1.0, "retail_price": 2.0,
+                }, headers=self.auth(token))
+                results.append(r)
+            except Exception as exc:  # pragma: no cover - failure path is the assertion below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(n, t)) for n, t in zip(names, tokens)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+
+        self.assertEqual(errors, [], f"concurrent product creation raised: {errors}")
+        self.assertEqual(len(results), 2)
+        for r in results:
+            self.assertEqual(r.status_code, 200, r.text)
+
+        rows = self.catalog_rows_for_barcode(barcode)
+        self.assertEqual(len(rows), 1, "exactly one canonical identity must survive a concurrent conflicting-name race")
+        self.assertIn(rows[0].product_name, names)
+
+    # -- Concurrency: business_submission racing UPCitemdb's own cache-write
+    #    for the SAME brand-new barcode. --
+    def test_concurrent_business_submission_and_upcitemdb_cache_same_barcode(self):
+        barcode = f"{4300000000000 + int(self.suffix[:6], 16) % 900000}"[:13]
+        errors = []
+
+        def business_worker():
+            session = pg_main.SessionLocal()
+            try:
+                key = pg_main.general_catalog_key_for(barcode, "Business Submitted Name", "500ml")
+                pg_main._general_catalog_atomic_get_or_create(
+                    session, key=key, barcode=barcode, product_name="Business Submitted Name",
+                    brand=None, size="500ml", source="business_submission",
+                )
+                session.commit()
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+                session.rollback()
+            finally:
+                session.close()
+
+        def upcitemdb_worker():
+            session = pg_main.SessionLocal()
+            try:
+                pg_main.upsert_general_catalog_identity(
+                    session, barcode, "UPCitemdb Confirmed Name", "RealBrand", "500ml", source="upcitemdb",
+                )
+                session.commit()
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+                session.rollback()
+            finally:
+                session.close()
+
+        threads = [threading.Thread(target=business_worker), threading.Thread(target=upcitemdb_worker)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        self.assertEqual(errors, [], f"concurrent business+UPCitemdb catalog writes raised: {errors}")
+        rows = self.catalog_rows_for_barcode(barcode)
+        self.assertEqual(len(rows), 1, "business submission and UPCitemdb caching must never duplicate a barcode identity")
+
+    # -- Concurrency: same VERIFIED no-barcode identity from two businesses --
+    def test_concurrent_same_verified_no_barcode_identity_produces_one_row(self):
+        errors = []
+
+        def worker(origin_id):
+            session = pg_main.SessionLocal()
+            try:
+                key = pg_main.general_catalog_key_for(None, "Concurrent Verified Widget", "500ml", uncertain_disambiguator=origin_id)
+                pg_main._general_catalog_atomic_get_or_create(
+                    session, key=key, barcode=None, product_name="Concurrent Verified Widget",
+                    brand=None, size="500ml", source="business_submission",
+                )
+                session.commit()
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+                session.rollback()
+            finally:
+                session.close()
+
+        # Same disambiguator on both sides on purpose: with a VERIFIED size,
+        # general_catalog_key_for() ignores the disambiguator entirely, so
+        # this proves the verified-size path still merges correctly even
+        # though two independent "products" are racing.
+        threads = [threading.Thread(target=worker, args=(None,)) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        self.assertEqual(errors, [])
+        rows = self.no_barcode_rows_named("Concurrent Verified Widget")
+        self.assertEqual(len(rows), 1, "concurrent submissions of the SAME verified no-barcode identity must resolve to one row")
+
+    # -- Concurrency: genuinely DIFFERENT no-barcode identities racing must
+    #    never crash and must never accidentally collide into one row. --
+    def test_concurrent_conflicting_no_barcode_identities_produce_separate_rows_no_crash(self):
+        errors = []
+
+        def worker(i):
+            session = pg_main.SessionLocal()
+            try:
+                name = f"Audit Distinct Product {i}"
+                key = pg_main.general_catalog_key_for(None, name, "500ml")
+                pg_main._general_catalog_atomic_get_or_create(
+                    session, key=key, barcode=None, product_name=name,
+                    brand=None, size="500ml", source="business_submission",
+                )
+                session.commit()
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+                session.rollback()
+            finally:
+                session.close()
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        self.assertEqual(errors, [])
+        for i in range(5):
+            rows = self.no_barcode_rows_named(f"Audit Distinct Product {i}")
+            self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":

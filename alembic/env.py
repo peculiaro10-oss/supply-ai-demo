@@ -19,6 +19,32 @@ os.environ.setdefault("SUPPLY_AI_SECRET_KEY", "alembic-metadata-only-secret-not-
 os.environ.setdefault("SUPPLY_AI_SKIP_DB_STARTUP_CHECK", "true")
 from main import Base
 
+# Alembic's own alembic_version.version_num column defaults to VARCHAR(32)
+# (see alembic.ddl.impl.DefaultImpl.version_table_impl) — too narrow for
+# this project's descriptive revision ids (several already exceed 32
+# characters). This widens the column at the SOURCE — the DDL Alembic
+# itself generates for a brand-new version table — so both `alembic upgrade
+# head` (online) AND `alembic upgrade head --sql` (offline SQL generation)
+# emit a wide-enough column from the very first CREATE TABLE, with no
+# separate ALTER needed for a genuinely fresh bootstrap. Patches the
+# existing PostgresqlImpl class in place (never registers a competing
+# subclass under the same __dialect__, which would race on import order).
+# _ensure_wide_alembic_version_column() below is still needed alongside
+# this for a real database that already has an existing, narrower
+# alembic_version table from before this fix existed — this patch alone
+# only affects tables Alembic creates fresh.
+from alembic.ddl.postgresql import PostgresqlImpl
+import sqlalchemy as _sa
+
+_original_version_table_impl = PostgresqlImpl.version_table_impl
+
+def _wide_version_table_impl(self, **kw):
+    table = _original_version_table_impl(self, **kw)
+    table.c.version_num.type = _sa.String(255)
+    return table
+
+PostgresqlImpl.version_table_impl = _wide_version_table_impl
+
 target_metadata = Base.metadata
 database_url = os.getenv("DATABASE_URL", "").strip()
 if not database_url:
@@ -26,6 +52,23 @@ if not database_url:
 config.set_main_option("sqlalchemy.url", database_url)
 
 def run_migrations_offline() -> None:
+    """KNOWN PRE-EXISTING LIMITATION (found auditing General Catalog's
+    migration 0019, not caused by it): `alembic upgrade head --sql` cannot
+    actually complete this project's full migration chain today. Several
+    migrations before and after 0019 (e.g. 0002_business_day_integrity,
+    0013_barcode_catalog) use an `_add_column_if_missing()`-style idempotent
+    check built on `sqlalchemy.inspect(bind)`, which requires a real,
+    connected database to introspect existing columns — offline mode's
+    `MockConnection` cannot support that at all (`NoInspectionAvailable`).
+    This is not something the version_table_impl patch above (or anything
+    General-Catalog-specific) can fix — doing so would mean rewriting many
+    unrelated historical migration files, which is explicitly out of scope
+    (never rewrite migration history for unrelated migrations). This
+    project's migrations have only ever been run online in practice (see
+    DEPLOYMENT.md / the Dockerfile's "explicit release step" comment) — the
+    fix above still matters for offline mode because it corrects what SQL
+    Alembic WOULD generate for the version table itself, up to wherever a
+    caller's chain of migrations can actually reach."""
     context.configure(url=database_url, target_metadata=target_metadata, literal_binds=True, dialect_opts={"paramstyle": "named"})
     with context.begin_transaction():
         context.run_migrations()

@@ -3455,9 +3455,16 @@ def normalize_catalog_size(value: Optional[str]) -> Optional[str]:
     number_str, unit = match.group(1).replace(",", "."), match.group(2).lower()
     try:
         number = float(number_str)
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
-    if number <= 0:
+    # Reject non-finite results (a sufficiently long digit string makes
+    # float() overflow to inf without raising) and anything physically
+    # implausible for a single product identity entry — a real retail
+    # or even bulk/wholesale unit is never legitimately 1,000+ litres or
+    # kilograms. Without this, an extreme value would either silently
+    # fabricate a "verified" size out of garbage input, or crash later
+    # (int(inf) raises OverflowError) when formatting the result.
+    if not math.isfinite(number) or number <= 0 or number > 1_000_000:
         return None
     if unit in _CATALOG_SIZE_UNIT_TO_ML:
         base_value, base_unit = number * _CATALOG_SIZE_UNIT_TO_ML[unit], "ml"
@@ -3473,17 +3480,36 @@ def normalize_catalog_size(value: Optional[str]) -> Optional[str]:
     return f"{number_repr}{base_unit}"
 
 
-def general_catalog_key_for(barcode: Optional[str], name: Optional[str], size: Optional[str]) -> str:
+def general_catalog_key_for(barcode: Optional[str], name: Optional[str], size: Optional[str], *,
+                            uncertain_disambiguator: Optional[object] = None) -> str:
     """The one place that decides General Catalog identity. `barcode` must
     already be normalize_barcode()-normalized by the caller; when present it
     is authoritative and exact. Otherwise identity is normalized name +
     normalized size — deliberately never category (see class docstring) and
-    never a fuzzy/similarity score (see the module note above)."""
+    never a fuzzy/similarity score (see the module note above).
+
+    UNVERIFIED SIZE (normalize_catalog_size() returned None — blank, vague,
+    or unparseable) is deliberately NEVER folded into one shared 'no size'
+    bucket: two independent submissions of the same name proves NOTHING
+    about being the same physical product when neither has a verified
+    size (different pack sizes/weights/volumes/variants can share a bare
+    name) — auto-merging them would be a false canonical merge, which is
+    never acceptable even at the cost of a less tidy catalog. `caller`
+    passes something stable and business-agnostic that identifies THIS
+    ONE originating row (auto_upsert_general_catalog passes the calling
+    Product's own database id) so this SAME product's own later edits
+    keep mapping to the SAME catalog row it originally created (no
+    unbounded row growth from repeated edits), while a genuinely
+    different product — even one with an identical name — always gets
+    its own identity rather than silently inheriting someone else's."""
     if barcode:
         return f"barcode:{barcode}"
     normalized_name = _dup_norm_name(name)
     normalized_size = normalize_catalog_size(size)
-    return f"name:{normalized_name}|size:{normalized_size or 'none'}"
+    if normalized_size:
+        return f"name:{normalized_name}|size:{normalized_size}"
+    origin = uncertain_disambiguator if uncertain_disambiguator is not None else secrets.token_hex(6)
+    return f"name:{normalized_name}|size:unverified|origin:{origin}"
 
 
 def find_general_catalog_candidates(db: Session, name: Optional[str], size: Optional[str], limit: int = 5) -> List[dict]:
@@ -3624,7 +3650,7 @@ def auto_upsert_general_catalog(db: Session, product: Product) -> None:
     barcode = normalize_barcode(product.barcode)
     if not barcode and not _dup_norm_name(product.name):
         return  # nothing safely identifiable to contribute (e.g. a blank name)
-    key = general_catalog_key_for(barcode, product.name, product.size)
+    key = general_catalog_key_for(barcode, product.name, product.size, uncertain_disambiguator=product.id)
     try:
         with db.begin_nested():
             existing = db.query(GeneralCatalog).filter(GeneralCatalog.catalog_key == key).first()
