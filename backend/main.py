@@ -679,6 +679,17 @@ class Supplier(Base):
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
 class PurchaseOrder(Base):
+    """Lifecycle: generate_po() always creates one as status="DRAFT". A draft
+    can be reviewed, edited (update_po_draft) and deleted (delete_po) freely,
+    and never counts toward the business's subscription Purchase Order
+    allowance. Once successfully sent — dispatch_po_email() after the email
+    provider accepts the send, or confirm_po_whatsapp_sent() after the user
+    explicitly confirms they sent the WhatsApp message opened via
+    get_po_whatsapp_link() — status becomes "SENT" and sent_at is stamped; from that
+    point the purchase order is permanent, immutable history: update_po_draft
+    and delete_po both reject any further change with 409. See sent_at below
+    for why billing-period usage is computed from it instead of created_at.
+    """
     __tablename__ = "purchase_orders"
     id = Column(Integer, primary_key=True, index=True)
     supplier_id = Column(Integer, ForeignKey("suppliers.id", ondelete="SET NULL"), nullable=True)
@@ -688,6 +699,15 @@ class PurchaseOrder(Base):
     business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False)
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
+    # When this PO was actually SENT (email accepted by the provider, or the
+    # user confirmed a WhatsApp send) — NULL for every DRAFT. Subscription
+    # usage for Purchase Orders is counted by sent_at falling inside the
+    # current billing period, never by created_at: a draft generated in one
+    # billing period can be sent in a later one, and only the period it was
+    # actually SENT in should ever be charged for it. See migration
+    # 0020_purchase_order_sent_at for how existing SENT rows (created before
+    # this column existed) were backfilled.
+    sent_at = Column(SQLDateTime, nullable=True)
 
 class Expense(Base):
     """A business expense transaction. Deliberately mirrors PurchaseOrder's
@@ -7802,16 +7822,18 @@ def get_purchase_orders(user: User = Depends(get_current_user), db: Session = De
         # here — additive fields, existing consumers of this response are
         # unaffected (the frontend already references po.created_at, which
         # was silently undefined until now).
-        out.append({"id": po.id, "supplier_id": po.supplier_id, "vendor_name": supplier.name if supplier else "General Vendor", "status": po.status, "total_estimated_cost": po.total_estimated_cost, "items_summary": po.email_draft or "", "email_draft": po.email_draft or "", "created_at": to_utc_iso(po.created_at), "created_by": owner_name(po.owner_id)})
+        out.append({"id": po.id, "supplier_id": po.supplier_id, "vendor_name": supplier.name if supplier else "General Vendor", "status": po.status, "total_estimated_cost": po.total_estimated_cost, "items_summary": po.email_draft or "", "email_draft": po.email_draft or "", "created_at": to_utc_iso(po.created_at), "sent_at": to_utc_iso(po.sent_at), "created_by": owner_name(po.owner_id)})
     return out
 
 @app.post("/purchase-orders/generate")
 def generate_po(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
-    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-    period_start, period_end, _ = billing_period_for(db, business)
-    current = db.query(PurchaseOrder).filter(PurchaseOrder.business_id == user.business_id, PurchaseOrder.created_at >= period_start, PurchaseOrder.created_at < period_end).count()
-    check_plan_limit(db, business, "purchase_order", current)
+    # No subscription/plan-limit check here, on purpose. A generated PO always
+    # starts as a DRAFT, and drafts must never consume the plan's Purchase
+    # Order allowance — otherwise a user could generate up to their limit,
+    # delete the drafts, and generate more, indefinitely. The allowance is
+    # enforced exactly once, at the point a PO is actually SENT (see
+    # dispatch_po_email() and confirm_po_whatsapp_sent()).
     low_stock = db.query(Product).filter(Product.business_id == user.business_id, Product.quantity <= Product.min_stock_level).all()
     if not low_stock: raise HTTPException(status_code=400, detail="No low stock items requiring restock.")
     total_cost = sum(p.cost_price * max(p.min_stock_level * 2, 1) for p in low_stock)
@@ -7832,6 +7854,11 @@ def update_po_draft(po_id: int, update: PODraftUpdate, user: User = Depends(get_
     if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
     if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
+    # Immutability boundary enforced server-side, not just hidden in the UI:
+    # only a DRAFT may ever be edited. A direct API call against an already-
+    # SENT purchase order is rejected here regardless of what the frontend does.
+    if po.status != "DRAFT":
+        raise HTTPException(status_code=409, detail="Only draft purchase orders can be edited. This purchase order has already been sent and is now permanent history.")
     details = update.details if update.details is not None else update.items_summary
     if details is not None: po.email_draft = details
     if update.supplier_id is not None: po.supplier_id = update.supplier_id
@@ -7843,41 +7870,107 @@ def delete_po(po_id: int, user: User = Depends(get_current_user), db: Session = 
     if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
     if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
+    # Immutability boundary enforced server-side: a SENT purchase order is
+    # permanent history and can never be deleted, individually or in bulk
+    # (see delete_all_pos's identical rule), regardless of what calls this.
+    if po.status != "DRAFT":
+        raise HTTPException(status_code=409, detail="Sent purchase orders are permanent history and cannot be deleted.")
     add_audit(db, user, "PURCHASE_ORDER_DELETED", f"Deleted purchase order #{po.id}.")
     db.delete(po); db.commit(); return {"message": "Purchase order deleted."}
 
 @app.delete("/purchase-orders")
 def delete_all_pos(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role != "admin": raise HTTPException(status_code=403, detail="Only Admins can delete all purchase orders.")
-    db.query(PurchaseOrder).filter(PurchaseOrder.business_id == user.business_id).delete(synchronize_session=False)
-    add_audit(db, user, "PURCHASE_ORDERS_CLEARED", "Cleared all purchase orders."); db.commit(); return {"message": "All purchase orders deleted."}
+    # Drafts only. A SENT purchase order is permanent history and this bulk
+    # action must never be able to remove it — see delete_po's identical rule.
+    if user.role != "admin": raise HTTPException(status_code=403, detail="Only Admins can delete all draft purchase orders.")
+    deleted = db.query(PurchaseOrder).filter(PurchaseOrder.business_id == user.business_id, PurchaseOrder.status == "DRAFT").delete(synchronize_session=False)
+    add_audit(db, user, "PURCHASE_ORDERS_CLEARED", f"Cleared {deleted} draft purchase order(s)."); db.commit(); return {"message": "All draft purchase orders deleted.", "deleted": deleted}
+
+def _po_sent_count_this_period(db: Session, business: BusinessProfile) -> int:
+    """SENT purchase orders whose sent_at falls inside the CURRENT billing
+    period — the single shared definition of Purchase Order usage, used by
+    both send endpoints below and by GET /subscription/usage. Deliberately
+    keyed on sent_at, never created_at: a draft generated in one billing
+    period can be sent in a later one, and only the period it was actually
+    sent in should ever be charged for it."""
+    period_start, period_end, _ = billing_period_for(db, business)
+    return db.query(PurchaseOrder).filter(
+        PurchaseOrder.business_id == business.id, PurchaseOrder.status == "SENT",
+        PurchaseOrder.sent_at.isnot(None), PurchaseOrder.sent_at >= period_start, PurchaseOrder.sent_at < period_end,
+    ).count()
 
 @app.post("/purchase-orders/{po_id}/dispatch")
-def dispatch_po(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_po_whatsapp_link(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Builds the wa.me deep link for a draft PO. Deliberately READ-ONLY: it
+    does not change the purchase order's status, stamp sent_at, or consume
+    the plan's Purchase Order allowance, because opening this URL only
+    launches WhatsApp with a prefilled message — it does not prove the user
+    actually pressed send inside WhatsApp. The order only becomes SENT once
+    the frontend calls POST .../dispatch-whatsapp-confirm afterward, after
+    the user explicitly confirms they sent it. (Previously this endpoint
+    marked the PO SENT immediately, on link generation alone, which was
+    inaccurate; nothing in the shipped frontend called this endpoint before
+    this change, so no existing integration relied on that side effect.)"""
     if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
-    if not po or not po.supplier_id: raise HTTPException(status_code=400, detail="Purchase order or assigned supplier is unavailable.")
+    if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
+    if po.status != "DRAFT": raise HTTPException(status_code=409, detail="This purchase order has already been sent.")
+    if not po.supplier_id: raise HTTPException(status_code=400, detail="Assign a supplier to this purchase order first.")
     supplier = db.query(Supplier).filter(Supplier.id == po.supplier_id, Supplier.business_id == user.business_id).first()
     if not supplier: raise HTTPException(status_code=404, detail="Supplier is unavailable.")
+    if not supplier.phone: raise HTTPException(status_code=400, detail="This supplier has no phone number on file.")
     phone = normalize_phone(supplier.phone)
     encoded = urllib.parse.quote(po.email_draft or "")
-    po.status = "SENT"; add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Dispatched purchase order #{po.id} via WhatsApp.")
+    return {"whatsapp_url": f"https://wa.me/{phone}?text={encoded}"}
+
+@app.post("/purchase-orders/{po_id}/dispatch-whatsapp-confirm")
+def confirm_po_whatsapp_sent(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Marks a draft PO as SENT after the user explicitly confirms, in the
+    UI, that they actually sent the WhatsApp message opened via
+    GET .../dispatch. Documented limitation: Cauldra has no WhatsApp
+    Business API integration (deliberately — the smallest change that avoids
+    a large new external integration), so it has no technical way to confirm
+    delivery of a wa.me link message. Rather than falsely claiming confirmed
+    delivery, or silently marking every generated link as sent (which would
+    let a user rack up "sent" purchase orders without ever pressing send in
+    WhatsApp), this endpoint trusts the user's own explicit attestation —
+    exactly once per order — behind the same DRAFT-only and plan-limit
+    checks enforced everywhere else a purchase order becomes SENT."""
+    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
+    if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
+    if po.status != "DRAFT": raise HTTPException(status_code=409, detail="This purchase order has already been sent.")
+    if not po.supplier_id: raise HTTPException(status_code=400, detail="Assign a supplier to this purchase order first.")
+    supplier = db.query(Supplier).filter(Supplier.id == po.supplier_id, Supplier.business_id == user.business_id).first()
+    if not supplier: raise HTTPException(status_code=404, detail="Supplier is unavailable.")
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    check_plan_limit(db, business, "purchase_order", _po_sent_count_this_period(db, business))
+    po.status = "SENT"; po.sent_at = datetime.utcnow()
+    add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Dispatched purchase order #{po.id} via WhatsApp (user-confirmed sent).")
     create_notification(
         db, business_id=user.business_id, category="purchase_order", severity="important", type="PO_SUBMITTED",
         title="Purchase order submitted", message=f"Purchase order #{po.id} was sent to {supplier.name}.",
         related_entity_type="purchase_order", related_entity_id=po.id, deep_link=f"purchase_order:{po.id}",
     )
     db.commit()
-    return {"message": f"Purchase Order dispatched to {supplier.name}.", "whatsapp_url": f"https://wa.me/{phone}?text={encoded}"}
+    return {"message": f"Purchase Order #{po.id} marked as sent to {supplier.name}."}
 
 @app.post("/purchase-orders/{po_id}/dispatch-email")
 def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
-    if not po or not po.supplier_id: raise HTTPException(status_code=400, detail="Purchase order or assigned supplier is unavailable.")
+    if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
+    # Immutability boundary: an already-SENT PO can never be (re)dispatched.
+    if po.status != "DRAFT": raise HTTPException(status_code=409, detail="This purchase order has already been sent.")
+    if not po.supplier_id: raise HTTPException(status_code=400, detail="Assign a supplier to this purchase order first.")
     supplier = db.query(Supplier).filter(Supplier.id == po.supplier_id, Supplier.business_id == user.business_id).first()
     if not supplier: raise HTTPException(status_code=404, detail="Supplier is unavailable.")
     if not supplier.contact_email: raise HTTPException(status_code=400, detail="This supplier has no contact email on file.")
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    # Enforced at SEND time, not at generation time — see generate_po(). Checked
+    # BEFORE calling the email provider so a plan that's already at its limit
+    # never even attempts (and never appears to almost-succeed at) a send.
+    check_plan_limit(db, business, "purchase_order", _po_sent_count_this_period(db, business))
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(status_code=503, detail="Email dispatch is not configured. Add RESEND_API_KEY to the server environment.")
@@ -7897,8 +7990,20 @@ def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Se
         if not r.ok:
             raise RuntimeError(r.text)
     except Exception as exc:
+        # Nothing is persisted above this point (status/sent_at are only ever
+        # set below, after a confirmed-successful send) — a failed/rejected
+        # email leaves the purchase order exactly as it was: still a DRAFT,
+        # still not counted against the plan's allowance. Only a genuinely
+        # provider-accepted send can consume it.
         raise HTTPException(status_code=502, detail="We could not email this purchase order right now.") from exc
-    po.status = "SENT"; db.commit(); add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Emailed purchase order #{po.id} to {supplier.name}."); db.commit()
+    po.status = "SENT"; po.sent_at = datetime.utcnow()
+    add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Emailed purchase order #{po.id} to {supplier.name}.")
+    create_notification(
+        db, business_id=user.business_id, category="purchase_order", severity="important", type="PO_SUBMITTED",
+        title="Purchase order submitted", message=f"Purchase order #{po.id} was sent to {supplier.name}.",
+        related_entity_type="purchase_order", related_entity_id=po.id, deep_link=f"purchase_order:{po.id}",
+    )
+    db.commit()
     return {"message": f"Purchase Order emailed to {supplier.name}."}
 
 # -----------------------------------------------------------------------------
@@ -9475,7 +9580,14 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
     plan = subscription_for(db, business)
     period_start, period_end, _ = billing_period_for(db, business)
     storage_used_bytes = db.query(func.coalesce(func.sum(StoredUpload.size_bytes), 0)).filter(StoredUpload.business_id == business.id).scalar() or 0
-    po_this_period = db.query(PurchaseOrder).filter(PurchaseOrder.business_id == business.id, PurchaseOrder.created_at >= period_start, PurchaseOrder.created_at < period_end).count()
+    # Purchase Order usage counts SENT orders only, by sent_at (not
+    # created_at) falling inside the current billing period — see
+    # _po_sent_count_this_period() and the PurchaseOrder.sent_at column doc.
+    # period_start/period_end above already come from billing_period_for(db, business).
+    po_this_period = db.query(PurchaseOrder).filter(
+        PurchaseOrder.business_id == business.id, PurchaseOrder.status == "SENT",
+        PurchaseOrder.sent_at.isnot(None), PurchaseOrder.sent_at >= period_start, PurchaseOrder.sent_at < period_end,
+    ).count()
     role_counts = {role: db.query(User).filter(User.business_id == business.id, User.role == role).count() for role in ("admin", "manager", "staff")}
     resources = {
         "products": db.query(Product).filter(Product.business_id == business.id).count(),

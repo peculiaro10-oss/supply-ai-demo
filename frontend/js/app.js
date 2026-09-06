@@ -1629,6 +1629,33 @@
                     deletedSuccess: "Purchase order deleted successfully.",
                     deleteAllConfirmBody: "Are you sure you want to delete ALL purchase orders?", deleteAllConfirmTitle: "Delete All POs",
                     allDeletedSuccess: "All purchase orders deleted successfully.", vendorFallback: "Vendor",
+                    // --- Generate / History tabs (merged Purchase Orders section) ---
+                    modalSubtitle: "Generate restock orders, review drafts, and browse sent order history",
+                    generateTab: "Generate Purchase Order", historyTab: "Purchase Order History",
+                    generateButton: "Generate PO from Low Stock",
+                    draftsNeverCountNotice: "A generated order starts as a DRAFT — review, assign a supplier, edit, and send it below. Drafts never count against your plan's Purchase Order allowance.",
+                    readOnlyHistoryNotice: "Sent purchase orders are permanent history and cannot be edited or deleted.",
+                    draftsSearchPlaceholder: "Search drafts by vendor name or ID...",
+                    historySearchPlaceholder: "Search sent orders by vendor name, ID, or date...",
+                    noDrafts: "No draft purchase orders.", noneMatchDraftSearch: "No drafts match your search.",
+                    noHistory: "No sent purchase orders yet.", noneMatchHistorySearch: "No sent orders match your search.",
+                    sent: "Sent", sentOn: "Sent: {date}",
+                    assignSupplier: "Supplier", noSupplierOption: "No supplier assigned",
+                    sendEmail: "Send Email", sendWhatsapp: "Send WhatsApp",
+                    supplierMissingEmail: "Assign a supplier with a contact email first.",
+                    supplierMissingPhone: "Assign a supplier with a phone number first.",
+                    sendEmailConfirmBody: "Send this purchase order to {vendor} by email? Once sent, it cannot be edited or deleted.",
+                    sendEmailConfirmTitle: "Send Purchase Order by Email",
+                    sendEmailSuccess: "Purchase order emailed successfully.", sendEmailFailed: "Failed to email this purchase order.",
+                    whatsappLinkFailed: "Could not prepare the WhatsApp message for this purchase order.",
+                    whatsappConfirmBody: "A WhatsApp message to {vendor} just opened in a new tab. Did you finish sending it? Cauldra cannot verify WhatsApp delivery automatically — only confirm if you actually sent the message.",
+                    whatsappConfirmTitle: "Confirm WhatsApp Send",
+                    whatsappKeptDraft: "Kept as a draft. You can send it again anytime.",
+                    whatsappConfirmSuccess: "Purchase order marked as sent.", whatsappConfirmFailed: "Could not mark this purchase order as sent.",
+                    deleteAllDraftsConfirmBody: "Are you sure you want to delete ALL draft purchase orders? Sent purchase order history is never deleted.",
+                    deleteAllDraftsConfirmTitle: "Delete All Drafts",
+                    allDraftsDeletedSuccess: "All draft purchase orders deleted successfully.",
+                    deleteAllDraftsButton: "Delete All Drafts",
                 },
             },
             fr: {
@@ -16225,11 +16252,11 @@
 
         const ROLE_FEATURES = {
             admin: new Set([
-                'inventory', 'add product', 'new sale', 'generate po', 'purchase orders', 'suppliers',
+                'inventory', 'add product', 'new sale', 'purchase orders', 'suppliers',
                 'warehouses', 'ai center', 'business brain', 'price monitor', 'predictive monitor', 'daily sales', 'team presence', 'business profile', 'expenses', 'profit'
             ]),
             manager: new Set([
-                'inventory', 'add product', 'new sale', 'generate po', 'purchase orders', 'ai center',
+                'inventory', 'add product', 'new sale', 'purchase orders', 'ai center',
                 'business brain', 'price monitor', 'predictive monitor', 'daily sales', 'team presence', 'expenses', 'profit'
             ]),
             staff: new Set(['inventory', 'add product', 'new sale', 'daily sales', 'business brain', 'expenses'])
@@ -16680,7 +16707,7 @@
         function featureDisplayName(featureName) {
             const map = {
                 'daily sales': 'navigation.todaysSales', 'team presence': 'navigation.teamPresence',
-                'generate po': 'navigation.generatePO', 'purchase orders': 'navigation.purchaseOrders',
+                'purchase orders': 'navigation.purchaseOrders',
                 'inventory': 'navigation.inventory', 'suppliers': 'navigation.suppliers',
                 'warehouses': 'navigation.warehouses', 'expenses': 'navigation.expenses', 'profit': 'navigation.profit',
                 'business brain': 'navigation.businessBrain', 'ai center': 'navigation.aiCenter',
@@ -16723,7 +16750,6 @@
 
             const restrictedFeatures = [
                 ['nav-btn-business-brain', 'business brain'],
-                ['nav-btn-gen-po', 'generate po'],
                 ['nav-btn-po', 'purchase orders'],
                 ['nav-btn-inventory', 'inventory'],
                 ['nav-btn-suppliers', 'suppliers'],
@@ -23243,16 +23269,41 @@
         function exportTeamPresenceCsv() { runCsvExport(buildTeamPresenceExportSpec, "No team presence data available to export."); }
         function exportTeamPresenceExcel(button) { runExcelExport(button, buildTeamPresenceExportSpec, "No team presence data available to export."); }
 
-        function openPOModal() { 
+        function openPOModal() {
             if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
                 return;
             }
-            document.getElementById("po-modal").classList.remove("hidden"); 
-            loadPurchaseOrders(); 
+            document.getElementById("po-modal").classList.remove("hidden");
+            switchPOTab('generate');
+            loadSuppliers();
+            loadPurchaseOrders();
         }
         function closePOModal() { document.getElementById("po-modal").classList.add("hidden"); }
+
+        // Generate Purchase Order / Purchase Order History tabs (the sidebar's
+        // former separate "Generate PO" and "Purchase Orders" items are now one
+        // merged nav-btn-po — see index.html). Both tabs render from the same
+        // cached globalPurchaseOrders (loadPurchaseOrders()); switching tabs
+        // never re-fetches from the server.
+        function switchPOTab(tab) {
+            const isHistory = tab === 'history';
+            document.getElementById('po-tab-generate').classList.toggle('hidden', isHistory);
+            document.getElementById('po-tab-history').classList.toggle('hidden', !isHistory);
+            const genBtn = document.getElementById('po-tab-btn-generate');
+            const histBtn = document.getElementById('po-tab-btn-history');
+            genBtn.classList.toggle('border-primary', !isHistory);
+            genBtn.classList.toggle('text-primary', !isHistory);
+            genBtn.classList.toggle('border-transparent', isHistory);
+            genBtn.classList.toggle('text-textSec', isHistory);
+            genBtn.setAttribute('aria-selected', String(!isHistory));
+            histBtn.classList.toggle('border-primary', isHistory);
+            histBtn.classList.toggle('text-primary', isHistory);
+            histBtn.classList.toggle('border-transparent', !isHistory);
+            histBtn.classList.toggle('text-textSec', !isHistory);
+            histBtn.setAttribute('aria-selected', String(isHistory));
+        }
         
         function openSupplierModal() { 
             if (!hasAuthenticatedBusinessContext()) {
@@ -25825,57 +25876,66 @@
         }
 
         async function loadPurchaseOrders() {
-            const container = document.getElementById("po-container");
             try {
                 const headers = authToken ? { "Authorization": `Bearer ${authToken}` } : {};
                 const res = await fetch(`${API_URL}/purchase-orders/`, { headers });
                 if (res.ok) {
                     globalPurchaseOrders = await res.json();
-                    renderPurchaseOrdersList(globalPurchaseOrders);
+                    renderPurchaseOrderDrafts(getFilteredPurchaseOrderDrafts());
+                    renderPurchaseOrderHistory(getFilteredPurchaseOrderHistory());
                 } else {
-                    container.innerHTML = `<div class="text-center py-6 text-textSec text-xs">${t("purchaseOrders.noneFound")}</div>`;
+                    document.getElementById("po-draft-container").innerHTML = `<div class="text-center py-6 text-textSec text-xs">${t("purchaseOrders.noneFound")}</div>`;
+                    document.getElementById("po-history-container").innerHTML = `<div class="text-center py-6 text-textSec text-xs">${t("purchaseOrders.noneFound")}</div>`;
                 }
             } catch (e) {
-                container.innerHTML = `<div class="text-center py-6 text-danger text-xs">${t("purchaseOrders.loadFailed")}</div>`;
+                document.getElementById("po-draft-container").innerHTML = `<div class="text-center py-6 text-danger text-xs">${t("purchaseOrders.loadFailed")}</div>`;
+                document.getElementById("po-history-container").innerHTML = `<div class="text-center py-6 text-danger text-xs">${t("purchaseOrders.loadFailed")}</div>`;
             }
         }
 
-        // Shared by the search box and the CSV export, so "export what I'm
-        // currently seeing" can never drift from what filterPurchaseOrders()
-        // actually renders.
-        function getFilteredPurchaseOrders() {
-            const query = (document.getElementById("po-search-input")?.value || "").toLowerCase().trim();
-            if (!query) return globalPurchaseOrders;
-            return globalPurchaseOrders.filter(po =>
-                (po.vendor_name && po.vendor_name.toLowerCase().includes(query)) ||
-                (po.status && po.status.toLowerCase().includes(query)) ||
-                String(po.id).includes(query)
+        // A purchase order is a DRAFT (reviewable/editable/deletable, never
+        // counted toward the plan) or SENT (permanent, read-only history) —
+        // see the status field the backend sets (generate_po() always creates
+        // "DRAFT"; dispatch_po_email()/confirm_po_whatsapp_sent() set "SENT").
+        function getFilteredPurchaseOrderDrafts() {
+            const query = (document.getElementById("po-draft-search-input")?.value || "").toLowerCase().trim();
+            const drafts = globalPurchaseOrders.filter(po => po.status === 'DRAFT');
+            if (!query) return drafts;
+            return drafts.filter(po =>
+                (po.vendor_name && po.vendor_name.toLowerCase().includes(query)) || String(po.id).includes(query)
             );
         }
-
-        function filterPurchaseOrders() {
-            renderPurchaseOrdersList(getFilteredPurchaseOrders());
+        function getFilteredPurchaseOrderHistory() {
+            const query = (document.getElementById("po-history-search-input")?.value || "").toLowerCase().trim();
+            const sent = globalPurchaseOrders.filter(po => po.status === 'SENT');
+            if (!query) return sent;
+            return sent.filter(po =>
+                (po.vendor_name && po.vendor_name.toLowerCase().includes(query)) || String(po.id).includes(query)
+            );
         }
+        function filterPurchaseOrderDrafts() { renderPurchaseOrderDrafts(getFilteredPurchaseOrderDrafts()); }
+        function filterPurchaseOrderHistory() { renderPurchaseOrderHistory(getFilteredPurchaseOrderHistory()); }
 
-        // Exports whatever the search box currently filters to (all of
-        // globalPurchaseOrders when the box is empty) — /purchase-orders/
-        // loads every PO for the business at once, so there is no pagination
-        // gap to worry about.
+        // Exports Purchase Order History (SENT orders) only — drafts are
+        // transient working state, not a report, and the Export control now
+        // lives in the History tab. Exports whatever the search box currently
+        // filters to (all sent orders when it's empty).
         function buildPurchaseOrdersExportSpec() {
-            const rows = getFilteredPurchaseOrders();
+            const rows = getFilteredPurchaseOrderHistory();
             if (!rows.length) return null;
             return {
-                filenameBase: `cauldra_purchase_orders_${csvDateStamp()}`,
-                reportTitle: "Cauldra Purchase Orders Report",
+                filenameBase: `cauldra_purchase_order_history_${csvDateStamp()}`,
+                reportTitle: "Cauldra Purchase Order History Report",
                 metadata: [
                     ["Generated", new Date().toLocaleString()],
-                    ["Search", document.getElementById("po-search-input")?.value || "None"],
+                    ["Search", document.getElementById("po-history-search-input")?.value || "None"],
                 ],
                 sheets: [{
-                    name: "Purchase Orders",
+                    name: "Purchase Order History",
                     columns: [
                         { key: "id", label: "PO Number", type: "number" },
-                        { key: "created_at", label: "Date", type: "datetime", format: v => v ? formatBusinessDate(v) : "" },
+                        { key: "created_at", label: "Generated", type: "datetime", format: v => v ? formatBusinessDate(v) : "" },
+                        { key: "sent_at", label: "Sent", type: "datetime", format: v => v ? formatBusinessDate(v) : "" },
                         { key: "vendor_name", label: "Supplier", type: "text" },
                         { key: "status", label: "Status", type: "text" },
                         { key: "total_estimated_cost", label: "Total Estimated Cost", type: "currency" },
@@ -25886,18 +25946,31 @@
                 }],
             };
         }
-        function exportPurchaseOrdersCsv() { runCsvExport(buildPurchaseOrdersExportSpec, "No purchase orders available to export."); }
-        function exportPurchaseOrdersExcel(button) { runExcelExport(button, buildPurchaseOrdersExportSpec, "No purchase orders available to export."); }
+        function exportPurchaseOrdersCsv() { runCsvExport(buildPurchaseOrdersExportSpec, "No sent purchase orders available to export."); }
+        function exportPurchaseOrdersExcel(button) { runExcelExport(button, buildPurchaseOrdersExportSpec, "No sent purchase orders available to export."); }
 
-        function renderPurchaseOrdersList(pos) {
-            const container = document.getElementById("po-container");
+        // <option> list for a draft's supplier-assignment <select>, built from
+        // the already-loaded globalSuppliers (see openPOModal()'s loadSuppliers()
+        // call). A supplier must be assigned before either send action can work
+        // (both dispatch endpoints require it server-side too).
+        function poSupplierOptionsHtml(selectedId) {
+            const none = `<option value="">${t("purchaseOrders.noSupplierOption")}</option>`;
+            const options = globalSuppliers.map(s =>
+                `<option value="${s.id}" ${String(s.id) === String(selectedId || '') ? 'selected' : ''}>${escapeHtml(s.name)}</option>`
+            ).join("");
+            return none + options;
+        }
+
+        function renderPurchaseOrderDrafts(pos) {
+            const container = document.getElementById("po-draft-container");
             if (!pos.length) {
-                container.innerHTML = `<div class="text-center py-6 text-textSec text-xs">${t("purchaseOrders.noneMatchSearch")}</div>`;
+                container.innerHTML = `<div class="text-center py-6 text-textSec text-xs">${t("purchaseOrders.noneMatchDraftSearch")}</div>`;
                 return;
             }
-
             container.innerHTML = pos.map(po => {
-                const isApproved = po.status === 'Approved' || po.status === 'Dispatched';
+                const supplier = globalSuppliers.find(s => String(s.id) === String(po.supplier_id)) || null;
+                const canEmail = !!(supplier && supplier.contact_email);
+                const canWhatsapp = !!(supplier && supplier.phone);
                 return `
                     <div class="bg-bgMain border border-borderCol rounded-xl p-4 space-y-2.5">
                         <div class="flex items-center justify-between">
@@ -25905,17 +25978,26 @@
                                 <span class="font-bold text-textMain text-xs">${t("purchaseOrders.poHeader", {id: po.id})} — <span class="text-primary">${escapeHtml(po.vendor_name) || t("purchaseOrders.generalVendor")}</span></span>
                                 <div class="text-[10px] text-textSec">${po.created_at ? t("purchaseOrders.createdOn", {date: formatBusinessDate(po.created_at)}) : t("purchaseOrders.recent")}</div>
                             </div>
-                            <span class="px-2.5 py-1 rounded-lg text-[10px] font-bold ${isApproved ? 'bg-success/15 text-success border border-success/30' : 'bg-warning/15 text-warning border border-warning/30'}">${escapeHtml(po.status) || t("purchaseOrders.draft")}</span>
+                            <span class="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-warning/15 text-warning border border-warning/30">${t("purchaseOrders.draft")}</span>
                         </div>
                         <div class="text-[11px] text-textSec bg-cardBg p-2.5 rounded-lg border border-borderCol/60">
                             <strong>${t("purchaseOrders.orderItemsNotes")}</strong> <span class="text-textMain">${escapeHtml(po.items_summary) || t("purchaseOrders.restockDefault")}</span>
                         </div>
-                        <div class="flex justify-end gap-2 pt-1">
+                        <div class="flex flex-col sm:flex-row sm:items-center gap-2">
+                            <label class="text-[10px] text-textSec font-semibold shrink-0">${t("purchaseOrders.assignSupplier")}</label>
+                            <select onchange="updatePODraftSupplier(${po.id}, this.value)" class="flex-1 bg-cardBg border border-borderCol text-textMain text-[11px] rounded-lg px-2 py-1.5 focus:outline-none focus:border-primary">
+                                ${poSupplierOptionsHtml(po.supplier_id)}
+                            </select>
+                        </div>
+                        <div class="flex flex-wrap justify-end gap-2 pt-1">
                             <button type="button" onclick="editPurchaseOrder(${po.id}, '${escapeHtml(po.items_summary || '')}')" class="bg-cardBg hover:bg-cardHover text-textSec px-3 py-1 rounded-lg text-xs font-semibold border border-borderCol cursor-pointer">
                                 <i class="fa-solid fa-pen-to-square mr-1"></i> ${t("purchaseOrders.editDraft")}
                             </button>
-                            <button type="button" onclick="dispatchWhatsAppOrder('${escapeHtml(po.vendor_name || t("purchaseOrders.vendorFallback"))}', '')" class="bg-success/15 hover:bg-success/25 text-success border border-success/30 px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1 cursor-pointer">
-                                <i class="fa-brands fa-whatsapp"></i> ${t("purchaseOrders.whatsappOrder")}
+                            <button type="button" onclick="sendPurchaseOrderEmail(${po.id})" ${canEmail ? '' : 'disabled'} title="${canEmail ? '' : t("purchaseOrders.supplierMissingEmail")}" class="px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1 cursor-pointer border ${canEmail ? 'bg-primary/15 hover:bg-primary/25 text-primary border-primary/30' : 'bg-cardBg text-textSec/50 border-borderCol cursor-not-allowed'}">
+                                <i class="fa-solid fa-envelope"></i> ${t("purchaseOrders.sendEmail")}
+                            </button>
+                            <button type="button" onclick="sendPurchaseOrderWhatsApp(${po.id})" ${canWhatsapp ? '' : 'disabled'} title="${canWhatsapp ? '' : t("purchaseOrders.supplierMissingPhone")}" class="px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1 cursor-pointer border ${canWhatsapp ? 'bg-success/15 hover:bg-success/25 text-success border-success/30' : 'bg-cardBg text-textSec/50 border-borderCol cursor-not-allowed'}">
+                                <i class="fa-brands fa-whatsapp"></i> ${t("purchaseOrders.sendWhatsapp")}
                             </button>
                             <button type="button" onclick="deletePurchaseOrder(${po.id})" class="bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30 px-3 py-1 rounded-lg text-xs font-semibold cursor-pointer">
                                 <i class="fa-solid fa-trash"></i> ${t("common.delete")}
@@ -25924,6 +26006,51 @@
                     </div>
                 `;
             }).join("");
+        }
+
+        // Purchase Order History is permanently read-only: no edit, delete, or
+        // send controls are ever rendered here, for any record — see the
+        // backend's matching immutability guards on update_po_draft/delete_po/
+        // dispatch_po_email/confirm_po_whatsapp_sent (status != "DRAFT" -> 409).
+        function renderPurchaseOrderHistory(pos) {
+            const container = document.getElementById("po-history-container");
+            if (!pos.length) {
+                container.innerHTML = `<div class="text-center py-6 text-textSec text-xs">${t("purchaseOrders.noneMatchHistorySearch")}</div>`;
+                return;
+            }
+            container.innerHTML = pos.map(po => `
+                <div class="bg-bgMain border border-borderCol rounded-xl p-4 space-y-2.5">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <span class="font-bold text-textMain text-xs">${t("purchaseOrders.poHeader", {id: po.id})} — <span class="text-primary">${escapeHtml(po.vendor_name) || t("purchaseOrders.generalVendor")}</span></span>
+                            <div class="text-[10px] text-textSec">${po.sent_at ? t("purchaseOrders.sentOn", {date: formatBusinessDate(po.sent_at)}) : (po.created_at ? t("purchaseOrders.createdOn", {date: formatBusinessDate(po.created_at)}) : t("purchaseOrders.recent"))}</div>
+                        </div>
+                        <span class="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-success/15 text-success border border-success/30"><i class="fa-solid fa-lock mr-1"></i>${t("purchaseOrders.sent")}</span>
+                    </div>
+                    <div class="text-[11px] text-textSec bg-cardBg p-2.5 rounded-lg border border-borderCol/60">
+                        <strong>${t("purchaseOrders.orderItemsNotes")}</strong> <span class="text-textMain">${escapeHtml(po.items_summary) || t("purchaseOrders.restockDefault")}</span>
+                    </div>
+                </div>
+            `).join("");
+        }
+
+        async function updatePODraftSupplier(poId, supplierId) {
+            try {
+                const res = await fetch(`${API_URL}/purchase-orders/${poId}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+                    body: JSON.stringify({ supplier_id: supplierId ? +supplierId : null })
+                });
+                if (res.ok) {
+                    loadPurchaseOrders();
+                } else {
+                    const data = await res.json().catch(() => ({}));
+                    showToast(showApiError(res, data, t("purchaseOrders.updateFailed")), "error");
+                    loadPurchaseOrders();
+                }
+            } catch (e) {
+                showToast(t("common.actionFailed"), "error");
+            }
         }
 
         async function editPurchaseOrder(poId, currentSummary) {
@@ -25939,7 +26066,8 @@
                     loadPurchaseOrders();
                     showToast(t("purchaseOrders.updatedSuccess"), "success");
                 } else {
-                    showToast(t("purchaseOrders.updateFailed"), "error");
+                    const data = await res.json().catch(() => ({}));
+                    showToast(showApiError(res, data, t("purchaseOrders.updateFailed")), "error");
                 }
             } catch (e) {
                 showToast(t("common.actionFailed"), "error");
@@ -25956,21 +26084,117 @@
                 if (res.ok) {
                     loadPurchaseOrders();
                     showToast(t("purchaseOrders.deletedSuccess"), "success");
+                } else {
+                    const data = await res.json().catch(() => ({}));
+                    showToast(showApiError(res, data, t("common.actionFailed")), "error");
                 }
             } catch (e) {
                 showToast(t("common.actionFailed"), "error");
             }
         }
 
-        async function confirmDeleteAllPurchaseOrders() {
-            const confirmed = await showCustomConfirm(t("purchaseOrders.deleteAllConfirmBody"), t("purchaseOrders.deleteAllConfirmTitle"));
+        // Sends a draft by email. The backend only marks the purchase order
+        // SENT after the email provider (Resend) has accepted the request —
+        // see dispatch_po_email() in main.py — so a rejected/failed send
+        // leaves the draft exactly as it was: still editable, still deletable,
+        // still not counted toward the plan's Purchase Order allowance.
+        async function sendPurchaseOrderEmail(poId) {
+            const po = globalPurchaseOrders.find(p => p.id === poId);
+            const supplier = po ? globalSuppliers.find(s => String(s.id) === String(po.supplier_id)) : null;
+            if (!supplier || !supplier.contact_email) {
+                showToast(t("purchaseOrders.supplierMissingEmail"), "error");
+                return;
+            }
+            const confirmed = await showCustomConfirm(t("purchaseOrders.sendEmailConfirmBody", {vendor: supplier.name}), t("purchaseOrders.sendEmailConfirmTitle"));
             if (!confirmed) return;
             try {
-                for (const po of globalPurchaseOrders) {
-                    await fetch(`${API_URL}/purchase-orders/${po.id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${authToken}` } });
+                const res = await fetch(`${API_URL}/purchase-orders/${poId}/dispatch-email`, {
+                    method: "POST", headers: { "Authorization": `Bearer ${authToken}` }
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    loadPurchaseOrders();
+                    showToast(data.message || t("purchaseOrders.sendEmailSuccess"), "success");
+                } else {
+                    showToast(showApiError(res, data, t("purchaseOrders.sendEmailFailed")), "error");
                 }
-                loadPurchaseOrders();
-                showToast(t("purchaseOrders.allDeletedSuccess"), "success");
+            } catch (e) {
+                showToast(t("purchaseOrders.sendEmailFailed"), "error");
+            }
+        }
+
+        // Sends a draft via WhatsApp. IMPORTANT LIMITATION (documented in
+        // CHANGES.md): Cauldra has no WhatsApp Business API integration, so it
+        // has no technical way to confirm a wa.me link message was actually
+        // delivered or even sent — opening the link only launches WhatsApp with
+        // the message prefilled. This function therefore never marks the order
+        // as sent on its own: it opens the link (GET .../dispatch, read-only,
+        // no status change), then explicitly asks the user to confirm they
+        // actually pressed send inside WhatsApp, and only calls
+        // .../dispatch-whatsapp-confirm — the one call that actually marks the
+        // order SENT and consumes the plan's allowance — if the user says yes.
+        // Declining leaves the purchase order exactly as it was: a DRAFT the
+        // user can send again at any time.
+        async function sendPurchaseOrderWhatsApp(poId) {
+            const po = globalPurchaseOrders.find(p => p.id === poId);
+            const supplier = po ? globalSuppliers.find(s => String(s.id) === String(po.supplier_id)) : null;
+            if (!supplier || !supplier.phone) {
+                showToast(t("purchaseOrders.supplierMissingPhone"), "error");
+                return;
+            }
+            let linkData;
+            try {
+                const res = await fetch(`${API_URL}/purchase-orders/${poId}/dispatch`, {
+                    method: "POST", headers: { "Authorization": `Bearer ${authToken}` }
+                });
+                linkData = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    showToast(showApiError(res, linkData, t("purchaseOrders.whatsappLinkFailed")), "error");
+                    return;
+                }
+            } catch (e) {
+                showToast(t("purchaseOrders.whatsappLinkFailed"), "error");
+                return;
+            }
+            window.open(linkData.whatsapp_url, '_blank');
+            const confirmed = await showCustomConfirm(t("purchaseOrders.whatsappConfirmBody", {vendor: supplier.name}), t("purchaseOrders.whatsappConfirmTitle"));
+            if (!confirmed) {
+                showToast(t("purchaseOrders.whatsappKeptDraft"), "info");
+                return;
+            }
+            try {
+                const res = await fetch(`${API_URL}/purchase-orders/${poId}/dispatch-whatsapp-confirm`, {
+                    method: "POST", headers: { "Authorization": `Bearer ${authToken}` }
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    loadPurchaseOrders();
+                    showToast(data.message || t("purchaseOrders.whatsappConfirmSuccess"), "success");
+                } else {
+                    showToast(showApiError(res, data, t("purchaseOrders.whatsappConfirmFailed")), "error");
+                }
+            } catch (e) {
+                showToast(t("purchaseOrders.whatsappConfirmFailed"), "error");
+            }
+        }
+
+        // Deletes every DRAFT purchase order for this business in one request
+        // (backend-scoped to status="DRAFT" — see delete_all_pos() in main.py).
+        // Purchase Order History (SENT orders) is never affected: the backend
+        // rejects deleting a SENT order individually or in bulk, so this
+        // action is safe even if drafts and sent orders are mixed.
+        async function confirmDeleteAllPurchaseOrderDrafts() {
+            const confirmed = await showCustomConfirm(t("purchaseOrders.deleteAllDraftsConfirmBody"), t("purchaseOrders.deleteAllDraftsConfirmTitle"));
+            if (!confirmed) return;
+            try {
+                const res = await fetch(`${API_URL}/purchase-orders`, { method: "DELETE", headers: { "Authorization": `Bearer ${authToken}` } });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    loadPurchaseOrders();
+                    showToast(data.message || t("purchaseOrders.allDraftsDeletedSuccess"), "success");
+                } else {
+                    showToast(showApiError(res, data, t("common.actionFailed")), "error");
+                }
             } catch (e) {
                 showToast(t("common.actionFailed"), "error");
             }

@@ -172,9 +172,6 @@
                         <i class="fa-solid fa-chart-pie w-4"></i> <span data-i18n="navigation.dashboard">Dashboard</span>
                     </a>
                     <button type="button" id="nav-btn-daily-sales" onclick="checkFeatureAccess('daily sales', openDailySalesModal)" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer"><i class="fa-solid fa-receipt w-4"></i> <span data-i18n="navigation.todaysSales">Sales</span></button>
-                    <button type="button" id="nav-btn-gen-po" onclick="checkFeatureAccess('generate PO', generatePOs)" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer">
-                        <i class="fa-solid fa-wand-magic-sparkles w-4"></i> <span data-i18n="navigation.generatePO">Generate PO</span>
-                    </button>
                     <button type="button" id="nav-btn-po" onclick="checkFeatureAccess('purchase orders', openPOModal)" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer">
                         <i class="fa-solid fa-file-invoice w-4"></i> <span data-i18n="navigation.purchaseOrders">Purchase Orders</span>
                     </button>
@@ -2132,12 +2129,53 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-3xl w-full shadow-2xl flex flex-col max-h-[85vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <div>
-                    <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-file-invoice text-success"></i> Procurement & Dispatch Center</h3>
-                    <p class="text-[11px] text-textSec">Search by vendor name, PO ID, edit drafts, and approve dispatch</p>
+                    <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-file-invoice text-success"></i> <span data-i18n="navigation.purchaseOrders">Purchase Orders</span></h3>
+                    <p class="text-[11px] text-textSec" data-i18n="purchaseOrders.modalSubtitle">Generate restock orders, review drafts, and browse sent order history</p>
                 </div>
-                <div class="flex items-center gap-2">
-                    <div class="export-menu relative inline-block">
-                        <button type="button" onclick="toggleExportMenu(this)" class="export-menu-toggle bg-bgMain hover:bg-cardHover text-textSec border border-borderCol text-[11px] font-semibold px-2.5 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer" aria-haspopup="true" aria-expanded="false" aria-label="Export purchase orders">
+                <button type="button" onclick="closePOModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+            </div>
+
+            <!-- Generate Purchase Order / Purchase Order History tabs. Drafts
+                 (reviewable, editable, deletable, never counted toward the plan)
+                 live under Generate; SENT orders (permanent, read-only) live
+                 under History — see switchPOTab() / renderPurchaseOrderDrafts() /
+                 renderPurchaseOrderHistory() in app.js. -->
+            <div class="flex items-center gap-1 mb-3 border-b border-borderCol" role="tablist">
+                <button type="button" id="po-tab-btn-generate" onclick="switchPOTab('generate')" role="tab" aria-selected="true" class="po-tab-btn px-3 py-2 text-xs font-semibold border-b-2 border-primary text-primary cursor-pointer">
+                    <i class="fa-solid fa-wand-magic-sparkles mr-1"></i> <span data-i18n="purchaseOrders.generateTab">Generate Purchase Order</span>
+                </button>
+                <button type="button" id="po-tab-btn-history" onclick="switchPOTab('history')" role="tab" aria-selected="false" class="po-tab-btn px-3 py-2 text-xs font-semibold border-b-2 border-transparent text-textSec hover:text-textMain cursor-pointer">
+                    <i class="fa-solid fa-clock-rotate-left mr-1"></i> <span data-i18n="purchaseOrders.historyTab">Purchase Order History</span>
+                </button>
+            </div>
+
+            <!-- Generate Purchase Order tab: generate button + editable drafts -->
+            <div id="po-tab-generate" class="flex-1 min-h-0 flex flex-col">
+                <div class="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">
+                    <button type="button" onclick="generatePOs()" class="shrink-0 bg-primary hover:bg-primaryHover text-white px-3.5 py-2 rounded-xl text-xs font-semibold transition shadow-md shadow-primary/20 flex items-center gap-1.5 cursor-pointer">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> <span data-i18n="purchaseOrders.generateButton">Generate PO from Low Stock</span>
+                    </button>
+                    <p class="text-[11px] text-textSec" data-i18n="purchaseOrders.draftsNeverCountNotice">A generated order starts as a DRAFT — review, assign a supplier, edit, and send it below. Drafts never count against your plan's Purchase Order allowance.</p>
+                </div>
+                <div class="relative w-full mb-2">
+                    <input type="text" id="po-draft-search-input" oninput="filterPurchaseOrderDrafts()" placeholder="Search drafts by vendor name or ID..." data-i18n-placeholder="purchaseOrders.draftsSearchPlaceholder" class="w-full bg-bgMain border border-borderCol text-textMain text-xs rounded-xl pl-9 pr-3 py-2 focus:outline-none focus:border-primary transition placeholder-textSec font-mono">
+                    <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-textSec text-xs"></i>
+                </div>
+                <div class="flex-1 overflow-y-auto max-h-[300px] pr-1 space-y-3 text-xs" id="po-draft-container">
+                    <div class="text-center py-8 text-textSec text-xs" data-i18n="purchaseOrders.noDrafts">No draft purchase orders.</div>
+                </div>
+            </div>
+
+            <!-- Purchase Order History tab: SENT orders only, permanently
+                 read-only — no edit/delete controls are ever rendered here. -->
+            <div id="po-tab-history" class="hidden flex-1 min-h-0 flex flex-col">
+                <div class="flex items-center justify-between mb-2 gap-2">
+                    <div class="relative w-full">
+                        <input type="text" id="po-history-search-input" oninput="filterPurchaseOrderHistory()" placeholder="Search sent orders by vendor name, ID, or date..." data-i18n-placeholder="purchaseOrders.historySearchPlaceholder" class="w-full bg-bgMain border border-borderCol text-textMain text-xs rounded-xl pl-9 pr-3 py-2 focus:outline-none focus:border-primary transition placeholder-textSec font-mono">
+                        <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-textSec text-xs"></i>
+                    </div>
+                    <div class="export-menu relative inline-block shrink-0">
+                        <button type="button" onclick="toggleExportMenu(this)" class="export-menu-toggle bg-bgMain hover:bg-cardHover text-textSec border border-borderCol text-[11px] font-semibold px-2.5 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer" aria-haspopup="true" aria-expanded="false" aria-label="Export purchase order history">
                             <i class="fa-solid fa-download"></i> Export <i class="fa-solid fa-chevron-down text-[9px]"></i>
                         </button>
                         <div class="export-menu-panel hidden absolute right-0 mt-1 w-32 bg-cardBg border border-borderCol rounded-xl shadow-xl z-40 py-1 text-[11px]">
@@ -2145,26 +2183,18 @@
                             <button type="button" onclick="runMenuExport(this,'exportPurchaseOrdersExcel')" class="w-full text-left px-3 py-1.5 hover:bg-cardHover flex items-center gap-2 cursor-pointer"><i class="fa-solid fa-file-excel text-success w-3"></i> Excel</button>
                         </div>
                     </div>
-                    <button type="button" onclick="confirmDeleteAllPurchaseOrders()" class="bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30 text-[11px] font-semibold px-2.5 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer">
-                        <i class="fa-solid fa-trash-can"></i> Delete All
-                    </button>
-                    <button type="button" onclick="closePOModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                </div>
+                <p class="text-[11px] text-textSec mb-2"><i class="fa-solid fa-lock text-[10px] mr-1"></i> <span data-i18n="purchaseOrders.readOnlyHistoryNotice">Sent purchase orders are permanent history and cannot be edited or deleted.</span></p>
+                <div class="flex-1 overflow-y-auto max-h-[300px] pr-1 space-y-3 text-xs" id="po-history-container">
+                    <div class="text-center py-8 text-textSec text-xs" data-i18n="purchaseOrders.noHistory">No sent purchase orders yet.</div>
                 </div>
             </div>
 
-            <div class="mb-3">
-                <div class="relative w-full">
-                    <input type="text" id="po-search-input" oninput="filterPurchaseOrders()" placeholder="Search by vendor name, ID, or status..." class="w-full bg-bgMain border border-borderCol text-textMain text-xs rounded-xl pl-9 pr-3 py-2 focus:outline-none focus:border-primary transition placeholder-textSec font-mono">
-                    <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-textSec text-xs"></i>
-                </div>
-            </div>
-
-            <div class="flex-1 overflow-y-auto max-h-[360px] pr-1 space-y-3 text-xs" id="po-container">
-                <div class="text-center py-8 text-textSec text-xs">No purchase orders loaded.</div>
-            </div>
-
-            <div class="pt-3 border-t border-borderCol mt-3 flex justify-end">
-                <button type="button" onclick="closePOModal()" class="bg-bgMain hover:bg-cardHover text-textSec px-3.5 py-2 rounded-xl text-xs font-semibold transition border border-borderCol cursor-pointer">Close</button>
+            <div class="pt-3 border-t border-borderCol mt-3 flex justify-between items-center gap-2">
+                <button type="button" onclick="confirmDeleteAllPurchaseOrderDrafts()" id="po-delete-all-drafts-btn" class="bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30 text-[11px] font-semibold px-2.5 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer">
+                    <i class="fa-solid fa-trash-can"></i> <span data-i18n="purchaseOrders.deleteAllDraftsButton">Delete All Drafts</span>
+                </button>
+                <button type="button" onclick="closePOModal()" class="bg-bgMain hover:bg-cardHover text-textSec px-3.5 py-2 rounded-xl text-xs font-semibold transition border border-borderCol cursor-pointer" data-i18n="common.close">Close</button>
             </div>
         </div>
     </div>
