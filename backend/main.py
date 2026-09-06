@@ -617,6 +617,14 @@ class User(Base):
     # Base.metadata.create_all() (see migration 0001). Ownership is enforced on
     # every read instead - the lookup is always filtered by business_id.
     avatar_upload_id = Column(Integer, nullable=True)
+    # Centralized permissions (see PERMISSIONS/get_effective_permissions below):
+    # a JSON object of explicit per-permission-code grants/denials layered on
+    # top of this user's role defaults. NULL/absent-key == "inherit the role
+    # default" — never a frozen snapshot of computed defaults, so a later
+    # role change (e.g. Staff -> Manager) is never fighting a stale override.
+    # Written one key at a time by POST /users/{id}/permissions, never
+    # bulk-replaced with a full computed permission map.
+    permission_overrides = Column(Text, nullable=True)
     # MIRROR of Supabase's own verification state. Only ever written by trusted
     # backend logic after _supabase_email_confirmed() says True - never
     # settable from a request body.
@@ -1112,6 +1120,16 @@ class AuditLog(Base):
     # after creation.
     business_day_id = Column(Integer, ForeignKey("business_days.id", ondelete="SET NULL"), nullable=True, index=True)
     metadata_json = Column(Text, nullable=True)
+    # Structured Activity History filtering (additive, all nullable — an
+    # existing row simply has no category/resource and is unaffected; this
+    # table is append-only and no historical row is ever rewritten to add
+    # these). action_category is one of ACTIVITY_CATEGORIES below;
+    # resource_type/resource_id identify the specific record the action
+    # affected (e.g. "product"/123) for exact-match filtering alongside the
+    # existing free-text search.
+    action_category = Column(String, nullable=True, index=True)
+    resource_type = Column(String, nullable=True)
+    resource_id = Column(Integer, nullable=True)
 
 class AccountActionRequest(Base):
     __tablename__ = "account_action_requests"
@@ -1180,7 +1198,14 @@ class PresenceSession(Base):
     business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     signed_in_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
+    # last_seen_at: last proof this session is still CONNECTED (heartbeat).
+    # last_activity_at: last proof the user GENUINELY INTERACTED (throttled
+    # client-side activity signal riding along on the same heartbeat call —
+    # see /presence/heartbeat). These answer different questions on purpose:
+    # a browser can keep heartbeating for a while after the person walked
+    # away, which is exactly the Online-vs-Inactive distinction (section 17).
     last_seen_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
+    last_activity_at = Column(SQLDateTime, default=datetime.utcnow, nullable=True)
     signed_out_at = Column(SQLDateTime, nullable=True)
 
 class PriceMonitorSource(Base):
@@ -3092,13 +3117,24 @@ def require_ai_access(user: User = Depends(get_current_user), db: Session = Depe
 # older rows written before that separation out of the business activity feed.
 PRESENCE_SESSION_AUDIT_ACTIONS = {"LOGIN", "LOGOUT"}
 
-def add_audit(db: Session, user: Optional[User], action: str, description: str, target: Optional[User] = None, business_id: Optional[int] = None, business_day_id: Optional[int] = None, metadata: Optional[dict] = None):
-    """The single immutable audit trail for the whole app. business_day_id and
-    metadata are additive/optional — every pre-existing call site is
-    unaffected. metadata is stored as JSON text (never as arbitrary client
-    input — every caller builds it server-side from values it already
-    computed) so structured details (closing snapshots, correction old/new
-    values) survive without needing a new table per event type."""
+ACTIVITY_CATEGORIES = {
+    "INVENTORY", "SALES", "EXPENSES", "WAREHOUSE", "SUPPLIERS", "PURCHASE_ORDERS",
+    "BUSINESS_DAY", "TEAM", "PERMISSIONS", "APPROVALS", "BUSINESS_SETTINGS",
+    "SUBSCRIPTION", "SECURITY",
+}
+
+def add_audit(db: Session, user: Optional[User], action: str, description: str, target: Optional[User] = None, business_id: Optional[int] = None, business_day_id: Optional[int] = None, metadata: Optional[dict] = None, action_category: Optional[str] = None, resource_type: Optional[str] = None, resource_id: Optional[int] = None):
+    """The single immutable audit trail for the whole app. business_day_id,
+    metadata, action_category, resource_type and resource_id are all
+    additive/optional — every pre-existing call site (written before any of
+    these existed) is unaffected. metadata is stored as JSON text (never as
+    arbitrary client input — every caller builds it server-side from values
+    it already computed) so structured details (closing snapshots,
+    correction old/new values) survive without needing a new table per event
+    type. action_category must be one of ACTIVITY_CATEGORIES when given —
+    kept loose (not enforced with an exception) so a bad category value from
+    a future call site degrades to "uncategorized" in the UI rather than
+    ever blocking the write of the underlying audit fact."""
     actor_role = user.role if user else None
     actor_username = user.username if user else None
     bid = business_id or (user.business_id if user else None)
@@ -3115,7 +3151,172 @@ def add_audit(db: Session, user: Optional[User], action: str, description: str, 
         description=description,
         business_day_id=business_day_id,
         metadata_json=json.dumps(metadata) if metadata is not None else None,
+        action_category=action_category if action_category in ACTIVITY_CATEGORIES else None,
+        resource_type=resource_type,
+        resource_id=resource_id,
     ))
+
+# =============================================================================
+# CENTRALIZED PERMISSIONS — "roles provide defaults, permissions control
+# actions" (see the authz/permissions specification this implements).
+#
+# PERMISSIONS is the ONE registry of every ordinary, grantable operational
+# permission in the app. Deliberately absent from this table: business
+# deletion, subscription/billing control, admin creation/promotion, final
+# approval-request resolution, and every other hard-ownership/security/
+# approval-boundary rule — those stay exactly what they already were,
+# plain `if user.role == "admin"` checks scattered at their call sites,
+# because a registry entry would imply they are grantable, and per the spec
+# they must never be. A permission code that does not exist in this dict
+# cannot be granted, denied, or even referenced by set_permission_override —
+# there is no separate "hard_admin_only" escape hatch to bypass; the
+# boundary is the registry's own membership.
+#
+# Each entry's *_default reproduces today's ACTUAL pre-existing access for
+# that role (verified against the real endpoint before being added here —
+# see the implementation report for the full per-code before/after mapping)
+# so migrating a role check to a permission check never silently changes who
+# can do what on day one; it only makes that access individually overridable
+# going forward.
+# =============================================================================
+PERMISSIONS = {
+    # --- INVENTORY -----------------------------------------------------------
+    "inventory.view":            {"category": "INVENTORY", "label": "View Inventory",        "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "inventory.add_product":     {"category": "INVENTORY", "label": "Add Products",          "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "inventory.edit_product":    {"category": "INVENTORY", "label": "Edit Products",         "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "inventory.delete_product":  {"category": "INVENTORY", "label": "Delete Products",       "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
+    "inventory.adjust_stock":    {"category": "INVENTORY", "label": "Adjust Stock",          "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "inventory.transfer_stock":  {"category": "INVENTORY", "label": "Transfer Stock",        "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    # --- WAREHOUSE -------------------------------------------------------------
+    "warehouse.view":            {"category": "WAREHOUSE", "label": "View Warehouses",        "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "warehouse.create":          {"category": "WAREHOUSE", "label": "Create Warehouses",      "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "warehouse.edit":            {"category": "WAREHOUSE", "label": "Edit Warehouses",        "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "warehouse.deactivate":      {"category": "WAREHOUSE", "label": "Deactivate Warehouses",  "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
+    # --- SUPPLIERS ---------------------------------------------------------
+    "supplier.view":             {"category": "SUPPLIERS", "label": "View Suppliers",         "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "supplier.create":           {"category": "SUPPLIERS", "label": "Add Suppliers",          "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    # RESERVED/FUTURE: no PATCH /suppliers/{id} edit endpoint exists today —
+    # this code is registered (for the permissions UI/report) but is not
+    # enforced anywhere because there is nothing to enforce it on yet.
+    "supplier.edit":             {"category": "SUPPLIERS", "label": "Edit Suppliers",         "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True, "reserved": True},
+    "supplier.deactivate":       {"category": "SUPPLIERS", "label": "Remove/Deactivate Suppliers", "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
+    # --- SALES ---------------------------------------------------------------
+    "sales.create":               {"category": "SALES", "label": "Make Sales",              "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "sales.wholesale":            {"category": "SALES", "label": "Wholesale Sales",          "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "sales.override_price":       {"category": "SALES", "label": "Override Price",           "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "sales.refund":                {"category": "SALES", "label": "Refund Sales",             "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "sales.view_history":         {"category": "SALES", "label": "View Sales History",       "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    # --- EXPENSES ------------------------------------------------------------
+    "expenses.record":           {"category": "EXPENSES", "label": "Record Expense",         "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "expenses.view":              {"category": "EXPENSES", "label": "View Own Expenses",      "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "expenses.view_all":          {"category": "EXPENSES", "label": "View All Expenses",      "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "expenses.export":            {"category": "EXPENSES", "label": "Export Expenses",        "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    # --- REPORTS ---------------------------------------------------------------
+    "reports.sales":              {"category": "SALES", "label": "Sales Reports",            "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "reports.profit":             {"category": "SALES", "label": "Profit Reports",           "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    # --- PROCUREMENT / PURCHASE ORDERS ---------------------------------------
+    "po.view":                     {"category": "PURCHASE_ORDERS", "label": "View Purchase Orders",   "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "po.create":                   {"category": "PURCHASE_ORDERS", "label": "Create Purchase Orders", "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "po.edit":                     {"category": "PURCHASE_ORDERS", "label": "Edit Purchase Orders",   "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "po.send":                     {"category": "PURCHASE_ORDERS", "label": "Send Purchase Orders",   "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "po.delete":                   {"category": "PURCHASE_ORDERS", "label": "Delete Purchase Orders", "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
+    "procurement.price_monitor":   {"category": "PURCHASE_ORDERS", "label": "Price Monitor",          "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    # --- BUSINESS DAY ----------------------------------------------------------
+    "business_day.manage":        {"category": "BUSINESS_DAY", "label": "Open/Close Business Day", "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "business_day.view_history":  {"category": "BUSINESS_DAY", "label": "View Business Day History", "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    # --- TEAM ------------------------------------------------------------------
+    "team.view_employees":        {"category": "TEAM", "label": "View Employee Directory",   "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
+    "team.create_employee":       {"category": "TEAM", "label": "Add Employees",             "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
+    "team.reset_staff_password":  {"category": "TEAM", "label": "Reset Staff Password",      "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
+    "team.view_presence":         {"category": "TEAM", "label": "Team Presence",             "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
+    # --- ACTIVITY HISTORY --------------------------------------------------
+    "activity_history.view":      {"category": "PERMISSIONS", "label": "View Activity History", "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    # --- BUSINESS BRAIN / AI -------------------------------------------------
+    "business_brain.view_full":   {"category": "INVENTORY", "label": "Full Business Brain Insights", "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    "business_brain.manage":      {"category": "INVENTORY", "label": "Manage Business Brain Recommendations", "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
+    "ai.use":                      {"category": "INVENTORY", "label": "Operational AI Tools",  "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+}
+
+def get_effective_permissions(user: User) -> dict:
+    """Role defaults, then explicit per-code overrides layered on top.
+    Absence of a key in permission_overrides means "inherit the role
+    default" — this is real inheritance, not a snapshot: a later role
+    change is recomputed from THIS function using the new role's defaults,
+    so a stale override never survives into a role it was never meant for
+    except exactly as its own explicit true/false value (which, since only
+    ordinary-operational codes are ever stored here — see PERMISSIONS'
+    module docstring — can never itself unlock a hard-owner-only action)."""
+    role = (user.role or "staff").lower()
+    try:
+        overrides = json.loads(user.permission_overrides) if user.permission_overrides else {}
+    except (ValueError, TypeError):
+        overrides = {}
+    effective = {}
+    for code, spec in PERMISSIONS.items():
+        default = bool(spec.get(role, False))
+        effective[code] = bool(overrides[code]) if code in overrides else default
+    return effective
+
+def has_permission(user: User, code: str) -> bool:
+    if code not in PERMISSIONS:
+        return False
+    return get_effective_permissions(user).get(code, False)
+
+def require_permission(user: User, code: str):
+    if not has_permission(user, code):
+        label = PERMISSIONS.get(code, {}).get("label", code)
+        raise HTTPException(status_code=403, detail=f"Your account does not have the '{label}' permission.")
+
+def can_edit_permission(actor: User, target: User, code: str):
+    """Section 7's scope rules. Returns (allowed: bool, reason: str)."""
+    if code not in PERMISSIONS:
+        return False, "Unknown permission code."
+    if actor.business_id != target.business_id:
+        return False, "Access denied."
+    if actor.role == "admin":
+        if target.id == actor.id:
+            return False, "You cannot edit your own permissions."
+        if target.role not in ("manager", "staff"):
+            return False, "This account's permissions cannot be edited here."
+        return True, ""
+    if actor.role == "manager":
+        if target.role != "staff":
+            return False, "Managers can only edit Staff permissions."
+        if not PERMISSIONS[code].get("manager_can_grant"):
+            return False, "Managers cannot grant or revoke this permission."
+        return True, ""
+    return False, "Access denied."
+
+def set_permission_override(db: Session, actor: User, target: User, code: str, granted: bool) -> dict:
+    """Writes exactly ONE key into target.permission_overrides — never the
+    full computed effective map (that would freeze every OTHER permission's
+    current default into a permanent override, defeating inheritance the
+    moment a role default is later tuned or the user's role changes)."""
+    allowed, reason = can_edit_permission(actor, target, code)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+    before = get_effective_permissions(target)
+    try:
+        overrides = json.loads(target.permission_overrides) if target.permission_overrides else {}
+    except (ValueError, TypeError):
+        overrides = {}
+    default = bool(PERMISSIONS[code].get((target.role or "staff").lower(), False))
+    if granted == default:
+        # Explicitly matching the role default is not an override — drop the
+        # key entirely so it keeps inheriting (and role changes later behave
+        # exactly like a user who was never customized).
+        overrides.pop(code, None)
+    else:
+        overrides[code] = bool(granted)
+    target.permission_overrides = json.dumps(overrides) if overrides else None
+    after = get_effective_permissions(target)
+    add_audit(
+        db, actor, "PERMISSION_GRANTED" if granted else "PERMISSION_REVOKED",
+        f"{'Granted' if granted else 'Revoked'} '{PERMISSIONS[code]['label']}' for {target.username}.",
+        target=target, action_category="PERMISSIONS", resource_type="permission", resource_id=None,
+        metadata={"permission": code, "old_effective": before.get(code), "new_effective": after.get(code)},
+    )
+    return after
 
 # -----------------------------------------------------------------------------
 # NOTIFICATION ENGINE
