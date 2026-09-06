@@ -315,8 +315,11 @@
         <!-- CLEAN TOP NAVIGATION BAR -->
         <header class="h-16 border-b border-borderCol bg-sidebarBg/90 backdrop-blur-md px-3 sm:px-6 flex justify-between items-center sticky top-0 z-30">
             <button type="button" id="mobile-menu-btn" onclick="openMobileNav()" class="md:hidden w-9 h-9 rounded-xl bg-cardBg border border-borderCol text-textMain flex items-center justify-center shrink-0 mr-2 cursor-pointer" aria-label="Open menu"><i class="fa-solid fa-bars"></i></button>
-            <!-- Global Search Bar -->
-            <div id="header-global-search-wrap" class="flex items-center flex-1 min-w-0 max-w-lg">
+            <!-- Global Search Bar — starts hidden (not just empty/disabled) so
+                 a page load with no valid session never flashes it before
+                 updateGuestHeaderState() runs; that function is what shows it
+                 once an authenticated session is actually confirmed. -->
+            <div id="header-global-search-wrap" class="hidden items-center flex-1 min-w-0 max-w-lg">
                 <div class="relative w-full">
                     <input type="text" id="header-global-search" oninput="syncHeaderSearch(this.value)" placeholder="Search products, SKU, orders..." class="hidden sm:block w-full bg-bgMain border border-borderCol text-textMain text-xs rounded-xl pl-9 pr-3 py-2 focus:outline-none focus:border-primary transition placeholder-textSec">
                     <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-textSec text-xs"></i>

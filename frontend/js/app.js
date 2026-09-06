@@ -17739,6 +17739,20 @@
             const refreshButtons = document.querySelectorAll('[data-refresh-action]');
             const newSale = document.getElementById('nav-btn-new-sale');
             const guest = document.getElementById('guest-get-started-btn');
+            // Global search bar: driven by the SAME authenticated-session
+            // state as everything else here, never a role check. Hidden
+            // entirely (not left as an empty/disabled field) with no session;
+            // shown again the moment one exists (login, or a restored session
+            // on page load — this function already runs at both). On the
+            // sign-out path, also clear whatever it was showing so a later
+            // guest browsing the same tab never sees a previous session's
+            // leftover query or filtered results.
+            const searchWrap = document.getElementById('header-global-search-wrap');
+            if (searchWrap) { searchWrap.classList.toggle('hidden', !signedIn); searchWrap.classList.toggle('flex', signedIn); }
+            if (!signedIn) {
+                const searchInput = document.getElementById('header-global-search');
+                if (searchInput && searchInput.value) { searchInput.value = ''; syncHeaderSearch(''); }
+            }
             if (notify) { notify.classList.toggle('hidden', !signedIn); notify.classList.toggle('flex', signedIn); }
             refreshButtons.forEach(refresh => {
                 refresh.classList.toggle('hidden', !signedIn);
