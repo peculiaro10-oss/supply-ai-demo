@@ -17473,6 +17473,24 @@
             guestPreview.setAttribute('aria-hidden', signedIn ? 'true' : 'false');
         }
 
+        // The four dashboard statistic cards (Total Products / Low Stock /
+        // Active Suppliers / Active Warehouses) imply a real, authenticated
+        // business account — they must never be visible to a guest, and never
+        // replaced with fake zero values for a guest either (see
+        // updateDashboardMetrics(), which now only ever runs their real numbers
+        // for an authenticated business context). #metrics-grid also defaults
+        // to `hidden` in the static HTML, so a slow/failed auth check never
+        // flashes real-looking figures before this function has a chance to run.
+        function syncDashboardMetricsVisibility(signedIn = hasAuthenticatedBusinessContext()) {
+            const grid = document.getElementById('metrics-grid');
+            if (!grid) return;
+
+            grid.classList.toggle('hidden', !signedIn);
+            grid.hidden = !signedIn;
+            grid.toggleAttribute('inert', !signedIn);
+            grid.setAttribute('aria-hidden', signedIn ? 'false' : 'true');
+        }
+
  function updateGuestHeaderState() {
             const signedIn = hasAuthenticatedBusinessContext();
             const notify = document.getElementById('header-notification-btn');
@@ -17487,6 +17505,7 @@
             if (newSale) newSale.classList.toggle('hidden', !signedIn);
             if (guest) guest.classList.toggle('hidden', signedIn);
             syncInventoryGuestPreview(signedIn);
+            syncDashboardMetricsVisibility(signedIn);
             updateInventoryStatusUI();
             if (signedIn) startNotificationPolling(); else stopNotificationPolling();
         }
@@ -23694,24 +23713,24 @@
         function closePriceMonitorModal() { document.getElementById("price-monitor-modal").classList.add("hidden"); }
 
         function updateDashboardMetrics() {
-            const hasBusinessContext = hasAuthenticatedBusinessContext();
+            // The four dashboard cards are guest-hidden entirely (see
+            // syncDashboardMetricsVisibility()) — there is deliberately no guest
+            // rendering path here any more: never compute or write fake/zero
+            // business figures for a visitor who isn't authenticated.
+            if (!hasAuthenticatedBusinessContext()) return;
 
-            // Guest state deliberately shows the same four cards, but with zero values.
-            // Once authenticated, all figures continue to come from the existing business-scoped data.
-            const totalProducts = hasBusinessContext ? globalProducts.length : 0;
-            const lowStockProducts = hasBusinessContext
-                ? globalProducts.filter(p => p.quantity <= p.min_stock_level).length
-                : 0;
-            const activeSuppliersCount = hasBusinessContext ? globalSuppliers.length : 0;
-            const warehouseCount = hasBusinessContext ? customWarehouses.length : 0;
+            const totalProducts = globalProducts.length;
+            const lowStockProducts = globalProducts.filter(p => p.quantity <= p.min_stock_level).length;
+            const activeSuppliersCount = globalSuppliers.length;
+            const warehouseCount = customWarehouses.length;
 
             // Only during this session's first load, before each figure's own
             // data has actually arrived, show a neutral "—" instead of "0" —
             // a real zero and "hasn't loaded yet" must never look identical.
             // Products/suppliers share one flag (they load together);
             // warehouses load separately and may resolve at a different time.
-            const productsPending = hasBusinessContext && !productsSuppliersReady;
-            const warehousesPending = hasBusinessContext && !warehousesReady;
+            const productsPending = !productsSuppliersReady;
+            const warehousesPending = !warehousesReady;
 
             const totalSkusEl = document.getElementById("metric-total-skus");
             if (totalSkusEl) totalSkusEl.innerText = productsPending ? "—" : totalProducts;

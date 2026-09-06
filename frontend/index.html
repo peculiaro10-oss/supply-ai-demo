@@ -422,7 +422,11 @@
                     <button type="button" id="business-day-header-action-btn" class="hidden shrink-0 bg-primary hover:bg-primaryHover text-white text-[11px] font-semibold px-3.5 py-2 rounded-xl transition cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed">Open Business Day</button>
                 </div>
 
-                <div id="metrics-grid" class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <!-- Hidden by default (guest-safe) — shown only for an authenticated
+                     business context, via syncDashboardMetricsVisibility() in app.js.
+                     Never remove the `hidden` default: it is what keeps these four
+                     cards from flashing real-looking numbers before auth is confirmed. -->
+                <div id="metrics-grid" class="hidden grid grid-cols-2 sm:grid-cols-4 gap-4">
                     <div class="bg-cardBg border border-borderCol rounded-2xl p-4 shadow-sm relative overflow-hidden">
                         <div class="flex justify-between items-start">
                             <span class="text-[10px] font-bold text-textSec uppercase tracking-wider">Total Products</span>
