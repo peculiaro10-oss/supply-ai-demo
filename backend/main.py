@@ -3106,6 +3106,11 @@ def require_ai_access(user: User = Depends(get_current_user), db: Session = Depe
         current_plan_id = (get_or_create_subscription(db, business).plan or "starter").lower()
         upgrade_label = PLAN_CONFIG.get(UPGRADE_PATH.get(current_plan_id, "starter"), PLAN_CONFIG["starter"])["label"]
         raise HTTPException(status_code=403, detail=f"AI features are not included in your {plan['label']} plan. Upgrade to {upgrade_label} to unlock AI-powered tools.")
+    # Subscription entitlement (above) and employee permission (below) are
+    # deliberately independent checks — section 8: a plan that includes AI
+    # does not itself authorize every employee to use it, and a permission
+    # grant never unlocks a feature the business's plan doesn't include.
+    require_permission(user, "ai.use")
     return user
 
 # Action codes that describe presence/session state rather than a meaningful
@@ -4789,6 +4794,15 @@ class BusinessBrainRecommendationAction(BaseModel):
 
 class PresenceHeartbeatRequest(BaseModel):
     session_id: Optional[str] = None
+    # Genuine-interaction signal, throttled client-side (see startPresenceHeartbeat
+    # in app.js) — NOT sent on every click/keystroke, only piggybacked onto the
+    # next scheduled heartbeat. True means "the user interacted with Cauldra at
+    # least once since the previous heartbeat".
+    activity: bool = False
+
+class PermissionOverrideUpdate(BaseModel):
+    permission: str
+    granted: bool
 
 class PriceListUploadRequest(BaseModel):
     supplier_id: int
@@ -4996,6 +5010,7 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
     set_refresh_cookie(response, refresh_raw)
     return {"access_token": access, "token_type": "bearer", "business_code": new_biz.business_code,
             "trial_end_at": to_utc_iso(trial_end), "card_last4": new_sub.card_last4, "card_type": new_sub.card_type,
+            "permissions": get_effective_permissions(admin),
             **serialize_business(new_biz), **serialize_user(admin)}
 
 @app.post("/auth/verify-business")
@@ -5079,7 +5094,7 @@ def admin_login(data: AdminLoginRequest, request: Request, response: Response, d
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     access = issue_token(user, db)
     set_refresh_cookie(response, create_refresh_session(db, user))
-    return {"access_token": access, "token_type": "bearer", **serialize_business(biz), **serialize_user(user)}
+    return {"access_token": access, "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz), **serialize_user(user)}
 
 @app.post("/auth/employee-login")
 def employee_login(data: EmployeeLoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
@@ -5089,7 +5104,7 @@ def employee_login(data: EmployeeLoginRequest, request: Request, response: Respo
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     access = issue_token(user, db)
     set_refresh_cookie(response, create_refresh_session(db, user))
-    return {"access_token": access, "token_type": "bearer", **serialize_business(biz), **serialize_user(user)}
+    return {"access_token": access, "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz), **serialize_user(user)}
 
 @app.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), request: Request = None, response: Response = None, db: Session = Depends(get_db)):
@@ -5101,15 +5116,15 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), request: Request = N
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     access = issue_token(user, db)
     if response is not None: set_refresh_cookie(response, create_refresh_session(db, user))
-    return {"access_token": access, "token_type": "bearer", **serialize_business(biz), **serialize_user(user)}
+    return {"access_token": access, "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz), **serialize_user(user)}
 
 @app.get("/auth/me")
 def auth_me(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-    return {**serialize_business(biz), **serialize_user(user)}
+    return {"permissions": get_effective_permissions(user), **serialize_business(biz), **serialize_user(user)}
 
 @app.post("/auth/logout")
-def auth_logout(response: Response, token: str = Depends(oauth2_scheme), refresh_token: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME), user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def auth_logout(response: Response, payload_body: Optional[PresenceHeartbeatRequest] = None, token: str = Depends(oauth2_scheme), refresh_token: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME), user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
     payload, jti = token_from_payload(token)
     exp_ts = payload.get("exp")
     exp_dt = datetime.utcfromtimestamp(exp_ts) if exp_ts else datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -5119,9 +5134,14 @@ def auth_logout(response: Response, token: str = Depends(oauth2_scheme), refresh
         rs = db.query(RefreshSession).filter(RefreshSession.token_hash==hash_text(refresh_token), RefreshSession.user_id==user.id, RefreshSession.revoked_at.is_(None)).first()
         if rs: rs.revoked_at = datetime.utcnow()
     # Sign-out is a presence/session event, not a business/audit event — it is
-    # recorded on the user's PresenceSession row (signed_out_at) via the
-    # separate /presence/logout call the frontend makes alongside this one,
-    # not written into Activity History.
+    # never written into Activity History. Presence termination happens
+    # RIGHT HERE when the caller supplies its presence session_id (section
+    # 22 — a single more-robust call instead of depending on a second,
+    # independently-fallible /presence/logout request); that separate
+    # endpoint remains for compatibility with any caller that doesn't.
+    if payload_body and payload_body.session_id:
+        presence_row = db.query(PresenceSession).filter(PresenceSession.session_id == payload_body.session_id, PresenceSession.user_id == user.id).first()
+        if presence_row: presence_row.signed_out_at = datetime.utcnow()
     db.commit(); clear_refresh_cookie(response)
     return {"message": "Signed out successfully."}
 
@@ -5132,7 +5152,7 @@ def _reject_refresh(response: Response) -> Response:
 
 def _issue_refresh_success(db: Session, user: User) -> dict:
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-    return {"access_token": issue_token(user, db), "token_type": "bearer", **serialize_business(biz), **serialize_user(user)}
+    return {"access_token": issue_token(user, db), "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz), **serialize_user(user)}
 
 @app.post("/auth/refresh")
 def auth_refresh(response: Response, refresh_token: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME), db: Session = Depends(get_db)):
@@ -5826,15 +5846,15 @@ def confirm_my_email_verify(user: User = Depends(get_authenticated_user), db: Se
 
 @app.get("/users")
 def list_users(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "team.view_employees")
     q = db.query(User).filter(User.business_id == user.business_id)
-    if user.role == "manager": q = q.filter(User.role == "staff")
+    if user.role == "manager": q = q.filter(User.role == "staff")  # scope: Manager sees Staff only
     users = q.order_by(User.id.asc()).offset(offset).limit(limit).all()
     return [serialize_user(u) for u in users]
 
 @app.post("/users")
 def create_user(data: CreateUserRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Your account is not allowed to create employee accounts.")
+    require_permission(user, "team.create_employee")
     role = data.role.casefold()
     if role not in {"admin","manager","staff"}: raise HTTPException(status_code=400, detail="Unsupported account role.")
     if user.role == "manager" and role != "staff": raise HTTPException(status_code=403, detail="Managers can only create Staff accounts.")
@@ -5853,7 +5873,7 @@ def create_user(data: CreateUserRequest, user: User = Depends(get_current_user),
         created_at=datetime.utcnow(),
     )
     db.add(new_user); db.flush()
-    add_audit(db, user, "USER_CREATED", f"Created {role} account.", new_user)
+    add_audit(db, user, "USER_CREATED", f"Created {role} account.", new_user, action_category="TEAM", resource_type="user", resource_id=new_user.id)
     db.commit(); db.refresh(new_user)
     # The creator already supplied the temporary password; never echo it back
     # from the API where it could be retained in logs or browser tooling.
@@ -5869,7 +5889,7 @@ def disable_user(user_id: int, actor: User = Depends(get_current_user), db: Sess
         raise HTTPException(status_code=400, detail="The last active Admin cannot be disabled.")
     target.disabled = True
     revoke_all_user_sessions(db, target)
-    add_audit(db, actor, "USER_DISABLED", "Account disabled.", target)
+    add_audit(db, actor, "USER_DISABLED", "Account disabled.", target, action_category="TEAM", resource_type="user", resource_id=target.id)
     db.commit()
     return {"message": "Account disabled successfully."}
 
@@ -5880,16 +5900,16 @@ def enable_user(user_id: int, actor: User = Depends(get_current_user), db: Sessi
     if actor.role != "admin": raise HTTPException(status_code=403, detail="Only Admins can enable accounts directly.")
     target.disabled = False
     target.auth_version = int(target.auth_version or 1) + 1
-    add_audit(db, actor, "USER_ENABLED", "Account enabled.", target)
+    add_audit(db, actor, "USER_ENABLED", "Account enabled.", target, action_category="TEAM", resource_type="user", resource_id=target.id)
     db.commit()
     return {"message": "Account enabled successfully."}
 
 @app.patch("/users/{user_id}/reset-password")
 def reset_user_password(user_id: int, data: AdminPasswordResetRequest, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if actor.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Access denied.")
+    require_permission(actor, "team.reset_staff_password")
     target = db.query(User).filter(User.id == user_id, User.business_id == actor.business_id).first()
     if not target: raise HTTPException(status_code=404, detail="Account is unavailable.")
-    if actor.role == "manager" and target.role != "staff": raise HTTPException(status_code=403, detail="Managers can only reset Staff accounts.")
+    if actor.role == "manager" and target.role != "staff": raise HTTPException(status_code=403, detail="Managers can only reset Staff accounts.")  # scope
     validate_password_strength(data.new_password)
     if target.previous_password_hash and verify_password(data.new_password, target.previous_password_hash):
         raise HTTPException(status_code=400, detail="Last created password cannot be used.")
@@ -5898,7 +5918,7 @@ def reset_user_password(user_id: int, data: AdminPasswordResetRequest, actor: Us
     target.must_change_password = True
     revoke_all_user_sessions(db, target)
     target.disabled = False
-    add_audit(db, actor, "PASSWORD_RESET", "Temporary password reset by authorized staff.", target)
+    add_audit(db, actor, "PASSWORD_RESET", "Temporary password reset by authorized staff.", target, action_category="TEAM", resource_type="user", resource_id=target.id)
     db.commit()
     return {"message": "Temporary password reset. The employee must change it at next sign-in."}
 
@@ -5910,9 +5930,65 @@ def delete_user(user_id: int, actor: User = Depends(get_current_user), db: Sessi
     if target.role == "admin":
         admins = db.query(User).filter(User.business_id == actor.business_id, User.role == "admin", User.disabled == False).count()
         if target.id == actor.id or admins <= 1: raise HTTPException(status_code=400, detail="The last active Admin cannot be deleted.")
-    add_audit(db, actor, "USER_DELETED", "Account deleted. Business-owned records were retained.", target)
+    add_audit(db, actor, "USER_DELETED", "Account deleted. Business-owned records were retained.", target, action_category="TEAM", resource_type="user", resource_id=target.id)
     db.delete(target); db.commit()
     return {"message": "Account deleted. Business data was preserved."}
+
+# -----------------------------------------------------------------------------
+# EMPLOYEE PERMISSION MANAGEMENT — Team Management > Employee > Access &
+# Permissions. GET returns the whole registry, grouped by category, with
+# this ACTOR's view of each row (current effective value, whether it's an
+# override or an inherited default, and whether *this* actor may edit it) so
+# the frontend never has to hardcode the grouping or re-derive scope rules.
+# POST changes exactly one permission at a time via set_permission_override().
+# -----------------------------------------------------------------------------
+@app.get("/users/{user_id}/permissions")
+def get_user_permissions(user_id: int, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    target = db.query(User).filter(User.id == user_id, User.business_id == actor.business_id).first()
+    if not target: raise HTTPException(status_code=404, detail="Account is unavailable.")
+    if actor.id != target.id:
+        # Visibility is membership-only (Admin views Manager/Staff, Manager
+        # views Staff) — can_edit_permission's per-code manager_can_grant
+        # check still decides which individual rows are actually editable
+        # below; a viewable-but-not-editable row is shown, not hidden.
+        if actor.role == "admin" and target.role not in ("manager", "staff"):
+            raise HTTPException(status_code=403, detail="This account's permissions cannot be viewed here.")
+        if actor.role == "manager" and target.role != "staff":
+            raise HTTPException(status_code=403, detail="Managers can only view Staff permissions.")
+        if actor.role not in ("admin", "manager"):
+            raise HTTPException(status_code=403, detail="Access denied.")
+    effective = get_effective_permissions(target)
+    try:
+        overrides = json.loads(target.permission_overrides) if target.permission_overrides else {}
+    except (ValueError, TypeError):
+        overrides = {}
+    role = (target.role or "staff").lower()
+    groups: Dict[str, list] = {}
+    for code, spec in PERMISSIONS.items():
+        default = bool(spec.get(role, False))
+        is_override = code in overrides
+        if actor.id == target.id:
+            editable = False
+        elif actor.role == "admin":
+            editable = target.role in ("manager", "staff")
+        elif actor.role == "manager":
+            editable = target.role == "staff" and bool(spec.get("manager_can_grant"))
+        else:
+            editable = False
+        groups.setdefault(spec["category"], []).append({
+            "code": code, "label": spec["label"], "reserved": bool(spec.get("reserved")),
+            "admin_default": bool(spec.get("admin", False)), "manager_default": bool(spec.get("manager", False)), "staff_default": bool(spec.get("staff", False)),
+            "current_effective": effective.get(code, default), "is_override": is_override, "editable_by_me": editable,
+        })
+    return {"user_id": target.id, "role": target.role, "categories": groups}
+
+@app.post("/users/{user_id}/permissions")
+def update_user_permission(user_id: int, data: PermissionOverrideUpdate, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    target = db.query(User).filter(User.id == user_id, User.business_id == actor.business_id).first()
+    if not target: raise HTTPException(status_code=404, detail="Account is unavailable.")
+    effective = set_permission_override(db, actor, target, data.permission, data.granted)
+    db.commit()
+    return {"message": "Permission updated.", "permissions": effective}
 
 # -----------------------------------------------------------------------------
 # ACCOUNT ACTION REQUESTS + AUDIT LOGS
@@ -5981,10 +6057,18 @@ def resolve_account_action_request(request_id: int, resolution: str, actor: User
     db.commit()
     return {"message": f"Request {row.status.lower()}."}
 
-def _build_audit_log_query(db: Session, actor: User, q, actor_username, action, date_from, date_to):
+def _build_audit_log_query(db: Session, actor: User, q, actor_username, action, date_from, date_to, action_category: Optional[str] = None, action_exact: Optional[str] = None):
     """Shared filter-building for /audit-logs and /audit-logs/export — kept
-    in one place so the CSV export can never show a different result set
-    than what the same filters display on screen."""
+    in one place so the CSV/XLSX export can never show a different result
+    set than what the same filters display on screen. Every filter here
+    combines with every other with AND semantics (each is an additional
+    .filter() call on the same query) and each also works entirely alone
+    when the others are omitted.
+
+    action_category and action_exact are EXACT-match filters (added
+    alongside the pre-existing partial-match `action` and free-text `q`,
+    both left untouched for backward compatibility) — category/exact-action
+    filtering must not accidentally include a merely-similar action code."""
     query = db.query(AuditLog).filter(AuditLog.business_id == actor.business_id, AuditLog.action.notin_(PRESENCE_SESSION_AUDIT_ACTIONS))
     if q and q.strip():
         like = f"%{q.strip()}%"
@@ -5996,6 +6080,10 @@ def _build_audit_log_query(db: Session, actor: User, q, actor_username, action, 
         query = query.filter(AuditLog.actor_username.ilike(f"%{actor_username.strip()}%"))
     if action and action.strip():
         query = query.filter(AuditLog.action.ilike(f"%{action.strip()}%"))
+    if action_category and action_category.strip():
+        query = query.filter(AuditLog.action_category == action_category.strip().upper())
+    if action_exact and action_exact.strip():
+        query = query.filter(AuditLog.action == action_exact.strip().upper())
     from_dt = parse_iso_datetime(date_from)
     if from_dt: query = query.filter(AuditLog.created_at >= from_dt)
     # The frontend sends a precise UTC instant (already the correct exclusive
@@ -6015,16 +6103,18 @@ def list_audit_logs(
     q: Optional[str] = Query(None, description="Keyword search across description/action/actor/target"),
     actor_username: Optional[str] = Query(None, description="Filter by the person who performed the action"),
     action: Optional[str] = Query(None, description="Filter by action code (partial match)"),
+    action_category: Optional[str] = Query(None, description="Exact-match category, e.g. INVENTORY/SALES/TEAM"),
+    action_exact: Optional[str] = Query(None, description="Exact-match action code, e.g. STOCK_TRANSFERRED"),
     date_from: Optional[str] = Query(None, description="Only entries on/after this date (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="Only entries on/before this date (YYYY-MM-DD)"),
     actor: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    if actor.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Access denied")
-    query = _build_audit_log_query(db, actor, q, actor_username, action, date_from, date_to)
+    require_permission(actor, "activity_history.view")
+    query = _build_audit_log_query(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact)
     total = query.count()
     rows = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
     return {
-        "items": [{"id": r.id, "actor_username": r.actor_username, "actor_role": r.actor_role, "action": r.action, "target_username": r.target_username, "description": r.description, "created_at": to_utc_iso(r.created_at)} for r in rows],
+        "items": [{"id": r.id, "actor_username": r.actor_username, "actor_role": r.actor_role, "action": r.action, "action_category": r.action_category, "resource_type": r.resource_type, "resource_id": r.resource_id, "target_username": r.target_username, "description": r.description, "created_at": to_utc_iso(r.created_at)} for r in rows],
         "total": total,
     }
 
@@ -6038,27 +6128,28 @@ AUDIT_LOG_EXPORT_COLUMNS = [
     {"key": "description", "label": "DESCRIPTION", "type": "text"},
 ]
 
-def _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to):
+def _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to, action_category: Optional[str] = None, action_exact: Optional[str] = None):
     """Shared by the CSV and Excel Activity History exports. Capped at the
     same 300-row ceiling the JSON endpoint already enforces (`le=300`);
     Activity History is a live, fast-growing table, so this export is a
     bounded, filtered slice, not a full historical dump."""
-    query = _build_audit_log_query(db, actor, q, actor_username, action, date_from, date_to)
+    query = _build_audit_log_query(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact)
     rows = query.order_by(AuditLog.created_at.desc()).limit(300).all()
     return [[r.id, to_utc_iso(r.created_at), r.actor_username or "", r.actor_role or "", r.action or "", r.target_username or "", r.description or ""] for r in rows]
 
 @app.get("/audit-logs/export")
 def export_audit_logs_csv(
     q: Optional[str] = Query(None), actor_username: Optional[str] = Query(None), action: Optional[str] = Query(None),
+    action_category: Optional[str] = Query(None), action_exact: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
     actor: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    """CSV export of Activity History. Same role check, same business
+    """CSV export of Activity History. Same permission check, same business
     scoping, and the exact same filter-building function as GET
     /audit-logs — this can never expose a row the JSON endpoint wouldn't
     also show for the same filters."""
-    if actor.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Access denied")
-    out_rows = _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to)
+    require_permission(actor, "activity_history.view")
+    out_rows = _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact)
     if not out_rows:
         return Response(status_code=204)
     header = [c["label"] for c in AUDIT_LOG_EXPORT_COLUMNS]
@@ -6067,13 +6158,14 @@ def export_audit_logs_csv(
 @app.get("/audit-logs/export/xlsx")
 def export_audit_logs_xlsx(
     q: Optional[str] = Query(None), actor_username: Optional[str] = Query(None), action: Optional[str] = Query(None),
+    action_category: Optional[str] = Query(None), action_exact: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
     actor: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """Same authorization, tenant scoping, filters, and row data as the CSV
     export above — only the presentation differs."""
-    if actor.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Access denied")
-    out_rows = _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to)
+    require_permission(actor, "activity_history.view")
+    out_rows = _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact)
     if not out_rows:
         return Response(status_code=204)
     filters_desc = ", ".join(f"{k}={v}" for k, v in [("Search", q), ("Actor", actor_username), ("Action", action), ("From", date_from), ("To", date_to)] if v) or "None"
@@ -6086,11 +6178,12 @@ def list_audit_log_actions(actor: User = Depends(get_current_user), db: Session 
     """Distinct action codes and actor usernames actually present in this business's
     Activity History, so the frontend can offer filter suggestions without ever
     hardcoding a fixed list of activity types."""
-    if actor.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(actor, "activity_history.view")
     base = db.query(AuditLog).filter(AuditLog.business_id == actor.business_id, AuditLog.action.notin_(PRESENCE_SESSION_AUDIT_ACTIONS))
     actions = [r[0] for r in base.with_entities(AuditLog.action).distinct().order_by(AuditLog.action.asc()).all()]
     actors = [r[0] for r in base.filter(AuditLog.actor_username.isnot(None)).with_entities(AuditLog.actor_username).distinct().order_by(AuditLog.actor_username.asc()).all()]
-    return {"actions": actions, "actors": actors}
+    categories = sorted(ACTIVITY_CATEGORIES)
+    return {"actions": actions, "actors": actors, "categories": categories}
 
 def get_warehouse_for_business(db: Session, business_id: int, name: str, active_only: bool = True) -> Optional[Warehouse]:
     cleaned = (name or "").strip()
@@ -6112,8 +6205,7 @@ def list_warehouses(user: User = Depends(get_current_user), db: Session = Depend
 
 @app.post("/warehouses/")
 def create_warehouse(data: WarehouseCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role not in {"admin", "manager"}:
-        raise HTTPException(status_code=403, detail="Only Admins and Managers can create warehouses.")
+    require_permission(user, "warehouse.create")
     name = data.name.strip()
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Warehouse name must contain at least 2 characters.")
@@ -6130,15 +6222,14 @@ def create_warehouse(data: WarehouseCreate, user: User = Depends(get_current_use
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     check_plan_limit(db, business, "warehouse", db.query(Warehouse).filter(Warehouse.business_id == user.business_id, Warehouse.is_active == True).count())
     row = Warehouse(business_id=user.business_id, name=name, is_active=True)
-    db.add(row)
-    add_audit(db, user, "WAREHOUSE_CREATED", f"Created warehouse {name}.")
+    db.add(row); db.flush()
+    add_audit(db, user, "WAREHOUSE_CREATED", f"Created warehouse {name}.", action_category="WAREHOUSE", resource_type="warehouse", resource_id=row.id)
     db.commit(); db.refresh(row)
     return serialize_warehouse(row, db)
 
 @app.patch("/warehouses/{warehouse_id}")
 def update_warehouse(warehouse_id: int, data: WarehouseUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role not in {"admin", "manager"}:
-        raise HTTPException(status_code=403, detail="Only Admins and Managers can update warehouses.")
+    require_permission(user, "warehouse.edit")
     row = db.query(Warehouse).filter(Warehouse.id == warehouse_id, Warehouse.business_id == user.business_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Warehouse not found.")
@@ -6156,14 +6247,13 @@ def update_warehouse(warehouse_id: int, data: WarehouseUpdate, user: User = Depe
     if data.is_active is not None:
         row.is_active = bool(data.is_active)
     row.updated_at = datetime.utcnow()
-    add_audit(db, user, "WAREHOUSE_UPDATED", f"Updated warehouse {old_name} to {new_name}.")
+    add_audit(db, user, "WAREHOUSE_UPDATED", f"Updated warehouse {old_name} to {new_name}.", action_category="WAREHOUSE", resource_type="warehouse", resource_id=row.id)
     db.commit(); db.refresh(row)
     return serialize_warehouse(row, db)
 
 @app.delete("/warehouses/{warehouse_id}")
 def deactivate_warehouse(warehouse_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role not in {"admin", "manager"}:
-        raise HTTPException(status_code=403, detail="Only Admins and Managers can deactivate warehouses.")
+    require_permission(user, "warehouse.deactivate")
     row = db.query(Warehouse).filter(Warehouse.id == warehouse_id, Warehouse.business_id == user.business_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Warehouse not found.")
@@ -6172,7 +6262,7 @@ def deactivate_warehouse(warehouse_id: int, user: User = Depends(get_current_use
         raise HTTPException(status_code=400, detail="The last active warehouse cannot be deactivated.")
     row.is_active = False
     row.updated_at = datetime.utcnow()
-    add_audit(db, user, "WAREHOUSE_DEACTIVATED", f"Deactivated warehouse {row.name}.")
+    add_audit(db, user, "WAREHOUSE_DEACTIVATED", f"Deactivated warehouse {row.name}.", action_category="WAREHOUSE", resource_type="warehouse", resource_id=row.id)
     db.commit()
     return {"message": "Warehouse deactivated successfully."}
 
@@ -6607,7 +6697,7 @@ def create_product(data: ProductCreate, request: Request, user: User = Depends(g
 @app.patch("/products/{product_id}")
 def update_product(product_id: int, data: ProductUpdate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_offline_replay_identity(request, user)
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot edit products.")
+    require_permission(user, "inventory.edit_product")
     changes = data.model_dump(exclude_unset=True)
     client_ref = str(changes.pop("client_ref", "") or "").strip()[:100] or None
     _dup_override_id = changes.pop("duplicate_override_candidate_id", None)
@@ -6732,12 +6822,16 @@ def delete_product(product_id: int, request: Request, user: User = Depends(get_c
     enforce_offline_replay_identity(request, user)
     p = db.query(Product).filter(Product.id == product_id, Product.business_id == user.business_id).first()
     if not p: raise HTTPException(status_code=404, detail="The product could not be found in this inventory.")
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot delete products.")
+    require_permission(user, "inventory.delete_product")
+    # Approval ROUTING (Manager must request, Admin acts directly) stays a
+    # hard role check, not a permission — this is the approval-boundary
+    # structure itself (section 29), never something a grant/revoke should
+    # be able to change.
     if user.role == "manager":
         row = ProductDeletionRequest(business_id=user.business_id, product_id=p.id, product_name=p.name, requested_by_id=user.id, requested_by_name=user.username)
-        db.add(row); add_audit(db, user, "PRODUCT_DELETE_REQUESTED", f"Requested Admin approval to delete product {p.name}.")
+        db.add(row); add_audit(db, user, "PRODUCT_DELETE_REQUESTED", f"Requested Admin approval to delete product {p.name}.", action_category="APPROVALS", resource_type="product", resource_id=p.id)
         db.commit(); return {"message": "Admin approval request sent."}
-    add_audit(db, user, "PRODUCT_DELETED", f"Deleted product {p.name} ({p.sku}).")
+    add_audit(db, user, "PRODUCT_DELETED", f"Deleted product {p.name} ({p.sku}).", action_category="INVENTORY", resource_type="product", resource_id=p.id)
     mark_business_brain_dirty(db, user.business_id)
     db.delete(p); db.commit(); return {"message": "Product deleted successfully."}
 
@@ -6755,15 +6849,16 @@ def resolve_product_deletion(request_id: int, resolution: str, user: User = Depe
     product = db.query(Product).filter(Product.id == row.product_id, Product.business_id == user.business_id).first() if row.product_id else None
     row.status = "APPROVED" if resolution == "approve" else "REJECTED"; row.resolved_by_id = user.id; row.resolved_by_name = user.username; row.resolved_at = datetime.utcnow()
     if resolution == "approve" and product:
-        add_audit(db, user, "PRODUCT_DELETED", f"Approved and deleted product {product.name}.")
+        add_audit(db, user, "PRODUCT_DELETED", f"Approved and deleted product {product.name}.", action_category="APPROVALS", resource_type="product", resource_id=product.id)
         mark_business_brain_dirty(db, user.business_id)
         db.delete(product)
     else:
-        add_audit(db, user, "PRODUCT_DELETE_REQUEST_REJECTED", f"Rejected product deletion request for {row.product_name}.")
+        add_audit(db, user, "PRODUCT_DELETE_REQUEST_REJECTED", f"Rejected product deletion request for {row.product_name}.", action_category="APPROVALS")
     db.commit(); return {"message": f"Request {row.status.lower()}."}
 
 @app.patch("/products/{product_id}/stock")
 def update_stock(product_id: int, data: StockUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_permission(user, "inventory.adjust_stock")
     p = db.query(Product).filter(Product.id == product_id, Product.business_id == user.business_id).first()
     if not p: raise HTTPException(status_code=404, detail="The product could not be found in this inventory.")
     warehouse_name = p.warehouse or "Main Central Warehouse"
@@ -6786,11 +6881,16 @@ def update_stock(product_id: int, data: StockUpdate, user: User = Depends(get_cu
     )
     mark_business_brain_dirty(db, user.business_id)
     check_inventory_notifications(db, user.business_id, p)
+    add_audit(
+        db, user, "STOCK_ADJUSTED", f"Adjusted stock for {p.name} in {warehouse_name} by {data.quantity_change:+d}.",
+        action_category="INVENTORY", resource_type="product", resource_id=p.id,
+        metadata={"warehouse": warehouse_name, "quantity_change": data.quantity_change, "new_quantity": p.quantity},
+    )
     db.commit(); return {"message": "Stock updated successfully.", "quantity": p.quantity}
 
 @app.patch("/products/{product_id}/transfer")
 def transfer_stock(product_id: int, data: StockTransfer, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot transfer stock between warehouses.")
+    require_permission(user, "inventory.transfer_stock")
     if data.quantity<1 or data.from_warehouse==data.to_warehouse: raise HTTPException(status_code=400, detail="Choose different warehouses and enter a positive quantity.")
     p=db.query(Product).filter(Product.id==product_id,Product.business_id==user.business_id).first()
     if not p: raise HTTPException(status_code=404, detail="The selected product is unavailable.")
@@ -6806,7 +6906,7 @@ def transfer_stock(product_id: int, data: StockTransfer, user: User = Depends(ge
     if not target: target=WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=data.to_warehouse,quantity=0); db.add(target); db.flush()
     source.quantity-=data.quantity; target.quantity+=data.quantity
     p.quantity=sum(w.quantity for w in db.query(WarehouseStock).filter(WarehouseStock.product_id==p.id).all())
-    add_audit(db,user,"STOCK_TRANSFER",f"Transferred {data.quantity} units of {p.name} from {data.from_warehouse} to {data.to_warehouse}.")
+    add_audit(db,user,"STOCK_TRANSFER",f"Transferred {data.quantity} units of {p.name} from {data.from_warehouse} to {data.to_warehouse}.", action_category="INVENTORY", resource_type="product", resource_id=p.id)
     db.commit(); return {"message":"Stock transfer completed successfully.","quantity_transferred":data.quantity,"from_warehouse":data.from_warehouse,"to_warehouse":data.to_warehouse,"total_quantity":p.quantity}
 
 @app.get("/products/{product_id}/warehouse-stocks")
@@ -7646,10 +7746,15 @@ def business_brain(user: User = Depends(require_ai_access), db: Session = Depend
     # via GET /business-brain/history and never shipped whole to the dashboard.
     rows = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.business_id == user.business_id, BusinessBrainRecommendation.status.in_(RECOMMENDATION_ACTIVE_STATUSES)).order_by(BusinessBrainRecommendation.updated_at.desc()).limit(30).all()
     rows.sort(key=lambda row: {"critical": 0, "important": 1, "opportunity": 2}.get(row.priority, 3))
-    if user.role == "staff": rows = [r for r in rows if r.kind == "stock_review"]
+    # Content-depth gate, not a 403: someone without business_brain.view_full
+    # (Staff by default) gets the same restricted stock_review-only view they
+    # always have — granting the permission adds more, it never takes away
+    # baseline access to this endpoint (that's ai.use, checked above).
+    has_full_view = has_permission(user, "business_brain.view_full")
+    if not has_full_view: rows = [r for r in rows if r.kind == "stock_review"]
     def rec_out(r): return {"id": r.id, "kind": r.kind, "priority": r.priority, "title": r.title, "summary": r.summary, "evidence": json.loads(r.evidence_json or "{}"), "status": r.status, "updated_at": to_utc_iso(r.updated_at)}
     output = {"learning": meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS, "history_days": meta["history_days"], "currency": business.currency if business else "USD ($)", "attention": [rec_out(r) for r in rows], "recommendations": [rec_out(r) for r in rows], "history_available": True, "learning_message": "Cauldra is still learning this part of your business. Continue recording sales and closing business days to build reliable predictions." if meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS else None}
-    if user.role != "staff":
+    if has_full_view:
         memories = db.query(BusinessBrainMemory).filter(BusinessBrainMemory.business_id == user.business_id).order_by(BusinessBrainMemory.last_observed_at.desc()).limit(20).all()
         # COMING UP = what is likely to matter next: only forecasts whose window
         # is still open, and only the newest one per product per kind so a
@@ -7669,7 +7774,7 @@ def business_brain(user: User = Depends(require_ai_access), db: Session = Depend
 
 @app.post("/business-brain/recommendations/{recommendation_id}/action")
 def action_business_brain_recommendation(recommendation_id: int, payload: BusinessBrainRecommendationAction, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
-    if user.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Only Admins and Managers can update recommendation actions.")
+    require_permission(user, "business_brain.manage")
     row = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.id == recommendation_id, BusinessBrainRecommendation.business_id == user.business_id).first()
     if not row: raise HTTPException(status_code=404, detail="Recommendation not found.")
     action = payload.action.strip().lower()
@@ -7731,12 +7836,12 @@ def business_brain_history(
     stores (resolved/acted/dismissed recommendations, evaluated forecasts);
     no separate history ledger is written."""
     now = datetime.utcnow()
-    staff = user.role == "staff"
+    restricted_view = not has_permission(user, "business_brain.view_full")
     want = (type or "all").strip().lower()
     range_key = (range or "all").strip().lower()
     start, end = _brain_history_window(range_key, date_from, date_to, now)
     want_recs = want in ("all", "attention", "recommendations")
-    want_preds = (want in ("all", "predictions", "outcomes")) and not staff
+    want_preds = (want in ("all", "predictions", "outcomes")) and not restricted_view
     # Over-fetch bound per source: enough to serve this page after the merge,
     # never the whole table. Each source is independently ordered newest-first,
     # so the merged slice [offset:offset+limit] is exact once each source has at
@@ -7749,7 +7854,7 @@ def business_brain_history(
             BusinessBrainRecommendation.business_id == user.business_id,
             BusinessBrainRecommendation.status.in_(RECOMMENDATION_HISTORY_STATUSES),
         )
-        if staff or want == "attention":
+        if restricted_view or want == "attention":
             rq = rq.filter(BusinessBrainRecommendation.kind == "stock_review")
         elif want == "recommendations":
             rq = rq.filter(BusinessBrainRecommendation.kind != "stock_review")
@@ -7820,7 +7925,7 @@ def list_expense_categories(user: User = Depends(get_current_user)):
 @app.post("/expenses/")
 def create_expense(data: ExpenseCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_offline_replay_identity(request, user)
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "expenses.record")
     category = (data.category or "").strip()
     if not category: raise HTTPException(status_code=400, detail="Please choose or enter an expense category.")
     if len(category) > 100: raise HTTPException(status_code=400, detail="Expense category is too long.")
@@ -7853,7 +7958,7 @@ def create_expense(data: ExpenseCreate, request: Request, user: User = Depends(g
         business_day_id=business_day_id,
     )
     db.add(expense); db.flush()
-    add_audit(db, user, "EXPENSE_RECORDED", f"Recorded a {category} expense of {expense.amount:,.2f}.", business_day_id=business_day_id)
+    add_audit(db, user, "EXPENSE_RECORDED", f"Recorded a {category} expense of {expense.amount:,.2f}.", business_day_id=business_day_id, action_category="EXPENSES", resource_type="expense", resource_id=expense.id)
     response = {"id": expense.id, "message": "Expense recorded successfully."}
     complete_idempotent_mutation(claim, response)
     try:
@@ -7917,7 +8022,12 @@ def list_expenses(
     limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "expenses.view")
+    # Viewing someone ELSE's expenses (via the user_id filter) is a separate,
+    # more privileged capability than viewing your own — previously this
+    # filter was open to every caller with zero extra gate.
+    if user_id is not None and user_id != user.id:
+        require_permission(user, "expenses.view_all")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
     q = _build_expenses_query(db, user, business, category, payment_source, user_id, search, date_from, date_to)
@@ -7963,10 +8073,12 @@ def export_expenses_csv(
     date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    """CSV export of Expense History. Same role check and business scoping
-    as GET /expenses/ — the business_id always comes from the authenticated
-    session, never from the request."""
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    """CSV export of Expense History. Same permission check and business
+    scoping as GET /expenses/ — the business_id always comes from the
+    authenticated session, never from the request."""
+    require_permission(user, "expenses.export")
+    if user_id is not None and user_id != user.id:
+        require_permission(user, "expenses.view_all")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
     out_rows = _expenses_export_rows(db, user, business, category, payment_source, user_id, search, date_from, date_to)
@@ -7985,7 +8097,9 @@ def export_expenses_xlsx(
     """Same authorization, tenant scoping, filters, and row data as the CSV
     export above (both call _expenses_export_rows) — this only changes how
     the rows are presented (styled, typed, filterable workbook)."""
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "expenses.export")
+    if user_id is not None and user_id != user.id:
+        require_permission(user, "expenses.view_all")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
     out_rows = _expenses_export_rows(db, user, business, category, payment_source, user_id, search, date_from, date_to)
@@ -8052,19 +8166,19 @@ def list_suppliers(limit: int = Query(200, ge=1, le=500), offset: int = Query(0,
 
 @app.post("/suppliers/")
 def create_supplier(data: SupplierCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot add suppliers.")
+    require_permission(user, "supplier.create")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     check_plan_limit(db, business, "supplier", db.query(Supplier).filter(Supplier.business_id == user.business_id).count())
     s = Supplier(name=data.name, contact_email=data.contact_email, phone=data.phone, lead_time_days=data.lead_time_days or 3, business_id=user.business_id)
-    db.add(s); db.flush(); add_audit(db, user, "SUPPLIER_CREATED", f"Added supplier {s.name}."); db.commit(); db.refresh(s)
+    db.add(s); db.flush(); add_audit(db, user, "SUPPLIER_CREATED", f"Added supplier {s.name}.", action_category="SUPPLIERS", resource_type="supplier", resource_id=s.id); db.commit(); db.refresh(s)
     return {"id": s.id, "message": "Supplier added successfully."}
 
 @app.delete("/suppliers/{supplier_id}")
 def delete_supplier(supplier_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Staff accounts cannot delete suppliers.")
+    require_permission(user, "supplier.deactivate")
     s = db.query(Supplier).filter(Supplier.id == supplier_id, Supplier.business_id == user.business_id).first()
     if not s: raise HTTPException(status_code=404, detail="The supplier could not be found.")
-    add_audit(db, user, "SUPPLIER_DELETED", f"Deleted supplier {s.name}.")
+    add_audit(db, user, "SUPPLIER_DELETED", f"Deleted supplier {s.name}.", action_category="SUPPLIERS", resource_type="supplier", resource_id=s.id)
     db.delete(s); db.commit()
     return {"message": "Supplier deleted successfully."}
 
@@ -8073,7 +8187,7 @@ def delete_supplier(supplier_id: int, user: User = Depends(get_current_user), db
 # -----------------------------------------------------------------------------
 @app.get("/purchase-orders/")
 def get_purchase_orders(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "po.view")
     rows = db.query(PurchaseOrder).filter(PurchaseOrder.business_id == user.business_id).order_by(PurchaseOrder.id.desc()).all()
     owner_name = _owner_name_lookup(db, rows)
     out=[]
@@ -8088,7 +8202,7 @@ def get_purchase_orders(user: User = Depends(get_current_user), db: Session = De
 
 @app.post("/purchase-orders/generate")
 def generate_po(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "po.create")
     # No subscription/plan-limit check here, on purpose. A generated PO always
     # starts as a DRAFT, and drafts must never consume the plan's Purchase
     # Order allowance — otherwise a user could generate up to their limit,
@@ -8101,7 +8215,7 @@ def generate_po(user: User = Depends(get_current_user), db: Session = Depends(ge
     items = ", ".join([f"{p.name} ({max(p.min_stock_level * 2, 1)} units)" for p in low_stock])
     draft = f"Please confirm availability for: {items}."
     po = PurchaseOrder(status="DRAFT", total_estimated_cost=total_cost, email_draft=draft, business_id=user.business_id, owner_id=None)
-    db.add(po); db.flush(); add_audit(db, user, "PURCHASE_ORDER_CREATED", f"Generated purchase order #{po.id}.")
+    db.add(po); db.flush(); add_audit(db, user, "PURCHASE_ORDER_CREATED", f"Generated purchase order #{po.id}.", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id)
     create_notification(
         db, business_id=user.business_id, category="purchase_order", severity="info", type="PO_GENERATED",
         title="Purchase order generated", message=f"Purchase order #{po.id} was generated for {len(low_stock)} low-stock item(s).",
@@ -8112,7 +8226,7 @@ def generate_po(user: User = Depends(get_current_user), db: Session = Depends(ge
 
 @app.put("/purchase-orders/{po_id}")
 def update_po_draft(po_id: int, update: PODraftUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "po.edit")
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
     if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
     # Immutability boundary enforced server-side, not just hidden in the UI:
@@ -8123,12 +8237,12 @@ def update_po_draft(po_id: int, update: PODraftUpdate, user: User = Depends(get_
     details = update.details if update.details is not None else update.items_summary
     if details is not None: po.email_draft = details
     if update.supplier_id is not None: po.supplier_id = update.supplier_id
-    db.commit(); add_audit(db, user, "PURCHASE_ORDER_UPDATED", f"Updated purchase order #{po.id}."); db.commit()
+    db.commit(); add_audit(db, user, "PURCHASE_ORDER_UPDATED", f"Updated purchase order #{po.id}.", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id); db.commit()
     return {"message": "PO draft updated."}
 
 @app.delete("/purchase-orders/{po_id}")
 def delete_po(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "po.delete")
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
     if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
     # Immutability boundary enforced server-side: a SENT purchase order is
@@ -8136,7 +8250,7 @@ def delete_po(po_id: int, user: User = Depends(get_current_user), db: Session = 
     # (see delete_all_pos's identical rule), regardless of what calls this.
     if po.status != "DRAFT":
         raise HTTPException(status_code=409, detail="Sent purchase orders are permanent history and cannot be deleted.")
-    add_audit(db, user, "PURCHASE_ORDER_DELETED", f"Deleted purchase order #{po.id}.")
+    add_audit(db, user, "PURCHASE_ORDER_DELETED", f"Deleted purchase order #{po.id}.", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id)
     db.delete(po); db.commit(); return {"message": "Purchase order deleted."}
 
 @app.delete("/purchase-orders")
@@ -8145,7 +8259,7 @@ def delete_all_pos(user: User = Depends(get_current_user), db: Session = Depends
     # action must never be able to remove it — see delete_po's identical rule.
     if user.role != "admin": raise HTTPException(status_code=403, detail="Only Admins can delete all draft purchase orders.")
     deleted = db.query(PurchaseOrder).filter(PurchaseOrder.business_id == user.business_id, PurchaseOrder.status == "DRAFT").delete(synchronize_session=False)
-    add_audit(db, user, "PURCHASE_ORDERS_CLEARED", f"Cleared {deleted} draft purchase order(s)."); db.commit(); return {"message": "All draft purchase orders deleted.", "deleted": deleted}
+    add_audit(db, user, "PURCHASE_ORDERS_CLEARED", f"Cleared {deleted} draft purchase order(s).", action_category="PURCHASE_ORDERS"); db.commit(); return {"message": "All draft purchase orders deleted.", "deleted": deleted}
 
 def _po_sent_count_this_period(db: Session, business: BusinessProfile) -> int:
     """SENT purchase orders whose sent_at falls inside the CURRENT billing
@@ -8172,7 +8286,7 @@ def get_po_whatsapp_link(po_id: int, user: User = Depends(get_current_user), db:
     marked the PO SENT immediately, on link generation alone, which was
     inaccurate; nothing in the shipped frontend called this endpoint before
     this change, so no existing integration relied on that side effect.)"""
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "po.send")
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
     if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
     if po.status != "DRAFT": raise HTTPException(status_code=409, detail="This purchase order has already been sent.")
@@ -8197,7 +8311,7 @@ def confirm_po_whatsapp_sent(po_id: int, user: User = Depends(get_current_user),
     WhatsApp), this endpoint trusts the user's own explicit attestation —
     exactly once per order — behind the same DRAFT-only and plan-limit
     checks enforced everywhere else a purchase order becomes SENT."""
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "po.send")
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
     if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
     if po.status != "DRAFT": raise HTTPException(status_code=409, detail="This purchase order has already been sent.")
@@ -8207,7 +8321,7 @@ def confirm_po_whatsapp_sent(po_id: int, user: User = Depends(get_current_user),
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     check_plan_limit(db, business, "purchase_order", _po_sent_count_this_period(db, business))
     po.status = "SENT"; po.sent_at = datetime.utcnow()
-    add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Dispatched purchase order #{po.id} via WhatsApp (user-confirmed sent).")
+    add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Dispatched purchase order #{po.id} via WhatsApp (user-confirmed sent).", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id)
     create_notification(
         db, business_id=user.business_id, category="purchase_order", severity="important", type="PO_SUBMITTED",
         title="Purchase order submitted", message=f"Purchase order #{po.id} was sent to {supplier.name}.",
@@ -8218,7 +8332,7 @@ def confirm_po_whatsapp_sent(po_id: int, user: User = Depends(get_current_user),
 
 @app.post("/purchase-orders/{po_id}/dispatch-email")
 def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "po.send")
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
     if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
     # Immutability boundary: an already-SENT PO can never be (re)dispatched.
@@ -8258,7 +8372,7 @@ def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Se
         # provider-accepted send can consume it.
         raise HTTPException(status_code=502, detail="We could not email this purchase order right now.") from exc
     po.status = "SENT"; po.sent_at = datetime.utcnow()
-    add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Emailed purchase order #{po.id} to {supplier.name}.")
+    add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Emailed purchase order #{po.id} to {supplier.name}.", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id)
     create_notification(
         db, business_id=user.business_id, category="purchase_order", severity="important", type="PO_SUBMITTED",
         title="Purchase order submitted", message=f"Purchase order #{po.id} was sent to {supplier.name}.",
@@ -8273,7 +8387,7 @@ def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Se
 @app.post("/sales/checkout")
 def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_offline_replay_identity(request, user)
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "sales.create")
     client_ref = (payload.client_ref or "").strip()[:100] or None
 
     def _existing_result(ref: str) -> Optional[dict]:
@@ -8411,10 +8525,10 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
         if item.price_mode == "retail":
             price = retail_price
         elif item.price_mode == "wholesale":
+            require_permission(user, "sales.wholesale")
             price = wholesale_price
         else:
-            if user.role not in {"admin", "manager"}:
-                raise HTTPException(status_code=403, detail="Only Admins and Managers can negotiate a sale price.")
+            require_permission(user, "sales.override_price")
             reason = (item.negotiated_reason or "").strip()
             if len(reason) < 5:
                 raise HTTPException(status_code=400, detail="A negotiated-price reason of at least 5 characters is required.")
@@ -8476,6 +8590,7 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
     mark_business_brain_dirty(db, user.business_id)
     add_audit(
         db, user, "SALE_COMPLETED", f"Completed a sale worth {daily_total:.2f}.", business_day_id=day.id,
+        action_category="SALES", resource_type="sale_transaction", resource_id=None,
         metadata={"transaction_id": transaction_ref, "total": round(daily_total, 2),
                   "lines": len(validated), "units": sum(q for _, q, _, _ in validated),
                   "pricing_policy": "server_catalog_or_authorized_negotiation",
@@ -8601,7 +8716,7 @@ def list_sale_transactions(
     read this (unlike the day-level /sales/history) because staff are
     explicitly authorized to create refunds and need a way to find what
     they're refunding."""
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "sales.refund")
     if business_day_id is not None:
         day = db.query(BusinessDay).filter(BusinessDay.id == business_day_id, BusinessDay.business_id == user.business_id).first()
         if not day: raise HTTPException(status_code=404, detail="Business Day not found.")
@@ -8625,7 +8740,7 @@ def list_sale_transactions(
 
 @app.get("/sales/transactions/{transaction_key}")
 def get_sale_transaction(transaction_key: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "sales.refund")
     sales = _sales_for_transaction_key(db, user.business_id, transaction_key)
     if not sales: raise HTTPException(status_code=404, detail="Transaction not found.")
     sale_ids = [s.id for s in sales]
@@ -8647,7 +8762,7 @@ def create_refund(transaction_key: str, payload: RefundRequest, user: User = Dep
     exception propagation plus get_db()'s uncommitted session.close()
     discards every uncommitted change together (see resolve_business_day_
     reopen_request for the same pattern elsewhere in this file)."""
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "sales.refund")
     if not payload.lines: raise HTTPException(status_code=400, detail="Select at least one item to refund.")
 
     # Idempotency: a rapid double-submit with the same client_ref returns the
@@ -8814,7 +8929,7 @@ def start_business_day_endpoint(user: User = Depends(get_current_user), db: Sess
     # something to "continue". The only thing that can block this is
     # another session currently being active, in which case
     # start_business_day itself raises the required conflict message.
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "business_day.manage")
     day = start_business_day(db, user.business_id, opener=user)
     return {"message": "Business day started.", "business_day": serialize_business_day(day, db)}
 
@@ -8827,7 +8942,7 @@ def open_business_day_endpoint(user: User = Depends(get_current_user), db: Sessi
     control calls — the two exist because "make sure a day is open" and
     "start a new day, and tell me if that's not possible" are different
     intents and must not silently collapse into one behaviour."""
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "business_day.manage")
     existing = get_active_business_day(db, user.business_id)
     if existing:
         return {"message": "This Business Day is already open.", "business_day": serialize_business_day(existing, db), "already_open": True}
@@ -8850,7 +8965,7 @@ def current_business_day_summary(user: User = Depends(get_current_user), db: Ses
     Every figure comes from the same canonical per-business-day aggregates
     the close snapshot and Sales History use — never a second, independently
     written formula."""
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "business_day.manage")
     day = get_active_business_day(db, user.business_id)
     if not day:
         return {
@@ -8871,7 +8986,7 @@ def financial_summary(period: str = Query("today"), custom_start: Optional[str] 
     History period totals, and the Profit page all call this exact endpoint
     rather than calculating anything independently, so they can never
     disagree with each other."""
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "reports.profit")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
     return financial_summary_for_period(db, business, period, custom_start, custom_end)
@@ -8883,7 +8998,7 @@ def financial_summary_breakdown(period: str = Query("today"), custom_start: Opti
     directly (not a separately re-derived boundary) so a Profit page's
     breakdown rows always add up to the same headline totals shown above
     them, never a second, independently-computed version."""
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "reports.profit")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
     start_utc, end_utc = resolve_financial_period(business, period, custom_start, custom_end)
@@ -8918,7 +9033,7 @@ def financial_summary_breakdown(period: str = Query("today"), custom_start: Opti
 
 @app.get("/sales/history")
 def sales_history(period: str = Query("all"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "sales.view_history")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
     # Same shared period resolver every other date-range filter in the app
@@ -9051,10 +9166,10 @@ def _sales_export_rows(db, user, business, period, custom_start, custom_end):
 
 @app.get("/sales/export")
 def export_sales_csv(period: str = Query("all"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Line-item CSV export of individual Sale rows. Same role restriction
-    and period resolver as /sales/history (staff sees Today's Sales but not
+    """Line-item CSV export of individual Sale rows. Same permission and
+    period resolver as /sales/history (staff sees Today's Sales but not
     this historical export, matching the existing restriction there)."""
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "sales.view_history")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
     out_rows = _sales_export_rows(db, user, business, period, custom_start, custom_end)
@@ -9067,7 +9182,7 @@ def export_sales_csv(period: str = Query("all"), custom_start: Optional[str] = Q
 def export_sales_xlsx(period: str = Query("all"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Same authorization, tenant scoping, filters, and row data as the CSV
     export above — only the presentation differs."""
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "sales.view_history")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
     out_rows = _sales_export_rows(db, user, business, period, custom_start, custom_end)
@@ -9154,7 +9269,7 @@ def end_business_day(user: User = Depends(get_current_user), db: Session = Depen
     # "today's" row by date. If a previously-closed session from earlier
     # today (or a reopened older one) isn't the active one, this correctly
     # has nothing to do with it.
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "business_day.manage")
     day = get_active_business_day(db, user.business_id)
     if not day: raise HTTPException(status_code=409, detail="No Business Day is currently open to close.")
     return _close_business_day(db, day, user)
@@ -9170,7 +9285,7 @@ def close_business_day_by_id(business_day_id: int, user: User = Depends(get_curr
     not conflated with today's own Business Day). Open/close is available to
     Admin, Manager, and Staff alike, same as the current-day endpoints above.
     """
-    if user.role not in {"admin", "manager", "staff"}: raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "business_day.manage")
     day = db.query(BusinessDay).filter(BusinessDay.id == business_day_id, BusinessDay.business_id == user.business_id).first()
     if not day: raise HTTPException(status_code=404, detail="Business Day not found.")
     if not day.is_open: raise HTTPException(status_code=409, detail="This Business Day is already closed.")
@@ -9182,7 +9297,7 @@ def business_day_timeline(business_day_id: int, user: User = Depends(get_current
     immutable AuditLog, not a separate log. Every lifecycle event (started,
     closed, reopen requested/approved/rejected, reopened, closed again) that
     ever touched this day is here, in order, forever."""
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "business_day.view_history")
     day = db.query(BusinessDay).filter(BusinessDay.id == business_day_id, BusinessDay.business_id == user.business_id).first()
     if not day: raise HTTPException(status_code=404, detail="Business Day not found.")
     rows = db.query(AuditLog).filter(AuditLog.business_day_id == business_day_id, AuditLog.business_id == user.business_id).order_by(AuditLog.created_at.asc()).all()
@@ -9361,7 +9476,7 @@ def create_sale_adjustment(sale_id: int, data: RecordAdjustmentRequest, user: Us
 
 @app.get("/sales/{sale_id}/adjustments")
 def list_sale_adjustments(sale_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "sales.view_history")
     sale = db.query(SaleModel).filter(SaleModel.id == sale_id, SaleModel.business_id == user.business_id).first()
     if not sale: raise HTTPException(status_code=404, detail="Sale not found.")
     rows = db.query(SaleAdjustment).filter(SaleAdjustment.sale_id == sale_id, SaleAdjustment.business_id == user.business_id).order_by(SaleAdjustment.created_at.asc()).all()
@@ -9400,7 +9515,7 @@ def create_expense_adjustment(expense_id: int, data: RecordAdjustmentRequest, us
 
 @app.get("/expenses/{expense_id}/adjustments")
 def list_expense_adjustments(expense_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "staff": raise HTTPException(status_code=403, detail="Access denied")
+    require_permission(user, "expenses.view_all")
     expense = db.query(Expense).filter(Expense.id == expense_id, Expense.business_id == user.business_id).first()
     if not expense: raise HTTPException(status_code=404, detail="Expense not found.")
     rows = db.query(ExpenseAdjustment).filter(ExpenseAdjustment.expense_id == expense_id, ExpenseAdjustment.business_id == user.business_id).order_by(ExpenseAdjustment.created_at.asc()).all()
@@ -9413,15 +9528,67 @@ def list_expense_adjustments(expense_id: int, user: User = Depends(get_current_u
     }
 
 # -----------------------------------------------------------------------------
-# PRESENCE
+# PRESENCE — three server-authoritative states (ONLINE/INACTIVE/OFFLINE), the
+# frontend only ever renders what this backend computes, never its own
+# timestamp math (section 27). Timing, fixed and documented once here:
+#   - Heartbeat interval (frontend cadence): 45 seconds.
+#   - Inactive threshold: 30 minutes without genuine interaction.
+#   - Stale-heartbeat / Offline threshold: ~3 minutes without a successful
+#     heartbeat (a few missed 45s beats' worth of grace, so one dropped
+#     request/tab-suspend blip never flips a connected user to Offline).
 # -----------------------------------------------------------------------------
+PRESENCE_INACTIVE_THRESHOLD = timedelta(minutes=30)
+PRESENCE_STALE_THRESHOLD = timedelta(minutes=3)
+
+def compute_presence_status(sessions: list, now: datetime) -> dict:
+    """Given ALL of one user's PresenceSession rows (every device/tab, not
+    just the most recent), returns {status, online_since, last_activity_at,
+    last_seen_at, signed_out_at} per the spec's exact multi-session formula:
+
+        any connected session genuinely active in the last 30 minutes -> ONLINE
+        else any connected session at all (heartbeating, not signed out)   -> INACTIVE
+        else                                                                -> OFFLINE
+
+    "Connected" = signed_out_at is null AND last_seen_at within the stale
+    threshold. One dead or explicitly-signed-out session never drags the
+    whole user to Offline while another session is still genuinely
+    connected (section 25) — the reported "logs into another account and
+    still shows Offline" class of bug is exactly what iterating ALL sessions
+    here (instead of only ever reading the single latest row) fixes."""
+    connected = [s for s in sessions if s.signed_out_at is None and (now - s.last_seen_at) <= PRESENCE_STALE_THRESHOLD]
+    if not connected:
+        most_recent = max(sessions, key=lambda s: s.last_seen_at) if sessions else None
+        return {
+            "status": "offline",
+            "online_since": None,
+            "last_activity_at": to_utc_iso(most_recent.last_activity_at) if most_recent and most_recent.last_activity_at else None,
+            "last_seen_at": to_utc_iso(most_recent.last_seen_at) if most_recent else None,
+            "signed_out_at": to_utc_iso(most_recent.signed_out_at) if most_recent and most_recent.signed_out_at else None,
+        }
+    active = [s for s in connected if s.last_activity_at and (now - s.last_activity_at) <= PRESENCE_INACTIVE_THRESHOLD]
+    best = max(active or connected, key=lambda s: (s.last_activity_at or s.last_seen_at))
+    return {
+        "status": "online" if active else "inactive",
+        "online_since": to_utc_iso(best.signed_in_at) if active else None,
+        "last_activity_at": to_utc_iso(best.last_activity_at) if best.last_activity_at else None,
+        "last_seen_at": to_utc_iso(best.last_seen_at),
+        "signed_out_at": None,
+    }
+
 @app.post("/presence/heartbeat")
 def presence_heartbeat(payload: PresenceHeartbeatRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     session_id = payload.session_id or secrets.token_urlsafe(18)
     row = db.query(PresenceSession).filter(PresenceSession.session_id == session_id, PresenceSession.user_id == user.id).first()
     if not row: row = PresenceSession(session_id=session_id, business_id=user.business_id, user_id=user.id); db.add(row)
     now = datetime.utcnow()
-    row.last_seen_at = now; row.signed_out_at = None
+    # last_seen_at proves CONNECTIVITY (bumped on every heartbeat, activity or
+    # not). last_activity_at proves GENUINE INTERACTION and only advances when
+    # the client reports it — a browser left open with heartbeats still firing
+    # must not read as Online forever (section 17/the Inactive spec).
+    row.last_seen_at = now
+    if payload.activity:
+        row.last_activity_at = now
+    row.signed_out_at = None
     user.last_active_at = now   # V31: the one write platform-wide "active users" reads
     db.commit(); return {"session_id": session_id}
 
@@ -9436,39 +9603,25 @@ def presence_logout(payload: PresenceHeartbeatRequest, user: User = Depends(get_
 @app.get("/presence/team")
 def team_presence(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Full employee roster (same directory as /users) merged with each
-    employee's current/last known presence state. An employee's profile
-    fields never disappear when they go offline — only the presence portion
-    (online/online_since/last_seen_at) changes, and only when the backend
-    actually has a presence record for them."""
-    if user.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Access denied")
-    cutoff = datetime.utcnow() - timedelta(minutes=2)
+    employee's current Online/Inactive/Offline status, computed across ALL
+    of their sessions (every device/tab) via compute_presence_status — never
+    just the single most-recent row, which is what previously let one
+    device's stale/absent session incorrectly speak for the whole user."""
+    require_permission(user, "team.view_presence")
+    now = datetime.utcnow()
     q = db.query(User).filter(User.business_id == user.business_id, User.id != user.id)
-    if user.role == "manager": q = q.filter(User.role == "staff")
+    if user.role == "manager": q = q.filter(User.role == "staff")  # scope: Manager sees Staff only
     employees = q.order_by(User.id.asc()).all()
 
-    # One most-recent PresenceSession per user (a new session_id is created per
-    # browser session, so multiple rows can exist per user over time — only the
-    # latest by last_seen_at reflects their current/last known presence).
-    latest_by_user: dict = {}
+    sessions_by_user: Dict[int, list] = {}
     for row in db.query(PresenceSession).filter(PresenceSession.business_id == user.business_id).all():
-        current = latest_by_user.get(row.user_id)
-        if not current or row.last_seen_at > current.last_seen_at:
-            latest_by_user[row.user_id] = row
+        sessions_by_user.setdefault(row.user_id, []).append(row)
 
     result = []
     for emp in employees:
-        row = latest_by_user.get(emp.id)
-        is_online = bool(row and row.signed_out_at is None and row.last_seen_at >= cutoff)
-        result.append({
-            **serialize_user(emp),
-            "online": is_online,
-            "online_since": to_utc_iso(row.signed_in_at) if is_online and row else None,
-            "last_seen_at": to_utc_iso(row.last_seen_at) if row else None,
-            # Set only when the session ended via an explicit sign-out; left null for
-            # a session that simply went stale (timed out / tab closed), so the
-            # frontend never has to guess or invent which of the two occurred.
-            "signed_out_at": to_utc_iso(row.signed_out_at) if row and row.signed_out_at else None,
-        })
+        presence = compute_presence_status(sessions_by_user.get(emp.id, []), now)
+        result.append({**serialize_user(emp), **presence,
+                        "online": presence["status"] == "online"})  # back-compat boolean for any caller not yet reading `status`
     return {"employees": result}
 
 # -----------------------------------------------------------------------------
@@ -9595,6 +9748,7 @@ def unsubscribe_from_push(payload: PushUnsubscribeRequest, user: User = Depends(
 # -----------------------------------------------------------------------------
 @app.get("/price-monitor")
 def price_monitor(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_permission(user, "procurement.price_monitor")
     rows = db.query(PriceMonitorSource).filter(PriceMonitorSource.business_id == user.business_id).order_by(PriceMonitorSource.id.desc()).all()
     sources=[]
     for s in rows:
@@ -9609,16 +9763,20 @@ def price_monitor(user: User = Depends(get_current_user), db: Session = Depends(
 
 @app.post("/price-monitor/sources")
 def create_price_source(payload: PriceSourceCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_permission(user, "procurement.price_monitor")
     supplier_id = payload.supplier_id; product_id = payload.product_id; source_type = payload.source_type
     if not db.query(Supplier).filter(Supplier.id == supplier_id, Supplier.business_id == user.business_id).first(): raise HTTPException(status_code=404, detail="Supplier is unavailable.")
     if not db.query(Product).filter(Product.id == product_id, Product.business_id == user.business_id).first(): raise HTTPException(status_code=404, detail="Product is unavailable.")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     check_plan_limit(db, business, "price_monitor", db.query(PriceMonitorSource).filter(PriceMonitorSource.business_id == user.business_id).count())
     s=PriceMonitorSource(business_id=user.business_id, supplier_id=supplier_id, product_id=product_id, source_type=source_type, source_url=payload.source_url, last_price=payload.initial_price)
-    db.add(s); db.commit(); return {"id": s.id, "message": "Price source added."}
+    db.add(s); db.flush()
+    add_audit(db, user, "PRICE_MONITOR_SOURCE_ADDED", "Added a price monitor source.", action_category="PURCHASE_ORDERS", resource_type="price_monitor_source", resource_id=s.id)
+    db.commit(); return {"id": s.id, "message": "Price source added."}
 
 @app.post("/price-monitor/{source_id}/price")
 def manual_price_update(source_id: int, payload: ManualPriceUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_permission(user, "procurement.price_monitor")
     s=db.query(PriceMonitorSource).filter(PriceMonitorSource.id == source_id, PriceMonitorSource.business_id == user.business_id).first()
     if not s: raise HTTPException(status_code=404, detail="Price source is unavailable.")
     old_price = s.last_price
@@ -9628,6 +9786,7 @@ def manual_price_update(source_id: int, payload: ManualPriceUpdate, user: User =
 
 @app.post("/price-monitor/{source_id}/check")
 def check_price_source(source_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_permission(user, "procurement.price_monitor")
     s=db.query(PriceMonitorSource).filter(PriceMonitorSource.id == source_id, PriceMonitorSource.business_id == user.business_id).first()
     if not s: raise HTTPException(status_code=404, detail="Price source is unavailable.")
     if s.source_type != "website": raise HTTPException(status_code=400, detail="Only website monitoring sources can be checked automatically.")
@@ -9637,6 +9796,7 @@ def check_price_source(source_id: int, user: User = Depends(get_current_user), d
 
 @app.post("/price-monitor/upload-price-list")
 def upload_price_list(payload: PriceListUploadRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_permission(user, "procurement.price_monitor")
     # The browser sends a data URL, which is retained privately after validation.
     supplier_id=payload.supplier_id; product_id=payload.product_id
     if not db.query(Supplier).filter(Supplier.id == supplier_id, Supplier.business_id == user.business_id).first():
