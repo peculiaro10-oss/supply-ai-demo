@@ -2184,7 +2184,7 @@
             <!-- Generate Purchase Order tab: generate button + editable drafts -->
             <div id="po-tab-generate" class="flex-1 min-h-0 flex flex-col">
                 <div class="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">
-                    <button type="button" onclick="generatePOs()" class="shrink-0 bg-primary hover:bg-primaryHover text-white px-3.5 py-2 rounded-xl text-xs font-semibold transition shadow-md shadow-primary/20 flex items-center gap-1.5 cursor-pointer">
+                    <button type="button" id="po-generate-btn" onclick="generatePOs()" class="shrink-0 bg-primary hover:bg-primaryHover text-white px-3.5 py-2 rounded-xl text-xs font-semibold transition shadow-md shadow-primary/20 flex items-center gap-1.5 cursor-pointer">
                         <i class="fa-solid fa-wand-magic-sparkles"></i> <span data-i18n="purchaseOrders.generateButton">Generate PO from Low Stock</span>
                     </button>
                     <p class="text-[11px] text-textSec" data-i18n="purchaseOrders.draftsNeverCountNotice">A generated order starts as a DRAFT — review, assign a supplier, edit, and send it below. Drafts never count against your plan's Purchase Order allowance.</p>
@@ -2398,7 +2398,7 @@
                 </div>
             </div>
 
-            <div class="space-y-3 mb-3">
+            <div id="add-supplier-form-wrap" class="space-y-3 mb-3">
                 <form id="supplier-form" onsubmit="handleCreateSupplier(event)" class="grid grid-cols-1 sm:grid-cols-5 gap-2 text-xs">
                     <input type="text" id="s-name" placeholder="Vendor Name" data-i18n-placeholder="suppliers.vendorName" class="bg-bgMain border border-borderCol rounded-xl px-2.5 py-2 text-textMain focus:outline-none focus:border-primary">
                     <input type="email" id="s-contact" placeholder="Sales Email (Opt)" data-i18n-placeholder="suppliers.salesEmailOpt" class="bg-bgMain border border-borderCol rounded-xl px-2.5 py-2 text-textMain focus:outline-none focus:border-primary">
@@ -2442,7 +2442,7 @@
             </div>
 
             <div class="flex-1 overflow-y-auto pr-1 space-y-4 text-xs">
-                <div class="p-3 rounded-xl bg-bgMain border border-borderCol">
+                <div id="add-warehouse-form-wrap" class="p-3 rounded-xl bg-bgMain border border-borderCol">
                     <h4 class="font-semibold text-textMain mb-2 text-xs" data-i18n="warehouses.addNewLocation">Add New Storage Location</h4>
                     <form onsubmit="handleCreateWarehouse(event)" class="flex gap-2">
                         <input type="text" id="new-warehouse-name" placeholder="Branch Store" data-i18n-placeholder="warehouses.branchStorePlaceholder" class="flex-1 bg-cardBg border border-borderCol rounded-xl px-2.5 py-1.5 text-textMain focus:outline-none focus:border-primary">

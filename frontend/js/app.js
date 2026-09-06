@@ -16452,9 +16452,9 @@
             const adminOrManager = authed && ['admin', 'manager'].includes(role);
             const entries = {
                 "my-profile": authed,
-                "business-profile": adminOrManager,
-                "billing": adminOrManager,
-                "activity-history": adminOrManager,
+                "business-profile": adminOrManager, // ownership-adjacent — stays role-based, see D in the final report
+                "billing": adminOrManager, // ownership/subscription control — hard role-based on purpose
+                "activity-history": authed && hasFeaturePermission('activity history'),
             };
             entries.settings = Object.values(entries).some(Boolean);
             return entries;
@@ -16501,6 +16501,7 @@
             'team presence': 'team.view_presence',
             'expenses': 'expenses.view',
             'profit': 'reports.profit',
+            'activity history': 'activity_history.view',
         };
         function hasFeaturePermission(featureName) {
             const key = String(featureName).toLowerCase();
@@ -16964,6 +16965,15 @@
                 ['nav-btn-new-sale', 'new sale'],
             ];
             restrictedFeatures.forEach(([id, feature]) => hide(id, !hasFeaturePermission(feature)));
+            // Feature-visibility rule: a dashboard card/quick-action is a
+            // second entry point into the SAME feature its nav item guards,
+            // so it must disappear on the same effective-permission basis —
+            // not just be click-guarded (checkFeatureAccess) while still
+            // visibly rendered for someone who can never open it.
+            hide('metric-card-suppliers', !hasFeaturePermission('suppliers'));
+            hide('metric-card-warehouses', !hasFeaturePermission('warehouses'));
+            hide('dashboard-sales-today-row', !hasFeaturePermission('daily sales'));
+            hide('dashboard-net-profit-row', !hasFeaturePermission('profit'));
             // Settings entries are gated individually (see settingsMenuVisibility).
             applySettingsMenuPermissions();
 
@@ -16971,7 +16981,11 @@
             // hidden individually by its own permission, and the parent group is only
             // hidden when none of the three are available to the current role — access
             // to just one (e.g. Team Presence for a role without Employees) still shows it.
-            const employeesVisible = ['admin', 'manager'].includes(role);
+            // employeesVisible is permission-driven (team.view_employees); accountRequestsVisible
+            // stays role-based on purpose — it's visibility into the hard-coded
+            // approval-boundary workflow (Manager submits, Admin resolves) that
+            // section 29 requires stay structural, not a grantable permission.
+            const employeesVisible = hasPermission('team.view_employees');
             const accountRequestsVisible = ['admin', 'manager'].includes(role);
             const teamPresenceVisible = hasFeaturePermission('team presence');
             hide('nav-btn-employees', !employeesVisible);
@@ -22236,6 +22250,13 @@
         function updatePricingModeUI() {
             const retailBtn = document.getElementById("mode-retail-btn");
             const wholesaleBtn = document.getElementById("mode-wholesale-btn");
+            // Feature-visibility rule: the wholesale toggle is an entry point
+            // into sales.wholesale, hidden entirely (not just blocked on the
+            // backend) for someone without it — and force back to retail if
+            // the permission was revoked mid-session while wholesale was active.
+            const canWholesale = hasPermission('sales.wholesale');
+            if (wholesaleBtn) wholesaleBtn.classList.toggle('hidden', !canWholesale);
+            if (!canWholesale && posPricingMode === 'wholesale') posPricingMode = 'retail';
             if (posPricingMode === "retail") {
                 retailBtn.className = "px-3 py-1 rounded-lg font-semibold bg-primary text-white transition cursor-pointer";
                 wholesaleBtn.className = "px-3 py-1 rounded-lg font-semibold text-textSec hover:text-textMain transition cursor-pointer";
@@ -22442,7 +22463,7 @@
                         <div class="flex flex-col gap-2 sm:grid sm:grid-cols-[minmax(0,1fr)_auto_minmax(90px,auto)] sm:items-center sm:gap-3">
                             <div class="min-w-0 text-left">
                                 <div class="font-semibold text-textMain text-xs leading-snug line-clamp-2">${escapeHtml(item.name)}${item.size ? ` <span class="text-textSec text-[10px] font-normal">(${escapeHtml(item.size)})</span>` : ''}</div>
-                                ${['admin', 'manager'].includes(getCurrentRole()) ? `
+                                ${hasPermission('sales.override_price') ? `
                                     <button type="button" onclick="editPOSCartItemPrice(${item.id})" title="Negotiate this sale price (reason required)" class="mt-0.5 inline-flex items-center gap-1 text-[10px] text-textSec hover:text-primary transition cursor-pointer max-w-full">
                                         <span class="truncate">${formatCurrency(item.unitPrice)} each${item.priceManuallyEdited ? ` · <span class="text-warning font-medium">Negotiated</span>` : ''}</span>
                                         <i class="fa-solid fa-pen text-[9px] shrink-0"></i>
@@ -22468,8 +22489,8 @@
         async function editPOSCartItemPrice(productId) {
             const item = posCart.find(i => i.id === productId);
             if (!item) return;
-            if (!['admin', 'manager'].includes(getCurrentRole())) {
-                showToast("Only Admins and Managers can negotiate a sale price.", "error");
+            if (!hasPermission('sales.override_price')) {
+                showToast("You don't have permission to negotiate a sale price.", "error");
                 return;
             }
             const minimumPrice = Math.max(0.01, Number(item.costPrice || 0));
@@ -22764,11 +22785,12 @@
             if (!hasAuthenticatedBusinessContext()) { wrap.classList.add('hidden'); wrap.classList.remove('flex'); return d; }
             wrap.classList.remove('hidden'); wrap.classList.add('flex');
 
-            // Backend-authorized roles only (see /sales/start-business-day and
-            // /sales/end-business-day) — Admin, Manager, and Staff can all
-            // open/close, since Staff are often the ones physically running
-            // the counter.
-            const canControl = ['admin', 'manager', 'staff'].includes(getCurrentRole());
+            // Permission-driven (business_day.manage — see /sales/start-business-day
+            // and /sales/end-business-day) — Admin/Manager/Staff all get it by
+            // default, since Staff are often the ones physically running the
+            // counter, but it's now individually revocable/grantable like any
+            // other permission rather than hardcoded to all three roles.
+            const canControl = hasPermission('business_day.manage');
             const b = d.business_day;
             const baseBtnClass = "shrink-0 text-[11px] font-semibold px-3.5 py-2 rounded-xl transition cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed";
 
@@ -22868,7 +22890,7 @@
                 const box=document.getElementById("daily-sales-cards"), status=document.getElementById("daily-sales-status"), emptyState=document.getElementById("daily-sales-empty-state");
                 const role = getCurrentRole();
                 const b = d.business_day;
-                const canViewActivity = role !== 'staff';
+                const canViewActivity = hasPermission('business_day.view_history');
 
                 // /sales/current-day only ever reports the currently ACTIVE
                 // Business Day session — never a session closed earlier
@@ -22970,7 +22992,8 @@
         function renderRefundTransactionRow(txn) {
             const st = REFUND_STATUS_STYLE[txn.status] || REFUND_STATUS_STYLE.not_refunded;
             const itemsLine = txn.items.map(i => escapeHtml(i.product_name) + (i.quantity > 1 ? ` ×${i.quantity}` : "")).join(", ");
-            const canRefund = txn.status !== "fully_refunded";
+            const notFullyRefunded = txn.status !== "fully_refunded";
+            const canRefund = notFullyRefunded && hasPermission('sales.refund');
             return `<div class="border border-borderCol rounded-xl p-3 bg-bgMain">
                 <div class="flex items-center justify-between gap-2">
                     <span class="text-textSec">${formatBusinessDateTime(txn.timestamp)}</span>
@@ -22984,6 +23007,7 @@
                     </div>
                     ${canRefund
                         ? `<button type="button" onclick="openRefundModal('${txn.transaction_key}')" class="bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30 px-2.5 py-1 rounded-lg text-[11px] font-semibold cursor-pointer shrink-0">Refund</button>`
+                        : notFullyRefunded ? `` /* no refund permission — the action simply isn't offered, not mislabeled as "Fully Refunded" */
                         : `<span class="text-[11px] text-textSec shrink-0">Fully Refunded</span>`}
                 </div>
             </div>`;
@@ -23222,7 +23246,7 @@
         }
         async function loadBusinessDayActivity(dayId) {
             const panel = document.getElementById('business-day-activity-panel');
-            if (getCurrentRole() === 'staff') { panel.classList.add('hidden'); panel.innerHTML = ''; return; }
+            if (!hasPermission('business_day.view_history')) { panel.classList.add('hidden'); panel.innerHTML = ''; return; }
             panel.classList.remove('hidden');
             panel.innerHTML = '<div class="text-textSec py-2 text-center"><i class="fa-solid fa-spinner fa-spin mr-1"></i> Loading activity…</div>';
             try {
@@ -23863,6 +23887,7 @@
             }
             document.getElementById("po-modal").classList.remove("hidden");
             switchPOTab('generate');
+            document.getElementById('po-generate-btn')?.classList.toggle('hidden', !hasPermission('po.create'));
             loadSuppliers();
             loadPurchaseOrders();
         }
@@ -23930,17 +23955,22 @@
                 return;
             }
             document.getElementById("expenses-modal").classList.remove("hidden");
-            switchExpensesTab("record");
-            showExpenseCategoryPicker();
+            // Feature-visibility rule: land on whichever tab this user can
+            // actually use — someone without expenses.record (the new Staff
+            // default) never sees the Record tab default-selected, or at all.
+            switchExpensesTab(hasPermission('expenses.record') ? "record" : "history");
         }
         function closeExpensesModal() { document.getElementById("expenses-modal").classList.add("hidden"); }
 
         function switchExpensesTab(tab) {
             const recordBtn = document.getElementById("expenses-tab-record-btn");
             const historyBtn = document.getElementById("expenses-tab-history-btn");
+            const canRecord = hasPermission('expenses.record');
+            if (recordBtn) recordBtn.classList.toggle('hidden', !canRecord);
+            if (!canRecord && tab === "record") tab = "history"; // never land on a tab this user can't use
             const activeCls = "px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer bg-primary/15 text-primary border border-primary/30";
             const inactiveCls = "px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer text-textSec hover:text-textMain border border-transparent";
-            recordBtn.className = tab === "record" ? activeCls : inactiveCls;
+            if (recordBtn) recordBtn.className = (tab === "record" ? activeCls : inactiveCls) + (canRecord ? '' : ' hidden');
             historyBtn.className = tab === "history" ? activeCls : inactiveCls;
             document.getElementById("expenses-view-history").classList.toggle("hidden", tab !== "history");
             if (tab === "record") {
@@ -23950,6 +23980,13 @@
                 document.getElementById("expenses-view-entry").classList.add("hidden");
                 populateExpenseHistoryCategoryFilter();
                 setExpenseHistoryDateRange("all");
+                // Feature-visibility rule: the "view all users" filter and the
+                // export menu are both separate, more-privileged capabilities
+                // (expenses.view_all / expenses.export) than base history
+                // viewing — hidden entirely, not merely non-functional, for
+                // someone who only has expenses.view.
+                document.getElementById("expense-history-user-filter")?.classList.toggle("hidden", !hasPermission('expenses.view_all'));
+                document.getElementById("expense-history-export-btn")?.parentElement?.classList.toggle("hidden", !hasPermission('expenses.export'));
             }
         }
 
@@ -25244,7 +25281,11 @@
             const salesRow = document.getElementById('dashboard-sales-today-row');
             const salesAmount = document.getElementById('dashboard-sales-today-amount');
             if (salesRow && salesAmount) {
-                salesRow.classList.toggle('hidden', dashboardSalesToday === null);
+                // Feature-visibility rule: never re-show this on a data refresh
+                // for someone who lacks the permission, even though
+                // applyRoleRestrictions() already hid it once — this function
+                // runs independently on every dashboard poll.
+                salesRow.classList.toggle('hidden', dashboardSalesToday === null || !hasFeaturePermission('daily sales'));
                 salesAmount.textContent = dashboardSalesToday === null ? '' : formatCurrency(dashboardSalesToday);
             }
             renderDashboardNetProfit();
@@ -25300,7 +25341,9 @@
             const row = document.getElementById('dashboard-net-profit-row');
             const amountEl = document.getElementById('dashboard-net-profit-amount');
             if (!row || !amountEl) return;
-            row.classList.toggle('hidden', dashboardTodayProfit === null);
+            // Feature-visibility rule — see the matching comment in
+            // renderDashboardContext() above.
+            row.classList.toggle('hidden', dashboardTodayProfit === null || !hasFeaturePermission('profit'));
             amountEl.className = dashboardTodayProfit > 0 ? 'text-success' : (dashboardTodayProfit < 0 ? 'text-danger' : 'text-textMain');
             amountEl.textContent = dashboardTodayProfit === null ? '' : formatCurrency(dashboardTodayProfit);
         }
@@ -25336,9 +25379,13 @@
             renderBusinessBrain(businessBrainData, tab);
         }
 
-        function businessBriefRecommendationCard(row, staff) {
+        function businessBriefRecommendationCard(row, restrictedView) {
             const isActed = row.status === 'acted';
-            const controls = staff ? '' : `<div class="business-brief-row-actions">${isActed ? '<span class="text-success"><i class="fa-solid fa-check mr-1"></i>Action recorded</span>' : `<button type="button" onclick="updateBusinessBrainRecommendation(${Number(row.id)},'acted')">${t("businessBrain.markActionTaken")}</button>`}<button type="button" class="is-muted" onclick="updateBusinessBrainRecommendation(${Number(row.id)},'dismissed')">${t("businessBrain.dismiss")}</button></div>`;
+            // Resolve/dismiss is its own permission (business_brain.manage) —
+            // separate from restrictedView (business_brain.view_full, the
+            // content-depth gate this card's caller also uses) so a user
+            // granted one without the other sees exactly what each grants.
+            const controls = !hasPermission('business_brain.manage') ? '' : `<div class="business-brief-row-actions">${isActed ? '<span class="text-success"><i class="fa-solid fa-check mr-1"></i>Action recorded</span>' : `<button type="button" onclick="updateBusinessBrainRecommendation(${Number(row.id)},'acted')">${t("businessBrain.markActionTaken")}</button>`}<button type="button" class="is-muted" onclick="updateBusinessBrainRecommendation(${Number(row.id)},'dismissed')">${t("businessBrain.dismiss")}</button></div>`;
             return `<article class="business-brief-detail-row"><div class="business-brief-detail-heading"><div><strong>${brainEsc(row.title)}</strong><p>${brainEsc(row.summary)}</p></div><span class="business-brief-priority ${brainPriorityClass(row.priority)}">${brainEsc(row.priority)}</span></div>${controls}</article>`;
         }
 
@@ -25508,7 +25555,10 @@
         function renderBusinessBrain(data, tab = 'overview') {
             document.getElementById('business-brain-loading').classList.add('hidden');
             document.getElementById('business-brain-body').classList.remove('hidden');
-            const staff = getCurrentRole() === 'staff';
+            // Content-depth gate (business_brain.view_full), not a role check —
+            // matches the backend's identical restricted_view logic exactly
+            // (see /business-brain and /business-brain/history in main.py).
+            const staff = !hasPermission('business_brain.view_full');
             document.querySelector('#business-brain-tabs [data-tab="memory"]')?.classList.toggle('hidden', staff);
             if (staff && tab === 'memory') tab = 'overview';
             document.querySelectorAll('.brain-tab-btn').forEach(btn => {
@@ -25965,23 +26015,33 @@
             }
             const product = globalProducts.find(p => p.id === productId);
             if (!product) return;
-            const canEdit = getCurrentRole() !== 'staff';
-            const isManager = getCurrentRole() === 'manager';
+            // Permission-driven, not role-driven (section 9): each action in
+            // this menu is hidden individually by the SAME permission code its
+            // backend endpoint enforces, so a Staff member explicitly granted
+            // (say) inventory.adjust_stock sees exactly that action appear —
+            // never all-or-nothing by role.
+            const canAdjustStock = hasPermission('inventory.adjust_stock');
+            const canEditProduct = hasPermission('inventory.edit_product');
+            const canDeleteProduct = hasPermission('inventory.delete_product');
+            const isManager = getCurrentRole() === 'manager'; // approval-routing wording only, not an access gate
             menu.innerHTML = `
+                ${canAdjustStock ? `
                 <button type="button" onclick="closeRowActionMenu(); adjustQuickStock(${productId}, -1);" class="w-full text-left px-3 py-2 hover:bg-cardHover text-textMain flex items-center gap-2.5 cursor-pointer">
                     <i class="fa-solid fa-minus w-3.5 text-center text-textSec"></i> Decrease Stock
                 </button>
                 <button type="button" onclick="closeRowActionMenu(); adjustQuickStock(${productId}, 1);" class="w-full text-left px-3 py-2 hover:bg-cardHover text-textMain flex items-center gap-2.5 cursor-pointer">
                     <i class="fa-solid fa-plus w-3.5 text-center text-textSec"></i> Increase Stock
-                </button>
-                ${canEdit ? `
+                </button>` : ''}
+                ${canEditProduct ? `
                 <div class="border-t border-borderCol my-1"></div>
                 <button type="button" onclick="closeRowActionMenu(); openEditProductModalFromData(${productId});" class="w-full text-left px-3 py-2 hover:bg-cardHover text-primary flex items-center gap-2.5 cursor-pointer">
                     <i class="fa-solid fa-pen-to-square w-3.5 text-center"></i> Edit Item
-                </button>
+                </button>` : ''}
+                ${canDeleteProduct ? `
                 <button type="button" onclick="closeRowActionMenu(); deleteProduct(${productId});" class="w-full text-left px-3 py-2 hover:bg-cardHover text-danger flex items-center gap-2.5 cursor-pointer">
                     <i class="fa-solid ${isManager ? 'fa-paper-plane' : 'fa-trash-can'} w-3.5 text-center"></i> ${isManager ? 'Request Admin Approval' : 'Delete Item'}
                 </button>` : ''}
+                ${(!canAdjustStock && !canEditProduct && !canDeleteProduct) ? `<div class="px-3 py-2 text-textSec text-[11px]">No actions available</div>` : ''}
             `;
 
             const btn = event.currentTarget;
@@ -26414,6 +26474,7 @@
                         tbody.innerHTML = `<tr><td colspan="5" class="text-center py-4 text-textSec text-xs">${t('suppliers.noneRegistered')}</td></tr>`;
                         return;
                     }
+                    const canDeactivateSupplier = hasPermission('supplier.deactivate');
                     tbody.innerHTML = globalSuppliers.map(s => `
                         <tr class="hover:bg-cardHover/50 transition">
                             <td class="py-2.5 px-2 font-bold text-textMain">${escapeHtml(s.name)}</td>
@@ -26424,9 +26485,9 @@
                                     <button type="button" onclick="dispatchWhatsAppOrder('${escapeHtml(s.name)}', '${escapeHtml(s.phone || '')}')" class="bg-success/15 hover:bg-success/25 text-success border border-success/30 px-2.5 py-1 rounded-lg font-semibold transition flex items-center gap-1 cursor-pointer" title="${t('suppliers.whatsappOrderTitle')}">
                                         <i class="fa-brands fa-whatsapp text-xs"></i> ${t('suppliers.order')}
                                     </button>
-                                    <button type="button" onclick="deleteSupplier(${s.id})" class="w-6 h-6 rounded-lg bg-danger/15 hover:bg-danger/25 text-danger flex items-center justify-center cursor-pointer" title="${t('common.delete')}">
+                                    ${canDeactivateSupplier ? `<button type="button" onclick="deleteSupplier(${s.id})" class="w-6 h-6 rounded-lg bg-danger/15 hover:bg-danger/25 text-danger flex items-center justify-center cursor-pointer" title="${t('common.delete')}">
                                         <i class="fa-solid fa-trash-can text-[10px]"></i>
-                                    </button>
+                                    </button>` : ''}
                                 </div>
                             </td>
                         </tr>
@@ -26435,6 +26496,9 @@
             } catch (e) {
                 tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-danger text-xs">${t('suppliers.loadFailed')}</td></tr>`;
             }
+            // Feature-visibility rule: hide the "add supplier" entry point
+            // entirely without supplier.create.
+            document.getElementById('add-supplier-form-wrap')?.classList.toggle('hidden', !hasPermission('supplier.create'));
         }
 
         // Exports globalSuppliers (already the full authorized, business-
@@ -26658,8 +26722,11 @@
             }
             container.innerHTML = pos.map(po => {
                 const supplier = globalSuppliers.find(s => String(s.id) === String(po.supplier_id)) || null;
+                const canSend = hasPermission('po.send');
                 const canEmail = !!(supplier && supplier.contact_email);
                 const canWhatsapp = !!(supplier && supplier.phone);
+                const canEditPo = hasPermission('po.edit');
+                const canDeletePo = hasPermission('po.delete');
                 return `
                     <div class="bg-bgMain border border-borderCol rounded-xl p-4 space-y-2.5">
                         <div class="flex items-center justify-between">
@@ -26679,18 +26746,18 @@
                             </select>
                         </div>
                         <div class="flex flex-wrap justify-end gap-2 pt-1">
-                            <button type="button" onclick="editPurchaseOrder(${po.id}, '${escapeHtml(po.items_summary || '')}')" class="bg-cardBg hover:bg-cardHover text-textSec px-3 py-1 rounded-lg text-xs font-semibold border border-borderCol cursor-pointer">
+                            ${canEditPo ? `<button type="button" onclick="editPurchaseOrder(${po.id}, '${escapeHtml(po.items_summary || '')}')" class="bg-cardBg hover:bg-cardHover text-textSec px-3 py-1 rounded-lg text-xs font-semibold border border-borderCol cursor-pointer">
                                 <i class="fa-solid fa-pen-to-square mr-1"></i> ${t("purchaseOrders.editDraft")}
-                            </button>
-                            <button type="button" onclick="sendPurchaseOrderEmail(${po.id})" ${canEmail ? '' : 'disabled'} title="${canEmail ? '' : t("purchaseOrders.supplierMissingEmail")}" class="px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1 cursor-pointer border ${canEmail ? 'bg-primary/15 hover:bg-primary/25 text-primary border-primary/30' : 'bg-cardBg text-textSec/50 border-borderCol cursor-not-allowed'}">
+                            </button>` : ''}
+                            ${canSend ? `<button type="button" onclick="sendPurchaseOrderEmail(${po.id})" ${canEmail ? '' : 'disabled'} title="${canEmail ? '' : t("purchaseOrders.supplierMissingEmail")}" class="px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1 cursor-pointer border ${canEmail ? 'bg-primary/15 hover:bg-primary/25 text-primary border-primary/30' : 'bg-cardBg text-textSec/50 border-borderCol cursor-not-allowed'}">
                                 <i class="fa-solid fa-envelope"></i> ${t("purchaseOrders.sendEmail")}
                             </button>
                             <button type="button" onclick="sendPurchaseOrderWhatsApp(${po.id})" ${canWhatsapp ? '' : 'disabled'} title="${canWhatsapp ? '' : t("purchaseOrders.supplierMissingPhone")}" class="px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1 cursor-pointer border ${canWhatsapp ? 'bg-success/15 hover:bg-success/25 text-success border-success/30' : 'bg-cardBg text-textSec/50 border-borderCol cursor-not-allowed'}">
                                 <i class="fa-brands fa-whatsapp"></i> ${t("purchaseOrders.sendWhatsapp")}
-                            </button>
-                            <button type="button" onclick="deletePurchaseOrder(${po.id})" class="bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30 px-3 py-1 rounded-lg text-xs font-semibold cursor-pointer">
+                            </button>` : ''}
+                            ${canDeletePo ? `<button type="button" onclick="deletePurchaseOrder(${po.id})" class="bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30 px-3 py-1 rounded-lg text-xs font-semibold cursor-pointer">
                                 <i class="fa-solid fa-trash"></i> ${t("common.delete")}
-                            </button>
+                            </button>` : ''}
                         </div>
                     </div>
                 `;
@@ -27224,15 +27291,20 @@
             const selectTo = document.getElementById("transfer-to");
             const selectProduct = document.getElementById("transfer-product");
 
+            const canDeactivateWarehouse = hasPermission('warehouse.deactivate');
             listContainer.innerHTML = warehouseRecords.map(w => `
                 <div class="flex items-center justify-between bg-cardBg px-3 py-1.5 rounded-xl border border-borderCol text-xs text-textMain">
                     <span class="font-medium min-w-0 truncate"><i class="fa-solid fa-warehouse text-primary mr-1.5"></i> ${escapeEmployeeHtml(w.name)}</span>
                     <span class="flex items-center gap-2 shrink-0">
                         <span class="text-[10px] text-textSec font-mono">${t('warehouses.skuCount', { count: w.sku_count ?? 0 })}</span>
-                        <button type="button" onclick="handleDeleteWarehouse(${w.id}, '${escapeEmployeeHtml(w.name).replace(/'/g, "\\'")}')" class="text-textSec hover:text-danger transition cursor-pointer" title="${t('warehouses.deleteWarehouse')}"><i class="fa-solid fa-trash-can text-[11px]"></i></button>
+                        ${canDeactivateWarehouse ? `<button type="button" onclick="handleDeleteWarehouse(${w.id}, '${escapeEmployeeHtml(w.name).replace(/'/g, "\\'")}')" class="text-textSec hover:text-danger transition cursor-pointer" title="${t('warehouses.deleteWarehouse')}"><i class="fa-solid fa-trash-can text-[11px]"></i></button>` : ''}
                     </span>
                 </div>
             `).join("") || `<div class="text-[10px] text-textSec text-center py-2">${t('warehouses.noneAvailable')}</div>`;
+            // Feature-visibility rule: the "add warehouse" form is a create
+            // action, hidden entirely (not merely error-toasted on submit)
+            // for anyone without warehouse.create.
+            document.getElementById('add-warehouse-form-wrap')?.classList.toggle('hidden', !hasPermission('warehouse.create'));
 
             const whOptions = customWarehouses.map(w => `<option value="${escapeEmployeeHtml(w)}">${escapeEmployeeHtml(w)}</option>`).join("");
             if (selectFrom) selectFrom.innerHTML = whOptions;

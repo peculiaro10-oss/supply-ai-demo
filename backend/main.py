@@ -3187,10 +3187,10 @@ def add_audit(db: Session, user: Optional[User], action: str, description: str, 
 PERMISSIONS = {
     # --- INVENTORY -----------------------------------------------------------
     "inventory.view":            {"category": "INVENTORY", "label": "View Inventory",        "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
-    "inventory.add_product":     {"category": "INVENTORY", "label": "Add Products",          "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "inventory.add_product":     {"category": "INVENTORY", "label": "Add Products",          "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     "inventory.edit_product":    {"category": "INVENTORY", "label": "Edit Products",         "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     "inventory.delete_product":  {"category": "INVENTORY", "label": "Delete Products",       "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
-    "inventory.adjust_stock":    {"category": "INVENTORY", "label": "Adjust Stock",          "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "inventory.adjust_stock":    {"category": "INVENTORY", "label": "Adjust Stock",          "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     "inventory.transfer_stock":  {"category": "INVENTORY", "label": "Transfer Stock",        "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     # --- WAREHOUSE -------------------------------------------------------------
     "warehouse.view":            {"category": "WAREHOUSE", "label": "View Warehouses",        "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
@@ -3207,12 +3207,12 @@ PERMISSIONS = {
     "supplier.deactivate":       {"category": "SUPPLIERS", "label": "Remove/Deactivate Suppliers", "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
     # --- SALES ---------------------------------------------------------------
     "sales.create":               {"category": "SALES", "label": "Make Sales",              "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
-    "sales.wholesale":            {"category": "SALES", "label": "Wholesale Sales",          "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "sales.wholesale":            {"category": "SALES", "label": "Wholesale Sales",          "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     "sales.override_price":       {"category": "SALES", "label": "Override Price",           "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
-    "sales.refund":                {"category": "SALES", "label": "Refund Sales",             "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "sales.refund":                {"category": "SALES", "label": "Refund Sales",             "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     "sales.view_history":         {"category": "SALES", "label": "View Sales History",       "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     # --- EXPENSES ------------------------------------------------------------
-    "expenses.record":           {"category": "EXPENSES", "label": "Record Expense",         "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
+    "expenses.record":           {"category": "EXPENSES", "label": "Record Expense",         "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     "expenses.view":              {"category": "EXPENSES", "label": "View Own Expenses",      "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
     "expenses.view_all":          {"category": "EXPENSES", "label": "View All Expenses",      "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     "expenses.export":            {"category": "EXPENSES", "label": "Export Expenses",        "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
@@ -3227,6 +3227,14 @@ PERMISSIONS = {
     "po.delete":                   {"category": "PURCHASE_ORDERS", "label": "Delete Purchase Orders", "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
     "procurement.price_monitor":   {"category": "PURCHASE_ORDERS", "label": "Price Monitor",          "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     # --- BUSINESS DAY ----------------------------------------------------------
+    # Staff default kept TRUE here, explicitly justified (per the completion-
+    # pass instruction's own carve-out): opening/closing the Business Day is
+    # ordinary cashier/till-session behavior in a retail POS context (a Staff
+    # member starting or ending their own shift's register session), not an
+    # elevated financial-management action — the sensitive part (REOPENING a
+    # CLOSED historical day) is a completely separate, already-hard-coded
+    # Manager-request/Admin-approve workflow (business_day.view_history stays
+    # Staff-false, and reopen is never gated by this permission at all).
     "business_day.manage":        {"category": "BUSINESS_DAY", "label": "Open/Close Business Day", "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
     "business_day.view_history":  {"category": "BUSINESS_DAY", "label": "View Business Day History", "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     # --- TEAM ------------------------------------------------------------------
@@ -8881,8 +8889,8 @@ def create_refund(transaction_key: str, payload: RefundRequest, user: User = Dep
     db.commit(); db.refresh(rt)
 
     add_audit(
-        db, user, "REFUND_COMPLETED", f"Refunded {refund_total:.2f} across {len(resolved)} item(s).",
-        business_day_id=day.id,
+        db, user, "SALE_REFUNDED", f"Refunded {refund_total:.2f} across {len(resolved)} item(s).",
+        business_day_id=day.id, action_category="SALES", resource_type="refund_transaction", resource_id=rt.id,
         metadata={
             "refund_transaction_id": rt.id, "original_transaction": transaction_key,
             "refund_total": refund_total, "refund_cost_total": refund_cost_total,
