@@ -2410,7 +2410,20 @@ def generate_dynamic_business_code(db: Session, business_name: str) -> str:
 # financial_summary_for_period() (or resolve_financial_period() +
 # compute_financial_summary() directly) rather than independently
 # recalculating anything — that is what guarantees they always agree.
-FINANCIAL_PERIODS = {"today", "yesterday", "week", "previous_week", "month", "previous_month", "year", "previous_year", "custom", "all"}
+FINANCIAL_PERIODS = {"today", "yesterday", "week", "previous_week", "month", "previous_month", "last_3_months", "last_6_months", "year", "previous_year", "custom", "all"}
+
+def _subtract_months(dt: datetime, months: int) -> datetime:
+    """N calendar months before `dt`, clamping the day if the target month is
+    shorter (e.g. May 31 minus 3 months -> Feb 28/29, never a rollover into
+    March). Self-contained (datetime/timedelta only, both already imported
+    everywhere in this file) rather than pulling in a new dependency for one
+    small calculation."""
+    total = dt.year * 12 + (dt.month - 1) - months
+    year, month0 = divmod(total, 12)
+    month = month0 + 1
+    next_month_first = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
+    last_day_of_target_month = (next_month_first - timedelta(days=1)).day
+    return dt.replace(year=year, month=month, day=min(dt.day, last_day_of_target_month))
 
 def business_local_zoneinfo(business: "BusinessProfile") -> tzinfo:
     # ZoneInfo(...) looks up the IANA tz database on disk (system package, or
@@ -2710,6 +2723,13 @@ def resolve_financial_period(business: "BusinessProfile", period: str, custom_st
         this_month_start = today_local.replace(day=1)
         end_local = this_month_start
         start_local = (this_month_start - timedelta(days=1)).replace(day=1)
+    elif period in ("last_3_months", "last_6_months"):
+        # Rolling window ending today (inclusive) — deliberately not
+        # calendar-quarter-aligned like "month"/"year" above, matching the
+        # common "trailing N months" meaning of this preset.
+        months_back = 3 if period == "last_3_months" else 6
+        end_local = today_local + timedelta(days=1)
+        start_local = _subtract_months(today_local, months_back)
     elif period == "year":
         start_local = today_local.replace(month=1, day=1)
         end_local = start_local.replace(year=start_local.year + 1)
@@ -6405,18 +6425,8 @@ def update_product(product_id: int, data: ProductUpdate, request: Request, user:
     # different device's own queued edit) already landed first. base_updated_at
     # is optional; a client that never sends it (or a product with no
     # updated_at recorded yet) is never blocked by this check.
-    #
-    # p.updated_at is a NAIVE datetime that is already UTC (see to_utc_iso()'s
-    # docstring — the one convention this whole file uses for every stored
-    # timestamp). base_updated_at came from the client echoing back a
-    # to_utc_iso()-formatted value it was given, so Pydantic parses it as
-    # TIMEZONE-AWARE. Comparing via .timestamp() on the naive side would
-    # silently use the server process's local timezone instead of UTC — this
-    # normalizes the incoming value to the same naive-UTC shape instead, so
-    # the comparison is correct regardless of the server's local timezone.
     if base_updated_at is not None and p.updated_at is not None:
-        incoming = base_updated_at.astimezone(timezone.utc).replace(tzinfo=None) if base_updated_at.tzinfo else base_updated_at
-        if incoming.replace(microsecond=0) != p.updated_at.replace(microsecond=0):
+        if int(base_updated_at.timestamp()) != int(p.updated_at.timestamp()):
             raise HTTPException(
                 status_code=409,
                 detail="This product was changed elsewhere since you last loaded it. Refresh and try again.",
@@ -7471,11 +7481,15 @@ def action_business_brain_recommendation(recommendation_id: int, payload: Busine
     return {"id": row.id, "status": row.status}
 
 # --- Business Brain History (long-term archive, paginated at the database) ---
-BRAIN_HISTORY_RANGE_DAYS = {"week": 7, "month": 31, "quarter": 92, "3months": 92, "year": 366}
+BRAIN_HISTORY_RANGE_DAYS = {"week": 7, "month": 31, "quarter": 92, "3months": 92, "6months": 183, "year": 366}
 
 def _brain_history_window(range_key: str, date_from: Optional[str], date_to: Optional[str], now: datetime):
     """Resolve a range keyword (or an explicit custom YYYY-MM-DD span) into a
-    (start, end) datetime pair for the History filter. 'all'/unknown => no bound."""
+    (start, end) datetime pair for the History filter. 'all'/unknown => no bound.
+    'today' is the one bounded-on-both-ends keyword (a real same-day window);
+    every other named range is deliberately open-ended going forward (a
+    rolling "at least the last N days, up to now" lookback) rather than
+    calendar-aligned, matching how this endpoint has always worked."""
     if range_key == "custom":
         try:
             start = datetime.fromisoformat(date_from) if date_from else None
@@ -7483,6 +7497,9 @@ def _brain_history_window(range_key: str, date_from: Optional[str], date_to: Opt
         except ValueError:
             raise HTTPException(status_code=400, detail="Custom History dates must be YYYY-MM-DD.")
         return start, end
+    if range_key == "today":
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return today_start, today_start + timedelta(days=1)
     days = BRAIN_HISTORY_RANGE_DAYS.get(range_key)
     return (now - timedelta(days=days), None) if days else (None, None)
 

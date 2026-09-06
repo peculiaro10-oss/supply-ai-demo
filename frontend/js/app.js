@@ -1639,10 +1639,24 @@
                     noRecommendationsSupported: "No recommendations are currently supported by the available data.",
                     updateRecommendationFailed: "Unable to update this recommendation right now.",
                     historyPeriod: "Period", historyLoading: "Loading history…", loadOlder: "Load older", historyLoadFailed: "Unable to load more history right now.",
-                    rangeAll: "All time", rangeWeek: "This week", rangeMonth: "This month", rangeQuarter: "Last 3 months", rangeYear: "Last year",
+                    rangeAll: "All time", rangeToday: "Today", rangeWeek: "This week", rangeMonth: "This month", rangeQuarter: "Last 3 months",
+                    rangeLast3Months: "Last 3 months", rangeLast6Months: "Last 6 months", rangeYear: "This year",
                     historyAttention: "Attention", historyPredictions: "Predictions", memoryReinforced: "Reinforced", memoryUpdated: "Updated as the pattern changed",
                     dashboardTitle: "What Cauldra sees", dashboardDefaultCopy: "Review the business priorities that deserve attention.",
                     viewAll: "View all →",
+                },
+                // Cauldra Custom Date Range — the shared day/month/year range
+                // control used by every period filter in the app (Sales
+                // History, Expense History, Profit, Activity History,
+                // Business Brain History). See cdrReadRange()/cdrDmyMarkup()
+                // in app.js. Only added to English — t()'s fallback to
+                // English covers every other language until translated.
+                dateRange: {
+                    custom: "Custom", startDate: "Start Date", endDate: "End Date", apply: "Apply",
+                    invalidStart: "Enter a valid start date.", invalidEnd: "Enter a valid end date.",
+                    startAfterEnd: "Start date cannot be after end date.",
+                    endInFuture: "End date cannot be in the future.",
+                    last3Months: "Last 3 Months", last6Months: "Last 6 Months", thisYear: "This Year", allTime: "All Time",
                 },
                 aiCenter: {
                     title: "Cauldra Intelligence Center", subtitle: "Centralized artificial intelligence features",
@@ -20334,14 +20348,17 @@
         }
 
         function clearAuditLogFilters() {
-            ['audit-log-search-input', 'audit-log-actor-input', 'audit-log-action-input', 'audit-log-date-from', 'audit-log-date-to'].forEach(id => {
+            ['audit-log-search-input', 'audit-log-actor-input', 'audit-log-action-input',
+             'audit-log-from-day', 'audit-log-from-month', 'audit-log-from-year',
+             'audit-log-to-day', 'audit-log-to-month', 'audit-log-to-year'].forEach(id => {
                 const el = document.getElementById(id);
                 if (el) el.value = '';
             });
             auditLogAppliedDateRange = { from: "", to: "" };
             hideAuditLogDateError();
             updateAuditLogActiveRangeLabel();
-            markAuditLogDatePreset(null);
+            markAuditLogDatePreset('all');
+            closeAuditLogCustomPanel();
             renderAuditLog();
         }
 
@@ -20393,17 +20410,25 @@
         }
 
         function setAuditLogDatePreset(preset) {
+            closeAuditLogCustomPanel();
+            if (preset === 'all') {
+                auditLogAppliedDateRange = { from: "", to: "" };
+                hideAuditLogDateError();
+                updateAuditLogActiveRangeLabel();
+                markAuditLogDatePreset('all');
+                renderAuditLog();
+                return;
+            }
             const tz = getBusinessTimezone();
-            const fromEl = document.getElementById('audit-log-date-from');
-            const toEl = document.getElementById('audit-log-date-to');
+            const today = getBusinessDateParts(0, tz);
             let fromParts, toParts;
-            if (preset === 'today') { fromParts = getBusinessDateParts(0, tz); toParts = fromParts; }
-            else if (preset === 'yesterday') { fromParts = getBusinessDateParts(-1, tz); toParts = fromParts; }
-            else if (preset === 'last7') { fromParts = getBusinessDateParts(-6, tz); toParts = getBusinessDateParts(0, tz); }
-            else if (preset === 'last30') { fromParts = getBusinessDateParts(-29, tz); toParts = getBusinessDateParts(0, tz); }
+            if (preset === 'today') { fromParts = today; toParts = today; }
+            else if (preset === 'week') { fromParts = shiftDateParts(today, -businessWeekdayMondayFirst(today)); toParts = today; }
+            else if (preset === 'month') { fromParts = { ...today, day: 1 }; toParts = today; }
+            else if (preset === 'last_3_months') { fromParts = shiftDateMonths(today, -3); toParts = today; }
+            else if (preset === 'last_6_months') { fromParts = shiftDateMonths(today, -6); toParts = today; }
+            else if (preset === 'year') { fromParts = { ...today, month: 1, day: 1 }; toParts = today; }
             else return;
-            if (fromEl) fromEl.value = toDateInputValue(fromParts);
-            if (toEl) toEl.value = toDateInputValue(toParts);
             // Presets are a one-click, pre-validated range (never a manual,
             // possibly-incomplete edit), so they apply immediately — the
             // Apply-button gate exists for freehand date entry, not these.
@@ -20416,10 +20441,39 @@
 
         function markAuditLogDatePreset(preset) {
             document.querySelectorAll('.audit-log-date-preset-btn').forEach(btn => {
-                const active = preset && btn.dataset.preset === preset;
-                btn.className = "audit-log-date-preset-btn px-2 py-1 rounded-lg border cursor-pointer "
-                    + (active ? "border-primary bg-primary/15 text-primary" : "border-borderCol text-textSec hover:text-textMain");
+                btn.classList.toggle('is-active', !!preset && btn.dataset.preset === preset);
             });
+        }
+
+        function toggleAuditLogCustomPanel() {
+            const panel = document.getElementById('audit-log-custom-panel');
+            const button = document.getElementById('audit-log-custom-btn');
+            if (!panel) return;
+            if (panel.classList.contains('hidden')) {
+                hideAuditLogDateError();
+                cdrSetRangeFromIso('audit-log-from', 'audit-log-to', auditLogAppliedDateRange.from, auditLogAppliedDateRange.to);
+                showDateDropdown(panel, button);
+                button.setAttribute('aria-expanded', 'true');
+                const dayInput = document.getElementById('audit-log-from-day');
+                setTimeout(() => dayInput && dayInput.focus(), 0);
+            } else {
+                closeAuditLogCustomPanel();
+            }
+        }
+
+        function closeAuditLogCustomPanel() {
+            const panel = document.getElementById('audit-log-custom-panel');
+            if (panel) hideDateDropdown(panel);
+            document.getElementById('audit-log-custom-btn')?.setAttribute('aria-expanded', 'false');
+        }
+
+        function handleAuditLogCustomRangeKeydown(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                applyAuditLogDateRange();
+            } else if (event.key === 'Escape') {
+                closeAuditLogCustomPanel();
+            }
         }
 
         // Every field the backend actually put on the record is shown — nothing
@@ -20469,13 +20523,10 @@
         }
 
         function showAuditLogDateError(msg) {
-            const el = document.getElementById('audit-log-date-error');
-            if (!el) return;
-            el.textContent = msg;
-            el.classList.remove('hidden');
+            cdrShowError('audit-log-date-error', msg);
         }
         function hideAuditLogDateError() {
-            document.getElementById('audit-log-date-error')?.classList.add('hidden');
+            cdrHideError('audit-log-date-error');
         }
 
         // The ONE explicit commit point for a manual date range here — never
@@ -20484,16 +20535,13 @@
         // enforces the same rule — see resolve_financial_period's "custom"
         // branch and _build_audit_log_query's callers).
         function applyAuditLogDateRange() {
-            const fromVal = document.getElementById('audit-log-date-from')?.value || '';
-            const toVal = document.getElementById('audit-log-date-to')?.value || '';
-            if (!fromVal && !toVal) { showAuditLogDateError('Select a start date and end date.'); return; }
-            if (!fromVal) { showAuditLogDateError('Select a start date.'); return; }
-            if (!toVal) { showAuditLogDateError('Select an end date.'); return; }
-            if (toVal < fromVal) { showAuditLogDateError('End date cannot be earlier than start date.'); return; }
+            const range = cdrReadRange('audit-log-from', 'audit-log-to', { allowFuture: false });
+            if (!range.valid) { showAuditLogDateError(range.error); return; }
             hideAuditLogDateError();
-            auditLogAppliedDateRange = { from: fromVal, to: toVal };
-            markAuditLogDatePreset(null);
+            auditLogAppliedDateRange = { from: range.from, to: range.to };
+            markAuditLogDatePreset('custom');
             updateAuditLogActiveRangeLabel();
+            closeAuditLogCustomPanel();
             renderAuditLog();
         }
 
@@ -23032,10 +23080,7 @@
         function updateSalesHistoryPresetButtonsUI() {
             document.querySelectorAll(".sales-period-preset-btn").forEach(btn => {
                 const active = btn.dataset.preset === salesHistoryActivePeriod;
-                const isCustom = btn.dataset.preset === "custom";
-                btn.className = "sales-period-preset-btn text-[11px] px-2 py-1 rounded-lg border cursor-pointer "
-                    + (isCustom ? "flex items-center gap-1 " : "")
-                    + (active ? "border-primary bg-primary/15 text-primary" : "border-borderCol text-textSec hover:text-textMain");
+                btn.classList.toggle("is-active", active);
             });
             const label = document.getElementById("sales-history-custom-btn-label");
             if (!label) return;
@@ -23119,23 +23164,168 @@
             if (activeDateDropdown) positionDateDropdown(activeDateDropdown.button, activeDateDropdown.panel);
         }, true);
 
+        // ---------------------------------------------------------------------
+        // Cauldra Custom Date Range — ONE shared day/month/year range control
+        // (see the matching "cdr-" CSS in base.css), used by every period
+        // filter in the app (Sales History, Expense History, Profit, Activity
+        // History, Business Brain History) instead of a native
+        // <input type="date">, which renders with the browser's own
+        // OS-styled, non-brandable picker UI.
+        //
+        // Each screen keeps its OWN state variables and apply/toggle
+        // functions (matching how every period filter already worked before
+        // this) — these helpers are the one shared piece: building the
+        // day/month/year markup, validating it, and reading it back out.
+        // ---------------------------------------------------------------------
+
+        // Builds one Start-or-End day/month/year field group. `prefix` must be
+        // unique per field (e.g. "sales-history-from") — cdrReadRange() below
+        // reads back `${prefix}-day` / `-month` / `-year`.
+        function cdrDmyMarkup(prefix, labelText) {
+            const labelId = `${prefix}-label`;
+            return `<div class="cdr-field">
+                <span class="sr-only" id="${labelId}">${escapeHtml(labelText)}</span>
+                <label aria-hidden="true">${escapeHtml(labelText)}</label>
+                <div class="cdr-dmy" role="group" aria-labelledby="${labelId}">
+                    <input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="2" placeholder="DD" aria-label="${escapeHtml(labelText)} — day" class="cdr-day" id="${prefix}-day">
+                    <span class="cdr-dmy-sep" aria-hidden="true">/</span>
+                    <input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="2" placeholder="MM" aria-label="${escapeHtml(labelText)} — month" class="cdr-month" id="${prefix}-month">
+                    <span class="cdr-dmy-sep" aria-hidden="true">/</span>
+                    <input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="4" placeholder="YYYY" aria-label="${escapeHtml(labelText)} — year" class="cdr-year" id="${prefix}-year">
+                </div>
+            </div>`;
+        }
+
+        // Real calendar-date validation, not just range checks on each part:
+        // constructs the date and confirms it round-trips exactly (catches
+        // e.g. day=30 month=02, which JS's Date would otherwise silently
+        // roll over into March 1/2 instead of rejecting).
+        function cdrValidDate(dayStr, monthStr, yearStr) {
+            if (!dayStr || !monthStr || !yearStr) return { valid: false, reason: "incomplete" };
+            const day = parseInt(dayStr, 10), month = parseInt(monthStr, 10), year = parseInt(yearStr, 10);
+            if (!Number.isInteger(day) || !Number.isInteger(month) || !Number.isInteger(year)) return { valid: false, reason: "not_a_number" };
+            if (String(year).length !== 4 || year < 1900 || year > 9999) return { valid: false, reason: "year" };
+            if (month < 1 || month > 12) return { valid: false, reason: "month" };
+            if (day < 1 || day > 31) return { valid: false, reason: "day" };
+            const d = new Date(year, month - 1, day);
+            if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return { valid: false, reason: "invalid_date" };
+            return { valid: true, iso: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}` };
+        }
+
+        function cdrTodayIso() {
+            const p = getBusinessLocalDateParts();
+            return `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
+        }
+
+        function cdrMarkFieldGroup(prefix, invalid) {
+            ["day", "month", "year"].forEach((part) => document.getElementById(`${prefix}-${part}`)?.classList.toggle("cdr-invalid", invalid));
+        }
+
+        // Reads two field groups back into a validated { from, to } range.
+        // opts.allowFuture: only true for a feature that logically supports
+        // future data (none currently do — every caller today passes the
+        // default) — otherwise the end date is capped at today (business-
+        // local "today", matching every other preset in the app) and a
+        // future end date is rejected with a clear, specific message rather
+        // than silently clamped.
+        function cdrReadRange(fromPrefix, toPrefix, opts = {}) {
+            cdrMarkFieldGroup(fromPrefix, false);
+            cdrMarkFieldGroup(toPrefix, false);
+            const g = (prefix, part) => document.getElementById(`${prefix}-${part}`)?.value || "";
+            const from = cdrValidDate(g(fromPrefix, "day"), g(fromPrefix, "month"), g(fromPrefix, "year"));
+            const to = cdrValidDate(g(toPrefix, "day"), g(toPrefix, "month"), g(toPrefix, "year"));
+            if (!from.valid) { cdrMarkFieldGroup(fromPrefix, true); return { valid: false, error: t("dateRange.invalidStart") }; }
+            if (!to.valid) { cdrMarkFieldGroup(toPrefix, true); return { valid: false, error: t("dateRange.invalidEnd") }; }
+            if (from.iso > to.iso) { cdrMarkFieldGroup(fromPrefix, true); cdrMarkFieldGroup(toPrefix, true); return { valid: false, error: t("dateRange.startAfterEnd") }; }
+            if (!opts.allowFuture) {
+                const todayIso = cdrTodayIso();
+                if (to.iso > todayIso) { cdrMarkFieldGroup(toPrefix, true); return { valid: false, error: t("dateRange.endInFuture") }; }
+            }
+            return { valid: true, from: from.iso, to: to.iso };
+        }
+
+        // Prefills a field group pair from existing 'YYYY-MM-DD' strings —
+        // used when reopening the Custom panel after a range was already
+        // applied, so the user sees what's currently active rather than a
+        // blank form.
+        function cdrSetRangeFromIso(fromPrefix, toPrefix, fromIso, toIso) {
+            const apply = (prefix, iso) => {
+                if (!iso) return;
+                const parts = iso.split("-");
+                if (parts.length !== 3) return;
+                const [y, m, d] = parts;
+                const dayEl = document.getElementById(`${prefix}-day`), monthEl = document.getElementById(`${prefix}-month`), yearEl = document.getElementById(`${prefix}-year`);
+                if (dayEl) dayEl.value = String(parseInt(d, 10));
+                if (monthEl) monthEl.value = String(parseInt(m, 10));
+                if (yearEl) yearEl.value = y;
+            };
+            apply(fromPrefix, fromIso);
+            apply(toPrefix, toIso);
+        }
+
+        function cdrShowError(containerId, message) {
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            el.innerHTML = `<i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i><span>${escapeHtml(message)}</span>`;
+            el.classList.remove("hidden");
+        }
+        function cdrHideError(containerId) {
+            document.getElementById(containerId)?.classList.add("hidden");
+        }
+
+        // Global, one-time delegated wiring for EVERY day/month/year field
+        // group currently or later in the DOM (Business Brain History rebuilds
+        // its panel's innerHTML on almost every state change, so per-instance
+        // listener wiring would need to be redone on every render — delegation
+        // avoids that entirely). Digits-only, auto-advance to the next field
+        // once a part is full, and Backspace on an empty field returns focus
+        // to the previous one — the standard, expected UX for a DD/MM/YYYY
+        // triplet.
+        document.addEventListener("input", (e) => {
+            const el = e.target;
+            if (!el.matches || !el.matches(".cdr-day, .cdr-month, .cdr-year")) return;
+            const digitsOnly = el.value.replace(/[^0-9]/g, "");
+            if (digitsOnly !== el.value) el.value = digitsOnly;
+            el.classList.remove("cdr-invalid");
+            const maxLen = el.classList.contains("cdr-year") ? 4 : 2;
+            if (el.value.length >= maxLen) {
+                const group = el.closest(".cdr-dmy");
+                const next = el.classList.contains("cdr-day") ? group?.querySelector(".cdr-month")
+                    : el.classList.contains("cdr-month") ? group?.querySelector(".cdr-year") : null;
+                if (next) next.focus();
+            }
+        });
+        document.addEventListener("keydown", (e) => {
+            const el = e.target;
+            if (!el.matches || !el.matches(".cdr-day, .cdr-month, .cdr-year")) return;
+            if (e.key === "Backspace" && !el.value) {
+                const group = el.closest(".cdr-dmy");
+                const prev = el.classList.contains("cdr-year") ? group?.querySelector(".cdr-month")
+                    : el.classList.contains("cdr-month") ? group?.querySelector(".cdr-day") : null;
+                if (prev) prev.focus();
+            }
+        });
+
         function toggleSalesHistoryCustomPanel() {
             const panel = document.getElementById("sales-history-custom-panel");
             const button = document.getElementById("sales-history-custom-btn");
             if (!panel) return;
             if (panel.classList.contains("hidden")) {
                 hideSalesHistoryCustomError();
+                cdrSetRangeFromIso("sales-history-from", "sales-history-to", salesHistoryCustomFilters.date_from, salesHistoryCustomFilters.date_to);
                 showDateDropdown(panel, button);
-                const fromInput = document.getElementById("sales-history-date-from");
-                setTimeout(() => fromInput && fromInput.focus(), 0);
+                button.setAttribute("aria-expanded", "true");
+                const dayInput = document.getElementById("sales-history-from-day");
+                setTimeout(() => dayInput && dayInput.focus(), 0);
             } else {
-                hideDateDropdown(panel);
+                closeSalesHistoryCustomPanel();
             }
         }
 
         function closeSalesHistoryCustomPanel() {
             const panel = document.getElementById("sales-history-custom-panel");
             if (panel) hideDateDropdown(panel);
+            document.getElementById("sales-history-custom-btn")?.setAttribute("aria-expanded", "false");
         }
 
         function handleSalesHistoryCustomRangeKeydown(event) {
@@ -23148,29 +23338,21 @@
         }
 
         function showSalesHistoryCustomError(msg) {
-            const el = document.getElementById("sales-history-custom-error");
-            if (!el) return;
-            el.textContent = msg;
-            el.classList.remove("hidden");
+            cdrShowError("sales-history-custom-error", msg);
         }
 
         function hideSalesHistoryCustomError() {
-            document.getElementById("sales-history-custom-error")?.classList.add("hidden");
+            cdrHideError("sales-history-custom-error");
         }
 
         function applySalesHistoryCustomRange() {
-            const fromVal = document.getElementById("sales-history-date-from").value;
-            const toVal = document.getElementById("sales-history-date-to").value;
-
-            if (!fromVal && !toVal) { showSalesHistoryCustomError("Select a start date and end date."); return; }
-            if (!fromVal) { showSalesHistoryCustomError("Select a start date."); return; }
-            if (!toVal) { showSalesHistoryCustomError("Select an end date."); return; }
-            if (toVal < fromVal) { showSalesHistoryCustomError("End date cannot be earlier than start date."); return; }
+            const range = cdrReadRange("sales-history-from", "sales-history-to", { allowFuture: false });
+            if (!range.valid) { showSalesHistoryCustomError(range.error); return; }
 
             hideSalesHistoryCustomError();
             salesHistoryActivePeriod = "custom";
-            salesHistoryCustomFilters.date_from = fromVal; // inclusive lower bound
-            salesHistoryCustomFilters.date_to = toVal;     // inclusive upper bound
+            salesHistoryCustomFilters.date_from = range.from; // inclusive lower bound
+            salesHistoryCustomFilters.date_to = range.to;     // inclusive upper bound
             updateSalesHistoryPresetButtonsUI();
             closeSalesHistoryCustomPanel();
             loadSalesHistoryPeriodTotal();
@@ -23367,6 +23549,10 @@
             if (salesWrap && !salesWrap.contains(event.target)) closeSalesHistoryCustomPanel();
             const profitWrap = document.getElementById("profit-custom-combobox");
             if (profitWrap && !profitWrap.contains(event.target)) closeProfitCustomPanel();
+            const auditWrap = document.getElementById("audit-log-custom-combobox");
+            if (auditWrap && !auditWrap.contains(event.target)) closeAuditLogCustomPanel();
+            const brainHistoryWrap = document.getElementById("business-brief-history-custom-combobox");
+            if (brainHistoryWrap && !brainHistoryWrap.contains(event.target)) closeBusinessBriefHistoryCustomPanel();
         });
 
         async function openTeamPresenceModal(){ if(!authToken)return; document.getElementById('team-presence-modal').classList.remove('hidden'); await loadTeamPresence(); }
@@ -23671,7 +23857,7 @@
                 params.set("period", "custom");
                 params.set("custom_start", expenseHistoryFilters.date_from);
                 params.set("custom_end", expenseHistoryFilters.date_to);
-            } else if (["today", "yesterday", "week", "month", "all"].includes(preset)) {
+            } else if (["today", "week", "month", "last_3_months", "last_6_months", "year", "all"].includes(preset)) {
                 params.set("period", preset);
             } else {
                 return; // custom range not yet fully specified — leave the count-only label as is
@@ -23719,6 +23905,18 @@
             const sunFirst = new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay();
             return (sunFirst + 6) % 7;
         }
+        function shiftDateMonths(p, deltaMonths) {
+            // Calendar-month arithmetic mirroring the backend's
+            // _subtract_months(): clamps the day when the target month is
+            // shorter (e.g. May 31 minus 3 months -> Feb 28/29), never
+            // rolling over into the next month.
+            const total = p.year * 12 + (p.month - 1) + deltaMonths;
+            const year = Math.floor(total / 12);
+            const month = (total % 12 + 12) % 12 + 1;
+            const nextMonthFirst = month === 12 ? new Date(Date.UTC(year + 1, 0, 1)) : new Date(Date.UTC(year, month, 1));
+            const lastDayOfTargetMonth = new Date(nextMonthFirst.getTime() - 86400000).getUTCDate();
+            return { year, month, day: Math.min(p.day, lastDayOfTargetMonth) };
+        }
 
         function setExpenseHistoryDateRange(preset) {
             expenseHistoryActivePreset = preset;
@@ -23729,9 +23927,11 @@
             const fmtToday = formatDateParts(todayParts);
             let from = "", to = "";
             if (preset === "today") { from = fmtToday; to = fmtToday; }
-            else if (preset === "yesterday") { const y = formatDateParts(shiftDateParts(todayParts, -1)); from = y; to = y; }
             else if (preset === "week") { from = formatDateParts(shiftDateParts(todayParts, -businessWeekdayMondayFirst(todayParts))); to = fmtToday; }
             else if (preset === "month") { from = formatDateParts({ ...todayParts, day: 1 }); to = fmtToday; }
+            else if (preset === "last_3_months") { from = formatDateParts(shiftDateMonths(todayParts, -3)); to = fmtToday; }
+            else if (preset === "last_6_months") { from = formatDateParts(shiftDateMonths(todayParts, -6)); to = fmtToday; }
+            else if (preset === "year") { from = formatDateParts({ ...todayParts, month: 1, day: 1 }); to = fmtToday; }
             // "all" leaves from/to empty (no lower/upper bound)
             expenseHistoryFilters.date_from = from;
             expenseHistoryFilters.date_to = to;
@@ -23742,10 +23942,7 @@
         function updateExpenseDatePresetButtonsUI() {
             document.querySelectorAll(".expense-date-preset-btn").forEach(btn => {
                 const active = btn.dataset.preset === expenseHistoryActivePreset;
-                const isCustom = btn.dataset.preset === "custom";
-                btn.className = "expense-date-preset-btn px-2 py-1 rounded-lg border cursor-pointer "
-                    + (isCustom ? "flex items-center gap-1 " : "")
-                    + (active ? "border-primary bg-primary/15 text-primary" : "border-borderCol text-textSec hover:text-textMain");
+                btn.classList.toggle("is-active", active);
             });
             const label = document.getElementById("expense-history-custom-btn-label");
             if (!label) return;
@@ -23770,17 +23967,20 @@
             if (!panel) return;
             if (panel.classList.contains("hidden")) {
                 hideExpenseHistoryCustomError();
+                cdrSetRangeFromIso("expense-history-from", "expense-history-to", expenseHistoryFilters.date_from, expenseHistoryFilters.date_to);
                 showDateDropdown(panel, button);
-                const fromInput = document.getElementById("expense-history-date-from");
-                setTimeout(() => fromInput && fromInput.focus(), 0);
+                button.setAttribute("aria-expanded", "true");
+                const dayInput = document.getElementById("expense-history-from-day");
+                setTimeout(() => dayInput && dayInput.focus(), 0);
             } else {
-                hideDateDropdown(panel);
+                closeExpenseHistoryCustomPanel();
             }
         }
 
         function closeExpenseHistoryCustomPanel() {
             const panel = document.getElementById("expense-history-custom-panel");
             if (panel) hideDateDropdown(panel);
+            document.getElementById("expense-history-custom-btn")?.setAttribute("aria-expanded", "false");
         }
 
         function handleExpenseCustomRangeKeydown(event) {
@@ -23793,34 +23993,21 @@
         }
 
         function showExpenseHistoryCustomError(msg) {
-            const el = document.getElementById("expense-history-custom-error");
-            if (!el) return;
-            el.textContent = msg;
-            el.classList.remove("hidden");
+            cdrShowError("expense-history-custom-error", msg);
         }
 
         function hideExpenseHistoryCustomError() {
-            document.getElementById("expense-history-custom-error")?.classList.add("hidden");
+            cdrHideError("expense-history-custom-error");
         }
 
         function applyExpenseHistoryCustomRange() {
-            const fromInput = document.getElementById("expense-history-date-from");
-            const toInput = document.getElementById("expense-history-date-to");
-            const fromVal = fromInput.value;
-            const toVal = toInput.value;
-
-            // Graceful handling of missing dates: don't apply, just prompt.
-            if (!fromVal && !toVal) { showExpenseHistoryCustomError("Select a start date and end date."); return; }
-            if (!fromVal) { showExpenseHistoryCustomError("Select a start date."); return; }
-            if (!toVal) { showExpenseHistoryCustomError("Select an end date."); return; }
-            // Native date inputs only ever hold a valid yyyy-mm-dd value or "",
-            // so a non-empty value here is guaranteed to be a real, valid date.
-            if (toVal < fromVal) { showExpenseHistoryCustomError("End date cannot be earlier than start date."); return; }
+            const range = cdrReadRange("expense-history-from", "expense-history-to", { allowFuture: false });
+            if (!range.valid) { showExpenseHistoryCustomError(range.error); return; }
 
             hideExpenseHistoryCustomError();
             expenseHistoryActivePreset = "custom";
-            expenseHistoryFilters.date_from = fromVal; // inclusive lower bound
-            expenseHistoryFilters.date_to = toVal;     // inclusive upper bound
+            expenseHistoryFilters.date_from = range.from; // inclusive lower bound
+            expenseHistoryFilters.date_to = range.to;     // inclusive upper bound
             updateExpenseDatePresetButtonsUI();
             closeExpenseHistoryCustomPanel();
             loadExpenseHistory(true);
@@ -23832,7 +24019,7 @@
         });
 
         document.addEventListener("keydown", function (event) {
-            if (event.key === "Escape") { closeExpenseHistoryCustomPanel(); closeSalesHistoryCustomPanel(); closeProfitCustomPanel(); }
+            if (event.key === "Escape") { closeExpenseHistoryCustomPanel(); closeSalesHistoryCustomPanel(); closeProfitCustomPanel(); closeAuditLogCustomPanel(); closeBusinessBriefHistoryCustomPanel(); }
         });
 
         function changeExpenseHistoryPage(delta) {
@@ -24489,10 +24676,7 @@
         function updateProfitPeriodButtonsUI() {
             document.querySelectorAll(".profit-period-btn").forEach(btn => {
                 const active = btn.dataset.period === profitActivePeriod;
-                const isCustom = btn.dataset.period === "custom";
-                btn.className = "profit-period-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer "
-                    + (isCustom ? "flex items-center gap-1 " : "")
-                    + (active ? "bg-primary/15 text-primary border border-primary/30" : "text-textSec hover:text-textMain border border-transparent");
+                btn.classList.toggle("is-active", active);
             });
             const label = document.getElementById("profit-custom-btn-label");
             if (!label) return;
@@ -24509,17 +24693,20 @@
             if (!panel) return;
             if (panel.classList.contains("hidden")) {
                 hideProfitCustomError();
+                cdrSetRangeFromIso("profit-custom-from", "profit-custom-to", profitCustomFilters.date_from, profitCustomFilters.date_to);
                 showDateDropdown(panel, button);
-                const fromInput = document.getElementById("profit-custom-from");
-                setTimeout(() => fromInput && fromInput.focus(), 0);
+                button.setAttribute("aria-expanded", "true");
+                const dayInput = document.getElementById("profit-custom-from-day");
+                setTimeout(() => dayInput && dayInput.focus(), 0);
             } else {
-                hideDateDropdown(panel);
+                closeProfitCustomPanel();
             }
         }
 
         function closeProfitCustomPanel() {
             const panel = document.getElementById("profit-custom-panel");
             if (panel) hideDateDropdown(panel);
+            document.getElementById("profit-custom-btn")?.setAttribute("aria-expanded", "false");
         }
 
         function handleProfitCustomRangeKeydown(event) {
@@ -24532,32 +24719,24 @@
         }
 
         function showProfitCustomError(msg) {
-            const el = document.getElementById("profit-custom-error");
-            if (!el) return;
-            el.textContent = msg;
-            el.classList.remove("hidden");
+            cdrShowError("profit-custom-error", msg);
         }
 
         function hideProfitCustomError() {
-            document.getElementById("profit-custom-error")?.classList.add("hidden");
+            cdrHideError("profit-custom-error");
         }
 
         function applyProfitCustomRange() {
-            const fromVal = document.getElementById("profit-custom-from").value;
-            const toVal = document.getElementById("profit-custom-to").value;
-
-            if (!fromVal && !toVal) { showProfitCustomError("Select a start date and end date."); return; }
-            if (!fromVal) { showProfitCustomError("Select a start date."); return; }
-            if (!toVal) { showProfitCustomError("Select an end date."); return; }
-            if (toVal < fromVal) { showProfitCustomError("End date cannot be earlier than start date."); return; }
+            const range = cdrReadRange("profit-custom-from", "profit-custom-to", { allowFuture: false });
+            if (!range.valid) { showProfitCustomError(range.error); return; }
 
             hideProfitCustomError();
             profitActivePeriod = "custom";
-            profitCustomFilters.date_from = fromVal; // inclusive lower bound
-            profitCustomFilters.date_to = toVal;     // inclusive upper bound
+            profitCustomFilters.date_from = range.from; // inclusive lower bound
+            profitCustomFilters.date_to = range.to;     // inclusive upper bound
             updateProfitPeriodButtonsUI();
             closeProfitCustomPanel();
-            loadProfitData("custom", fromVal, toVal);
+            loadProfitData("custom", range.from, range.to);
         }
 
         function profitChangeLine(label, current, previous) {
@@ -24710,7 +24889,7 @@
         let businessBriefHistoryFilter = 'all';
         // Long-term History is paginated at the backend (GET /business-brain/history).
         // The browser holds only the page(s) the user has scrolled to — never years of rows.
-        let businessBriefHistory = { type: 'all', range: 'all', items: [], offset: 0, hasMore: false, loading: false, loaded: false };
+        let businessBriefHistory = { type: 'all', range: 'all', dateFrom: '', dateTo: '', items: [], offset: 0, hasMore: false, loading: false, loaded: false };
         const brainEsc = value => escapeEmployeeHtml(String(value ?? ''));
         const brainPriorityClass = priority => priority === 'critical'
             ? 'border-danger/35 bg-danger/10 text-danger'
@@ -24919,7 +25098,7 @@
             document.getElementById('business-brain-loading').classList.remove('hidden');
             document.getElementById('business-brain-body').classList.add('hidden');
             businessBriefHistoryFilter = 'all';
-            businessBriefHistory = { type: 'all', range: 'all', items: [], offset: 0, hasMore: false, loading: false, loaded: false };
+            businessBriefHistory = { type: 'all', range: 'all', dateFrom: '', dateTo: '', items: [], offset: 0, hasMore: false, loading: false, loaded: false };
             try { renderBusinessBrain(await fetchBusinessBrain(), 'overview'); }
             catch (err) { document.getElementById('business-brain-loading').textContent = err.message || t("businessBrain.temporarilyUnavailable"); }
         }
@@ -24992,6 +25171,10 @@
             if (businessBrainData) renderBusinessBrain(businessBrainData, 'history');
             try {
                 const p = new URLSearchParams({ type: businessBriefHistory.type, range: businessBriefHistory.range, offset: String(businessBriefHistory.offset), limit: '20' });
+                if (businessBriefHistory.range === 'custom') {
+                    if (businessBriefHistory.dateFrom) p.set('date_from', businessBriefHistory.dateFrom);
+                    if (businessBriefHistory.dateTo) p.set('date_to', businessBriefHistory.dateTo);
+                }
                 const res = await fetch(`${API_URL}/business-brain/history?${p.toString()}`, { credentials:'include', headers:{ 'Authorization':`Bearer ${authToken}`, 'Accept':'application/json' } });
                 if (!res.ok) throw new Error();
                 const d = await res.json();
@@ -25009,7 +25192,57 @@
             loadBusinessBriefHistory(true);
         }
         function setBusinessBriefHistoryRange(range) {
-            businessBriefHistory.range = ['all','week','month','quarter','year'].includes(range) ? range : 'all';
+            closeBusinessBriefHistoryCustomPanel();
+            businessBriefHistory.range = ['all','today','week','month','3months','6months','year'].includes(range) ? range : 'all';
+            loadBusinessBriefHistory(true);
+        }
+
+        function toggleBusinessBriefHistoryCustomPanel() {
+            const panel = document.getElementById('business-brief-history-custom-panel');
+            const button = document.getElementById('business-brief-history-custom-btn');
+            if (!panel) return;
+            if (panel.classList.contains('hidden')) {
+                hideBusinessBriefHistoryCustomError();
+                cdrSetRangeFromIso('business-brief-history-from', 'business-brief-history-to', businessBriefHistory.dateFrom, businessBriefHistory.dateTo);
+                showDateDropdown(panel, button);
+                button.setAttribute('aria-expanded', 'true');
+                const dayInput = document.getElementById('business-brief-history-from-day');
+                setTimeout(() => dayInput && dayInput.focus(), 0);
+            } else {
+                closeBusinessBriefHistoryCustomPanel();
+            }
+        }
+
+        function closeBusinessBriefHistoryCustomPanel() {
+            const panel = document.getElementById('business-brief-history-custom-panel');
+            if (panel) hideDateDropdown(panel);
+            document.getElementById('business-brief-history-custom-btn')?.setAttribute('aria-expanded', 'false');
+        }
+
+        function handleBusinessBriefHistoryCustomRangeKeydown(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                applyBusinessBriefHistoryCustomRange();
+            } else if (event.key === 'Escape') {
+                closeBusinessBriefHistoryCustomPanel();
+            }
+        }
+
+        function showBusinessBriefHistoryCustomError(msg) {
+            cdrShowError('business-brief-history-custom-error', msg);
+        }
+        function hideBusinessBriefHistoryCustomError() {
+            cdrHideError('business-brief-history-custom-error');
+        }
+
+        function applyBusinessBriefHistoryCustomRange() {
+            const range = cdrReadRange('business-brief-history-from', 'business-brief-history-to', { allowFuture: false });
+            if (!range.valid) { showBusinessBriefHistoryCustomError(range.error); return; }
+            hideBusinessBriefHistoryCustomError();
+            businessBriefHistory.range = 'custom';
+            businessBriefHistory.dateFrom = range.from; // inclusive lower bound
+            businessBriefHistory.dateTo = range.to;     // inclusive upper bound
+            closeBusinessBriefHistoryCustomPanel();
             loadBusinessBriefHistory(true);
         }
 
@@ -25026,12 +25259,13 @@
                 ...(staff ? [] : [{id:'recommendations', label:t("businessBrain.historyRecommendations")}, {id:'predictions', label:t("businessBrain.historyPredictions")}]),
             ];
             const ranges = [
-                {id:'all', label:t("businessBrain.rangeAll")}, {id:'week', label:t("businessBrain.rangeWeek")},
-                {id:'month', label:t("businessBrain.rangeMonth")}, {id:'quarter', label:t("businessBrain.rangeQuarter")},
-                {id:'year', label:t("businessBrain.rangeYear")},
+                {id:'today', label:t("businessBrain.rangeToday")}, {id:'week', label:t("businessBrain.rangeWeek")},
+                {id:'month', label:t("businessBrain.rangeMonth")}, {id:'3months', label:t("businessBrain.rangeLast3Months")},
+                {id:'6months', label:t("businessBrain.rangeLast6Months")}, {id:'year', label:t("businessBrain.rangeYear")},
+                {id:'all', label:t("businessBrain.rangeAll")},
             ];
             const chips = `<div class="business-brief-history-filters" role="group" aria-label="Filter Business Brain history">${typeFilters.map(f => `<button type="button" class="${businessBriefHistory.type === f.id ? 'is-active' : ''}" onclick="setBusinessBriefHistoryFilter('${f.id}')">${brainEsc(f.label)}</button>`).join('')}</div>`;
-            const rangeSel = `<label class="business-brief-history-range"><span>${brainEsc(t("businessBrain.historyPeriod"))}</span><select onchange="setBusinessBriefHistoryRange(this.value)">${ranges.map(r => `<option value="${r.id}"${businessBriefHistory.range === r.id ? ' selected' : ''}>${brainEsc(r.label)}</option>`).join('')}</select></label>`;
+            const rangeSel = `<div class="cdr-presets business-brief-history-range" role="group" aria-label="${brainEsc(t("businessBrain.historyPeriod"))}">${ranges.map(r => `<button type="button" data-range="${r.id}" class="business-brief-range-btn cdr-preset-btn${businessBriefHistory.range === r.id ? ' is-active' : ''}" onclick="setBusinessBriefHistoryRange('${r.id}')">${brainEsc(r.label)}</button>`).join('')}<div class="cdr-combobox" id="business-brief-history-custom-combobox"><button type="button" data-range="custom" id="business-brief-history-custom-btn" class="business-brief-range-btn cdr-preset-btn${businessBriefHistory.range === 'custom' ? ' is-active' : ''}" onclick="toggleBusinessBriefHistoryCustomPanel()" aria-haspopup="true" aria-expanded="false"><span>${brainEsc(t("dateRange.custom"))}</span><i class="fa-solid fa-chevron-down" aria-hidden="true"></i></button><div id="business-brief-history-custom-panel" class="hidden cdr-panel" role="dialog" aria-label="Custom date range" onkeydown="handleBusinessBriefHistoryCustomRangeKeydown(event)"><div class="cdr-field"><label for="business-brief-history-from-day">${brainEsc(t("dateRange.startDate"))}</label><div class="cdr-dmy" data-cdr-group="business-brief-history-from"><input type="text" inputmode="numeric" maxlength="2" placeholder="DD" class="cdr-day" id="business-brief-history-from-day" aria-label="Start day"><span class="cdr-dmy-sep">/</span><input type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="cdr-month" id="business-brief-history-from-month" aria-label="Start month"><span class="cdr-dmy-sep">/</span><input type="text" inputmode="numeric" maxlength="4" placeholder="YYYY" class="cdr-year" id="business-brief-history-from-year" aria-label="Start year"></div></div><div class="cdr-field"><label for="business-brief-history-to-day">${brainEsc(t("dateRange.endDate"))}</label><div class="cdr-dmy" data-cdr-group="business-brief-history-to"><input type="text" inputmode="numeric" maxlength="2" placeholder="DD" class="cdr-day" id="business-brief-history-to-day" aria-label="End day"><span class="cdr-dmy-sep">/</span><input type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="cdr-month" id="business-brief-history-to-month" aria-label="End month"><span class="cdr-dmy-sep">/</span><input type="text" inputmode="numeric" maxlength="4" placeholder="YYYY" class="cdr-year" id="business-brief-history-to-year" aria-label="End year"></div></div><div id="business-brief-history-custom-error" class="hidden cdr-error" role="alert" aria-live="polite"></div><button type="button" onclick="applyBusinessBriefHistoryCustomRange()" class="cdr-apply">${brainEsc(t("dateRange.apply"))}</button></div></div></div>`;
             const items = businessBriefHistory.items;
             let body;
             if (businessBriefHistory.loading && !items.length) body = businessBriefEmpty('fa-spinner fa-spin', t("businessBrain.historyLoading"));

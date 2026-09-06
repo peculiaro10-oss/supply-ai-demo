@@ -1488,28 +1488,49 @@
                     <datalist id="audit-log-actor-options"></datalist>
                     <datalist id="audit-log-action-options"></datalist>
                 </div>
-                <div class="flex flex-wrap gap-1.5">
-                    <button type="button" data-preset="today" onclick="setAuditLogDatePreset('today')" class="audit-log-date-preset-btn px-2 py-1 rounded-lg border border-borderCol text-textSec cursor-pointer hover:text-textMain">Today</button>
-                    <button type="button" data-preset="yesterday" onclick="setAuditLogDatePreset('yesterday')" class="audit-log-date-preset-btn px-2 py-1 rounded-lg border border-borderCol text-textSec cursor-pointer hover:text-textMain">Yesterday</button>
-                    <button type="button" data-preset="last7" onclick="setAuditLogDatePreset('last7')" class="audit-log-date-preset-btn px-2 py-1 rounded-lg border border-borderCol text-textSec cursor-pointer hover:text-textMain">Last 7 days</button>
-                    <button type="button" data-preset="last30" onclick="setAuditLogDatePreset('last30')" class="audit-log-date-preset-btn px-2 py-1 rounded-lg border border-borderCol text-textSec cursor-pointer hover:text-textMain">Last 30 days</button>
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                    <div>
-                        <label class="block text-[9px] uppercase tracking-wide text-textSec mb-0.5">Start Date</label>
-                        <input type="date" id="audit-log-date-from" onchange="markAuditLogDatePreset(null)" class="w-full bg-bgMain border border-borderCol rounded-lg px-2 py-1 text-textMain focus:outline-none focus:border-primary">
+                <div class="cdr-presets">
+                    <button type="button" data-preset="today" onclick="setAuditLogDatePreset('today')" class="audit-log-date-preset-btn cdr-preset-btn">Today</button>
+                    <button type="button" data-preset="week" onclick="setAuditLogDatePreset('week')" class="audit-log-date-preset-btn cdr-preset-btn">This Week</button>
+                    <button type="button" data-preset="month" onclick="setAuditLogDatePreset('month')" class="audit-log-date-preset-btn cdr-preset-btn">This Month</button>
+                    <button type="button" data-preset="last_3_months" onclick="setAuditLogDatePreset('last_3_months')" class="audit-log-date-preset-btn cdr-preset-btn">Last 3 Months</button>
+                    <button type="button" data-preset="last_6_months" onclick="setAuditLogDatePreset('last_6_months')" class="audit-log-date-preset-btn cdr-preset-btn">Last 6 Months</button>
+                    <button type="button" data-preset="year" onclick="setAuditLogDatePreset('year')" class="audit-log-date-preset-btn cdr-preset-btn">This Year</button>
+                    <button type="button" data-preset="all" onclick="setAuditLogDatePreset('all')" class="audit-log-date-preset-btn cdr-preset-btn is-active">All Time</button>
+                    <div class="cdr-combobox" id="audit-log-custom-combobox">
+                        <button type="button" data-preset="custom" onclick="toggleAuditLogCustomPanel()" id="audit-log-custom-btn" class="audit-log-date-preset-btn cdr-preset-btn" aria-haspopup="true" aria-expanded="false">
+                            <span>Custom</span>
+                            <i class="fa-solid fa-chevron-down" aria-hidden="true"></i>
+                        </button>
+                        <!-- Custom Date Range rule: picking a date never filters by
+                             itself — both boundaries are required, and only this
+                             explicit Apply commits them (see applyAuditLogDateRange()). -->
+                        <div id="audit-log-custom-panel" class="hidden cdr-panel" role="dialog" aria-label="Custom date range" onkeydown="handleAuditLogCustomRangeKeydown(event)">
+                            <div class="cdr-field">
+                                <label for="audit-log-from-day">Start Date</label>
+                                <div class="cdr-dmy" data-cdr-group="audit-log-from">
+                                    <input type="text" inputmode="numeric" maxlength="2" placeholder="DD" class="cdr-day" id="audit-log-from-day" aria-label="Start day">
+                                    <span class="cdr-dmy-sep">/</span>
+                                    <input type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="cdr-month" id="audit-log-from-month" aria-label="Start month">
+                                    <span class="cdr-dmy-sep">/</span>
+                                    <input type="text" inputmode="numeric" maxlength="4" placeholder="YYYY" class="cdr-year" id="audit-log-from-year" aria-label="Start year">
+                                </div>
+                            </div>
+                            <div class="cdr-field">
+                                <label for="audit-log-to-day">End Date</label>
+                                <div class="cdr-dmy" data-cdr-group="audit-log-to">
+                                    <input type="text" inputmode="numeric" maxlength="2" placeholder="DD" class="cdr-day" id="audit-log-to-day" aria-label="End day">
+                                    <span class="cdr-dmy-sep">/</span>
+                                    <input type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="cdr-month" id="audit-log-to-month" aria-label="End month">
+                                    <span class="cdr-dmy-sep">/</span>
+                                    <input type="text" inputmode="numeric" maxlength="4" placeholder="YYYY" class="cdr-year" id="audit-log-to-year" aria-label="End year">
+                                </div>
+                            </div>
+                            <div id="audit-log-date-error" class="hidden cdr-error" role="alert" aria-live="polite"></div>
+                            <button type="button" onclick="applyAuditLogDateRange()" class="cdr-apply">Apply</button>
+                        </div>
                     </div>
-                    <div>
-                        <label class="block text-[9px] uppercase tracking-wide text-textSec mb-0.5">End Date</label>
-                        <input type="date" id="audit-log-date-to" onchange="markAuditLogDatePreset(null)" class="w-full bg-bgMain border border-borderCol rounded-lg px-2 py-1 text-textMain focus:outline-none focus:border-primary">
-                    </div>
                 </div>
-                <!-- Custom Date Range rule: picking a date never filters by
-                     itself — both boundaries are required, and only this
-                     explicit Apply commits them (see applyAuditLogDateRange()). -->
-                <div id="audit-log-date-error" class="hidden text-danger text-[10px]"></div>
                 <div class="flex items-center gap-2">
-                    <button type="button" onclick="applyAuditLogDateRange()" class="px-2.5 py-1 rounded-lg bg-primary hover:bg-primaryHover text-white font-semibold cursor-pointer">Apply</button>
                     <button type="button" onclick="clearAuditLogFilters()" class="px-2.5 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer">Clear</button>
                     <span id="audit-log-active-range" class="text-[10px] text-textSec"></span>
                 </div>
@@ -2522,28 +2543,42 @@
             <div id="expenses-view-history" class="hidden flex-1 min-h-0 flex flex-col text-xs">
                 <div class="space-y-2 mb-2">
                     <input type="text" id="expense-history-search" oninput="loadExpenseHistory(true)" placeholder="Search category or note..." class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
-                    <div class="flex flex-wrap gap-1.5">
-                        <button type="button" data-preset="today" onclick="setExpenseHistoryDateRange('today')" class="expense-date-preset-btn px-2 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer">Today</button>
-                        <button type="button" data-preset="yesterday" onclick="setExpenseHistoryDateRange('yesterday')" class="expense-date-preset-btn px-2 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer">Yesterday</button>
-                        <button type="button" data-preset="week" onclick="setExpenseHistoryDateRange('week')" class="expense-date-preset-btn px-2 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer">This Week</button>
-                        <button type="button" data-preset="month" onclick="setExpenseHistoryDateRange('month')" class="expense-date-preset-btn px-2 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer">This Month</button>
-                        <button type="button" data-preset="all" onclick="setExpenseHistoryDateRange('all')" class="expense-date-preset-btn px-2 py-1 rounded-lg border border-primary bg-primary/15 text-primary cursor-pointer">All Time</button>
-                        <div class="relative" id="expense-history-custom-combobox">
-                            <button type="button" data-preset="custom" onclick="toggleExpenseHistoryCustomPanel()" id="expense-history-custom-btn" class="expense-date-preset-btn px-2 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer flex items-center gap-1">
+                    <div class="cdr-presets">
+                        <button type="button" data-preset="today" onclick="setExpenseHistoryDateRange('today')" class="expense-date-preset-btn cdr-preset-btn">Today</button>
+                        <button type="button" data-preset="week" onclick="setExpenseHistoryDateRange('week')" class="expense-date-preset-btn cdr-preset-btn">This Week</button>
+                        <button type="button" data-preset="month" onclick="setExpenseHistoryDateRange('month')" class="expense-date-preset-btn cdr-preset-btn">This Month</button>
+                        <button type="button" data-preset="last_3_months" onclick="setExpenseHistoryDateRange('last_3_months')" class="expense-date-preset-btn cdr-preset-btn">Last 3 Months</button>
+                        <button type="button" data-preset="last_6_months" onclick="setExpenseHistoryDateRange('last_6_months')" class="expense-date-preset-btn cdr-preset-btn">Last 6 Months</button>
+                        <button type="button" data-preset="year" onclick="setExpenseHistoryDateRange('year')" class="expense-date-preset-btn cdr-preset-btn">This Year</button>
+                        <button type="button" data-preset="all" onclick="setExpenseHistoryDateRange('all')" class="expense-date-preset-btn cdr-preset-btn is-active">All Time</button>
+                        <div class="cdr-combobox" id="expense-history-custom-combobox">
+                            <button type="button" data-preset="custom" onclick="toggleExpenseHistoryCustomPanel()" id="expense-history-custom-btn" class="expense-date-preset-btn cdr-preset-btn" aria-haspopup="true" aria-expanded="false">
                                 <span id="expense-history-custom-btn-label">Custom</span>
-                                <i class="fa-solid fa-chevron-down text-[9px]"></i>
+                                <i class="fa-solid fa-chevron-down" aria-hidden="true"></i>
                             </button>
-                            <div id="expense-history-custom-panel" class="hidden absolute z-30 mt-1 left-0 w-64 max-w-[calc(100vw-24px)] bg-cardBg border border-borderCol rounded-xl shadow-xl p-3 space-y-2">
-                                <div>
-                                    <label class="block font-medium text-textSec mb-1 text-[10px]">Start Date</label>
-                                    <input type="date" id="expense-history-date-from" onkeydown="handleExpenseCustomRangeKeydown(event)" class="w-full bg-bgMain border border-borderCol rounded-lg px-2 py-1.5 text-textMain focus:outline-none focus:border-primary">
+                            <div id="expense-history-custom-panel" class="hidden cdr-panel" role="dialog" aria-label="Custom date range" onkeydown="handleExpenseCustomRangeKeydown(event)">
+                                <div class="cdr-field">
+                                    <label for="expense-history-from-day">Start Date</label>
+                                    <div class="cdr-dmy" data-cdr-group="expense-history-from">
+                                        <input type="text" inputmode="numeric" maxlength="2" placeholder="DD" class="cdr-day" id="expense-history-from-day" aria-label="Start day">
+                                        <span class="cdr-dmy-sep">/</span>
+                                        <input type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="cdr-month" id="expense-history-from-month" aria-label="Start month">
+                                        <span class="cdr-dmy-sep">/</span>
+                                        <input type="text" inputmode="numeric" maxlength="4" placeholder="YYYY" class="cdr-year" id="expense-history-from-year" aria-label="Start year">
+                                    </div>
                                 </div>
-                                <div>
-                                    <label class="block font-medium text-textSec mb-1 text-[10px]">End Date</label>
-                                    <input type="date" id="expense-history-date-to" onkeydown="handleExpenseCustomRangeKeydown(event)" class="w-full bg-bgMain border border-borderCol rounded-lg px-2 py-1.5 text-textMain focus:outline-none focus:border-primary">
+                                <div class="cdr-field">
+                                    <label for="expense-history-to-day">End Date</label>
+                                    <div class="cdr-dmy" data-cdr-group="expense-history-to">
+                                        <input type="text" inputmode="numeric" maxlength="2" placeholder="DD" class="cdr-day" id="expense-history-to-day" aria-label="End day">
+                                        <span class="cdr-dmy-sep">/</span>
+                                        <input type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="cdr-month" id="expense-history-to-month" aria-label="End month">
+                                        <span class="cdr-dmy-sep">/</span>
+                                        <input type="text" inputmode="numeric" maxlength="4" placeholder="YYYY" class="cdr-year" id="expense-history-to-year" aria-label="End year">
+                                    </div>
                                 </div>
-                                <div id="expense-history-custom-error" class="hidden text-[10px] text-danger"></div>
-                                <button type="button" onclick="applyExpenseHistoryCustomRange()" class="w-full bg-primary hover:bg-primaryHover text-white py-1.5 rounded-lg font-semibold transition cursor-pointer text-[11px]">Apply</button>
+                                <div id="expense-history-custom-error" class="hidden cdr-error" role="alert" aria-live="polite"></div>
+                                <button type="button" onclick="applyExpenseHistoryCustomRange()" class="cdr-apply">Apply</button>
                             </div>
                         </div>
                     </div>
@@ -2596,28 +2631,42 @@
                 </div>
             </div>
 
-            <div class="flex flex-wrap gap-1.5 mb-3">
-                <button type="button" data-period="today" onclick="switchProfitPeriod('today')" class="profit-period-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer">Today</button>
-                <button type="button" data-period="week" onclick="switchProfitPeriod('week')" class="profit-period-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer">This Week</button>
-                <button type="button" data-period="month" onclick="switchProfitPeriod('month')" class="profit-period-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer">This Month</button>
-                <button type="button" data-period="year" onclick="switchProfitPeriod('year')" class="profit-period-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer">This Year</button>
-                <button type="button" data-period="all" onclick="switchProfitPeriod('all')" class="profit-period-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer">All Time</button>
-                <div class="relative" id="profit-custom-combobox">
-                    <button type="button" data-period="custom" onclick="toggleProfitCustomPanel()" id="profit-custom-btn" class="profit-period-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer flex items-center gap-1">
+            <div class="cdr-presets mb-3">
+                <button type="button" data-period="today" onclick="switchProfitPeriod('today')" class="profit-period-btn cdr-preset-btn">Today</button>
+                <button type="button" data-period="week" onclick="switchProfitPeriod('week')" class="profit-period-btn cdr-preset-btn">This Week</button>
+                <button type="button" data-period="month" onclick="switchProfitPeriod('month')" class="profit-period-btn cdr-preset-btn">This Month</button>
+                <button type="button" data-period="last_3_months" onclick="switchProfitPeriod('last_3_months')" class="profit-period-btn cdr-preset-btn">Last 3 Months</button>
+                <button type="button" data-period="last_6_months" onclick="switchProfitPeriod('last_6_months')" class="profit-period-btn cdr-preset-btn">Last 6 Months</button>
+                <button type="button" data-period="year" onclick="switchProfitPeriod('year')" class="profit-period-btn cdr-preset-btn">This Year</button>
+                <button type="button" data-period="all" onclick="switchProfitPeriod('all')" class="profit-period-btn cdr-preset-btn">All Time</button>
+                <div class="cdr-combobox" id="profit-custom-combobox">
+                    <button type="button" data-period="custom" onclick="toggleProfitCustomPanel()" id="profit-custom-btn" class="profit-period-btn cdr-preset-btn" aria-haspopup="true" aria-expanded="false">
                         <span id="profit-custom-btn-label">Custom</span>
-                        <i class="fa-solid fa-chevron-down text-[9px]"></i>
+                        <i class="fa-solid fa-chevron-down" aria-hidden="true"></i>
                     </button>
-                    <div id="profit-custom-panel" class="hidden absolute z-30 mt-1 left-0 w-64 max-w-[calc(100vw-24px)] bg-cardBg border border-borderCol rounded-xl shadow-xl p-3 space-y-2">
-                        <div>
-                            <label class="block font-medium text-textSec mb-1 text-[10px]">Start Date</label>
-                            <input type="date" id="profit-custom-from" onkeydown="handleProfitCustomRangeKeydown(event)" class="w-full bg-bgMain border border-borderCol rounded-lg px-2 py-1.5 text-textMain focus:outline-none focus:border-primary">
+                    <div id="profit-custom-panel" class="hidden cdr-panel" role="dialog" aria-label="Custom date range" onkeydown="handleProfitCustomRangeKeydown(event)">
+                        <div class="cdr-field">
+                            <label for="profit-custom-from-day">Start Date</label>
+                            <div class="cdr-dmy" data-cdr-group="profit-custom-from">
+                                <input type="text" inputmode="numeric" maxlength="2" placeholder="DD" class="cdr-day" id="profit-custom-from-day" aria-label="Start day">
+                                <span class="cdr-dmy-sep">/</span>
+                                <input type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="cdr-month" id="profit-custom-from-month" aria-label="Start month">
+                                <span class="cdr-dmy-sep">/</span>
+                                <input type="text" inputmode="numeric" maxlength="4" placeholder="YYYY" class="cdr-year" id="profit-custom-from-year" aria-label="Start year">
+                            </div>
                         </div>
-                        <div>
-                            <label class="block font-medium text-textSec mb-1 text-[10px]">End Date</label>
-                            <input type="date" id="profit-custom-to" onkeydown="handleProfitCustomRangeKeydown(event)" class="w-full bg-bgMain border border-borderCol rounded-lg px-2 py-1.5 text-textMain focus:outline-none focus:border-primary">
+                        <div class="cdr-field">
+                            <label for="profit-custom-to-day">End Date</label>
+                            <div class="cdr-dmy" data-cdr-group="profit-custom-to">
+                                <input type="text" inputmode="numeric" maxlength="2" placeholder="DD" class="cdr-day" id="profit-custom-to-day" aria-label="End day">
+                                <span class="cdr-dmy-sep">/</span>
+                                <input type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="cdr-month" id="profit-custom-to-month" aria-label="End month">
+                                <span class="cdr-dmy-sep">/</span>
+                                <input type="text" inputmode="numeric" maxlength="4" placeholder="YYYY" class="cdr-year" id="profit-custom-to-year" aria-label="End year">
+                            </div>
                         </div>
-                        <div id="profit-custom-error" class="hidden text-[10px] text-danger"></div>
-                        <button type="button" onclick="applyProfitCustomRange()" class="w-full bg-primary hover:bg-primaryHover text-white py-1.5 rounded-lg font-semibold transition cursor-pointer text-[11px]">Apply</button>
+                        <div id="profit-custom-error" class="hidden cdr-error" role="alert" aria-live="polite"></div>
+                        <button type="button" onclick="applyProfitCustomRange()" class="cdr-apply">Apply</button>
                     </div>
                 </div>
             </div>
@@ -2750,28 +2799,42 @@
                             </div>
                         </div>
                     </span>
-                    <div class="flex items-center gap-1 flex-wrap" id="sales-history-period-presets">
-                        <button type="button" data-preset="today" onclick="setSalesHistoryPeriod('today')" class="sales-period-preset-btn text-[11px] px-2 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer">Today</button>
-                        <button type="button" data-preset="week" onclick="setSalesHistoryPeriod('week')" class="sales-period-preset-btn text-[11px] px-2 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer">This Week</button>
-                        <button type="button" data-preset="month" onclick="setSalesHistoryPeriod('month')" class="sales-period-preset-btn text-[11px] px-2 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer">This Month</button>
-                        <button type="button" data-preset="year" onclick="setSalesHistoryPeriod('year')" class="sales-period-preset-btn text-[11px] px-2 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer">This Year</button>
-                        <button type="button" data-preset="all" onclick="setSalesHistoryPeriod('all')" class="sales-period-preset-btn text-[11px] px-2 py-1 rounded-lg border border-primary bg-primary/15 text-primary cursor-pointer">All Time</button>
-                        <div class="relative" id="sales-history-custom-combobox">
-                            <button type="button" data-preset="custom" onclick="toggleSalesHistoryCustomPanel()" id="sales-history-custom-btn" class="sales-period-preset-btn text-[11px] px-2 py-1 rounded-lg border border-borderCol text-textSec hover:text-textMain cursor-pointer flex items-center gap-1">
+                    <div class="cdr-presets" id="sales-history-period-presets">
+                        <button type="button" data-preset="today" onclick="setSalesHistoryPeriod('today')" class="sales-period-preset-btn cdr-preset-btn">Today</button>
+                        <button type="button" data-preset="week" onclick="setSalesHistoryPeriod('week')" class="sales-period-preset-btn cdr-preset-btn">This Week</button>
+                        <button type="button" data-preset="month" onclick="setSalesHistoryPeriod('month')" class="sales-period-preset-btn cdr-preset-btn">This Month</button>
+                        <button type="button" data-preset="last_3_months" onclick="setSalesHistoryPeriod('last_3_months')" class="sales-period-preset-btn cdr-preset-btn">Last 3 Months</button>
+                        <button type="button" data-preset="last_6_months" onclick="setSalesHistoryPeriod('last_6_months')" class="sales-period-preset-btn cdr-preset-btn">Last 6 Months</button>
+                        <button type="button" data-preset="year" onclick="setSalesHistoryPeriod('year')" class="sales-period-preset-btn cdr-preset-btn">This Year</button>
+                        <button type="button" data-preset="all" onclick="setSalesHistoryPeriod('all')" class="sales-period-preset-btn cdr-preset-btn is-active">All Time</button>
+                        <div class="cdr-combobox" id="sales-history-custom-combobox">
+                            <button type="button" data-preset="custom" onclick="toggleSalesHistoryCustomPanel()" id="sales-history-custom-btn" class="sales-period-preset-btn cdr-preset-btn" aria-haspopup="true" aria-expanded="false">
                                 <span id="sales-history-custom-btn-label">Custom</span>
-                                <i class="fa-solid fa-chevron-down text-[9px]"></i>
+                                <i class="fa-solid fa-chevron-down" aria-hidden="true"></i>
                             </button>
-                            <div id="sales-history-custom-panel" class="hidden absolute z-30 mt-1 left-0 w-64 max-w-[calc(100vw-24px)] bg-cardBg border border-borderCol rounded-xl shadow-xl p-3 space-y-2">
-                                <div>
-                                    <label class="block font-medium text-textSec mb-1 text-[10px]">Start Date</label>
-                                    <input type="date" id="sales-history-date-from" onkeydown="handleSalesHistoryCustomRangeKeydown(event)" class="w-full bg-bgMain border border-borderCol rounded-lg px-2 py-1.5 text-textMain focus:outline-none focus:border-primary">
+                            <div id="sales-history-custom-panel" class="hidden cdr-panel" role="dialog" aria-label="Custom date range" onkeydown="handleSalesHistoryCustomRangeKeydown(event)">
+                                <div class="cdr-field">
+                                    <label for="sales-history-from-day">Start Date</label>
+                                    <div class="cdr-dmy" data-cdr-group="sales-history-from">
+                                        <input type="text" inputmode="numeric" maxlength="2" placeholder="DD" class="cdr-day" id="sales-history-from-day" aria-label="Start day">
+                                        <span class="cdr-dmy-sep">/</span>
+                                        <input type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="cdr-month" id="sales-history-from-month" aria-label="Start month">
+                                        <span class="cdr-dmy-sep">/</span>
+                                        <input type="text" inputmode="numeric" maxlength="4" placeholder="YYYY" class="cdr-year" id="sales-history-from-year" aria-label="Start year">
+                                    </div>
                                 </div>
-                                <div>
-                                    <label class="block font-medium text-textSec mb-1 text-[10px]">End Date</label>
-                                    <input type="date" id="sales-history-date-to" onkeydown="handleSalesHistoryCustomRangeKeydown(event)" class="w-full bg-bgMain border border-borderCol rounded-lg px-2 py-1.5 text-textMain focus:outline-none focus:border-primary">
+                                <div class="cdr-field">
+                                    <label for="sales-history-to-day">End Date</label>
+                                    <div class="cdr-dmy" data-cdr-group="sales-history-to">
+                                        <input type="text" inputmode="numeric" maxlength="2" placeholder="DD" class="cdr-day" id="sales-history-to-day" aria-label="End day">
+                                        <span class="cdr-dmy-sep">/</span>
+                                        <input type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="cdr-month" id="sales-history-to-month" aria-label="End month">
+                                        <span class="cdr-dmy-sep">/</span>
+                                        <input type="text" inputmode="numeric" maxlength="4" placeholder="YYYY" class="cdr-year" id="sales-history-to-year" aria-label="End year">
+                                    </div>
                                 </div>
-                                <div id="sales-history-custom-error" class="hidden text-[10px] text-danger"></div>
-                                <button type="button" onclick="applySalesHistoryCustomRange()" class="w-full bg-primary hover:bg-primaryHover text-white py-1.5 rounded-lg font-semibold transition cursor-pointer text-[11px]">Apply</button>
+                                <div id="sales-history-custom-error" class="hidden cdr-error" role="alert" aria-live="polite"></div>
+                                <button type="button" onclick="applySalesHistoryCustomRange()" class="cdr-apply">Apply</button>
                             </div>
                         </div>
                     </div>
