@@ -6,6 +6,15 @@
         // location.origin there is never the real API server, so same-origin
         // resolution would silently point every request at nothing. See
         // MOBILE_PACKAGING.md for how to configure the real URL per platform.
+        //
+        // Native production backend. This is the ONLY thing that needs to
+        // change when the backend moves (e.g. to https://api.cauldra.cohren.com)
+        // — update this one constant, nothing else in resolveApiBaseUrl().
+        // Never point this at a device-local address: on a real Android
+        // device 127.0.0.1/http://127.0.0.1:8000 resolves to the device
+        // itself, not a real backend, and silently produces requests that
+        // can never succeed.
+        const NATIVE_PRODUCTION_API_BASE_URL = "https://cauldra.up.railway.app";
         function resolveApiBaseUrl() {
             if (window.CAULDRA_API_BASE_URL) return window.CAULDRA_API_BASE_URL;
             const metaTag = document.querySelector('meta[name="cauldra-api-base-url"]');
@@ -14,8 +23,15 @@
 
             const isNativeShell = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === "function" && window.Capacitor.isNativePlatform());
             if (isNativeShell) {
-                console.warn("Cauldra: no backend URL configured for this native build — set <meta name=\"cauldra-api-base-url\"> (or window.CAULDRA_API_BASE_URL before this script runs) to your real API host. Falling back to http://127.0.0.1:8000 for local development only; this will not work on a real device.");
-                return "http://127.0.0.1:8000";
+                // No override configured above — use the real production
+                // backend, never a device-local fallback. If this constant
+                // itself is ever emptied out (e.g. mid-migration to a new
+                // host) fail loudly instead of silently reverting to
+                // 127.0.0.1, which would point the app at the device itself.
+                if (!NATIVE_PRODUCTION_API_BASE_URL) {
+                    throw new Error("Cauldra: no backend URL is configured for this native build. Set window.CAULDRA_API_BASE_URL, <meta name=\"cauldra-api-base-url\">, or NATIVE_PRODUCTION_API_BASE_URL before this script runs.");
+                }
+                return NATIVE_PRODUCTION_API_BASE_URL;
             }
             if (location.protocol === "http:" || location.protocol === "https:") return location.origin;
             return "http://127.0.0.1:8000";

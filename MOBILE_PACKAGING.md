@@ -8,32 +8,52 @@ UI, does not touch `main.py` business logic, and does not point the native
 apps at a production server yet (`server.url` is intentionally left unset —
 see §5).
 
-## 1. IMPORTANT — why this couldn't be fully finished automatically
+**Source of truth: `frontend/`. `www/` is generated, not committed.**
+`frontend/` is the real web app and the only place you ever hand-edit code.
+`www/` — the folder `capacitor.config.json`'s `webDir` points Capacitor at —
+is a disposable, regenerated **copy** of `frontend/`, produced by
+`npm run build:www` (see §4). It is **not** in this repo's committed history
+and does not need to be; regenerate it any time with one command rather than
+hand-maintaining it. Never edit anything under `www/` directly — it will be
+silently overwritten the next time `npm run build:www` (or
+`npm run cap:sync:android`, which runs it first) runs.
 
-This preparation was done in a sandboxed environment **with no network
-access** (confirmed: `registry.npmjs.org` returns `403 host_not_allowed`
-here). That means the following could **not** be executed on your behalf,
-because they all require downloading packages from npm:
+## 1. Current state — Android platform generated, iOS still pending a Mac
 
-- `npm install` (installing `@capacitor/core`, `@capacitor/cli`,
-  `@capacitor/android`, `@capacitor/ios`)
-- `npx cap add android` (generates the actual `android/` native project)
-- `npx cap add ios` (generates the actual `ios/` native project)
+An earlier pass was done in a sandboxed environment with no network access,
+so `npm install`/`npx cap add` could not run then. That has since changed:
 
-I did **not** fabricate fake `android/`/`ios/` folders to make it look
-finished — that would be dishonest and would waste your time when it didn't
-actually build. Instead, everything below is prepared so that running the
-commands yourself (on a machine with internet access and, for iOS, a Mac) is
-a single, short pass.
+- `npm install` — done. `@capacitor/core`, `@capacitor/cli`,
+  `@capacitor/android`, `@capacitor/ios` are all installed at `8.5.1`
+  (`node_modules/`, `package-lock.json`).
+- `npx cap add android` — done. A real `android/` native project now exists
+  (Gradle wrapper, `AndroidManifest.xml`, `build.gradle` with
+  `applicationId "com.example.cauldra"` — matches `capacitor.config.json`).
+- `npx cap sync android` — done, succeeded cleanly (`npx cap doctor` reports
+  "Android looking great!").
+- `npx cap add ios` — **not run**: this environment has no macOS/Xcode,
+  which `cap add ios` requires. Run it yourself on a Mac when you're ready
+  for iOS; nothing else in this doc depends on it.
+
+Building/signing an actual APK still requires Android Studio (or a
+command-line Android SDK + a JDK) on the machine that opens `android/` —
+neither was available in this environment, so that step (and any real
+device/emulator testing) is still yours to run. See §4.
 
 ## 2. What WAS prepared here
 
-- `package.json` — declares the four required Capacitor packages.
-- `capacitor.config.json` — app name, app ID, `webDir`, secure scheme
+- `package.json` — declares the four required Capacitor packages, plus
+  `build:www`/`cap:sync:android`/`cap:sync:ios` scripts that regenerate
+  `www/` from `frontend/` before syncing (§4).
+- `capacitor.config.json` — app name, app ID, `webDir: "www"`, secure scheme
   defaults. `server.url` deliberately omitted (§5).
-- `www/index.html` — a **copy** of your existing `index.html`, placed where
-  Capacitor's build step expects a static web root. This is the same file,
-  not a rewrite or a second frontend.
+- `scripts/build-www.js` — the actual regeneration logic (plain Node
+  `fs.rmSync`/`fs.cpSync`, no shell-specific `rm -rf`/`robocopy` branching,
+  so it runs identically on Windows/macOS/Linux). Deletes `www/` and
+  recreates it as a full copy of `frontend/`. Run directly via
+  `npm run build:www`, or indirectly via `npm run cap:sync:android`.
+- `www/` — generated output, not hand-maintained (see the source-of-truth
+  note in §0).
 
 ## 3. Static assets — RESOLVED
 
@@ -54,41 +74,69 @@ Two things intentionally were *not* included, and don't need to be:
   checked every icon class used in `index.html` and none of them rely on
   it (e.g. `fa-gear` is a normal current-generation icon, not a v4 alias).
 
-## 4. Exact commands to run yourself (in this project's root, next to `package.json`)
+## 4. Commands (in this project's root, next to `package.json`)
+
+Steps 1–2 for Android are **already done** (§1) — `node_modules/`,
+`package-lock.json`, and `android/` all exist and are in sync. What's left is
+yours to run (this environment has no Android Studio/JDK or Xcode/macOS):
 
 ```bash
-# 1. Install Capacitor (resolves to whatever is actually latest right now —
-#    I intentionally did not hardcode a version number I couldn't verify)
+# Already done for Android — re-run any time you add/remove a Capacitor
+# package, or if you ever delete node_modules/:
 npm install
 
-# 2. Generate the native projects
+# Already done — android/ already exists. Re-running is safe (Capacitor
+# detects it and no-ops) but unnecessary unless you deliberately remove
+# android/ and want to regenerate it from scratch.
 npx cap add android
-npx cap add ios          # requires macOS + Xcode
+npx cap add ios          # requires macOS + Xcode — not run in this pass
 
-# 3. Copy www/ into each native project (repeat any time www/ changes)
-npx cap sync
+# Whenever anything under frontend/ changes, or before any Android build:
+# regenerates www/ from frontend/, THEN syncs it into android/. This is the
+# one command you need for "make sure Android has the latest web code" —
+# never hand-copy frontend/ into www/ yourself.
+npm run cap:sync:android
 
-# 4. Open in the native IDEs to build/run on a device or simulator
+# Same idea for iOS, once §1's iOS platform exists:
+npm run cap:sync:ios
+
+# If you only want to regenerate www/ without syncing any native platform:
+npm run build:www
+
+# Open in the native IDE to build/run on a device or emulator — the actual
+# remaining step, requires Android Studio installed on your machine.
 npx cap open android      # opens Android Studio
-npx cap open ios          # opens Xcode
+npx cap open ios          # opens Xcode, once §1's iOS platform exists
 ```
 
-## 5. `server.url` — intentionally not set
+## 5. `server.url` — intentionally not set; API backend — now Railway by default
 
-Per your instructions, this stage does not point the packaged app at a
-production domain. Right now the app will load the **local bundled copy** of
-`index.html` from `www/` (via Capacitor's local `https://localhost` scheme —
-see §7 on why `https` was chosen). Your existing API-base resolution in
-`index.html` already accounts for this:
+`server.url` in `capacitor.config.json` is still intentionally unset: the app
+shell itself (HTML/JS/CSS) still loads from the **local bundled copy** in
+`www/`, via Capacitor's local `https://localhost` scheme (see §7 on why
+`https` was chosen) — that part hasn't changed and doesn't need to.
+
+What HAS changed is separate from `server.url`: where the app's own `fetch()`
+calls go once it's running. `resolveApiBaseUrl()` (top of `app.js`) now has a
+real production default for native builds — no dev/localhost fallback left in
+that path:
 
 ```
 window.CAULDRA_API_BASE_URL  →  <meta name="cauldra-api-base-url">  →
 window.SUPPLY_AI_API_URL  →  same-origin (N/A for a local bundle)  →
-http://127.0.0.1:8000 (dev-only fallback)
+NATIVE_PRODUCTION_API_BASE_URL = https://cauldra.up.railway.app
 ```
 
-For local device/simulator testing against your dev backend, the simplest
-option **for now** is setting the meta tag in `www/index.html`:
+A native build with none of the three overrides set now talks to
+**`https://cauldra.up.railway.app`** — the real production backend — out of
+the box. There is no `127.0.0.1`/localhost fallback in the native path any
+more; if `NATIVE_PRODUCTION_API_BASE_URL` were ever emptied out by mistake,
+`resolveApiBaseUrl()` throws immediately instead of silently pointing at the
+device itself. See §10 for the full before/after of this change.
+
+For local device/emulator testing against a **different** (e.g. local dev)
+backend instead of production, override it with the meta tag in
+`www/index.html`, exactly as before:
 
 ```html
 <meta name="cauldra-api-base-url" content="http://10.0.2.2:8000">
@@ -137,9 +185,11 @@ two conditions:
    `https` (Capacitor's own default, made explicit here) precisely so the
    locally-bundled page is served as `https://localhost` instead of
    `file://`, which satisfies this requirement.
-2. **OS-level camera permission**, added below. These files don't exist yet
-   (they're generated by `npx cap add android`/`ios` in §4) — add these
-   *after* running those commands.
+2. **OS-level camera permission**, added below. `android/` now exists (§1),
+   but this permission has **not** been added to it yet — it's not required
+   merely to sync/open the project, only to use the scanner on a real device.
+   Add it before testing the scanner. (`ios/` still needs to be generated on
+   a Mac first — §1.)
 
 **Android** — add to `android/app/src/main/AndroidManifest.xml`:
 ```xml
@@ -193,9 +243,9 @@ launcher-icon densities and iOS `AppIcon.appiconset` sizes Capacitor's native
 projects expect, which are more sizes than a web favicon set), the standard
 next step is the separate `@capacitor/assets` package, run against a single
 high-resolution square source image — `cauldra-logo.png` (1254×1254) is a
-good candidate for that source. That step needs network access to install
-the package and hasn't been run here; it's a quick follow-up once `android/`
-and `ios/` exist (§4).
+good candidate for that source. `android/` now exists (§1); this hasn't been
+run yet — it's a quick follow-up whenever you're ready (also needs `ios/`
+for the iOS half, which still requires a Mac to generate — §1).
 
 ## 10. Offline-first architecture on Android/iOS
 
@@ -205,22 +255,28 @@ offline fallbacks — see the "OFFLINE-FIRST" block near the top of the main
 deployment and this Capacitor packaging, without relying on Chrome-only
 behavior. What changed and why:
 
-**`www/` was stale/missing — regenerated.** It didn't exist when this pass
-started (only `capacitor.config.json`/`package.json` did). It's now a fresh
-copy of the current frontend bundle, matching §3's approach. This is
-a **copy**, not a build step. The web frontend now lives in `frontend/`
-(`index.html`, `css/`, `js/`, `assets/`, `sw.js`), so re-run the copy of the
-whole folder — `rm -rf www && cp -r frontend www` (or `robocopy frontend www /MIR`
-on Windows) — any time anything under `frontend/` changes, before `npx cap sync`.
+**`www/` regeneration is now a script, not a manual copy.** The web frontend
+lives in `frontend/` (`index.html`, `css/`, `js/`, `assets/`, `sw.js`) — the
+source of truth (§0); `www/` is Capacitor's `webDir` and is always a full,
+disposable copy of it, produced by `scripts/build-www.js`
+(`npm run build:www`). `npm run cap:sync:android` runs that regeneration
+first and then `npx cap sync android`, so a single command always keeps
+`android/`'s bundled copy current — there is no manual `rm -rf`/`robocopy`
+step to remember or forget any more, and `www/` is never hand-edited or
+committed (§0). `frontend/js/app.js` and `www/js/app.js` are byte-identical
+after every regeneration, by construction — there is no longer any way for
+them to silently drift apart the way an earlier pass's manual copy allowed.
 
-**Backend URL resolution (`resolveApiBaseUrl()`, top of the main script) —
-fixed a real bug this stage exposed.** The old logic fell back to
-`location.origin` whenever the page loaded over `http:`/`https:`. That's
-correct for the web deployment (main.py serves this same file, same origin)
-but **wrong** for a packaged app: Capacitor loads the bundle from a fixed
-synthetic origin (`https://localhost`, per `androidScheme`/`iosScheme` in
-`capacitor.config.json`) where nothing is listening. The resolution order is
-now:
+**Backend URL resolution (`resolveApiBaseUrl()`, top of `app.js`) — the
+native fallback is now the real production backend, not localhost.** The old
+logic fell back to `location.origin` whenever the page loaded over
+`http:`/`https:`. That's correct for the web deployment (main.py serves this
+same file, same origin) but was **wrong** for a packaged app: Capacitor loads
+the bundle from a fixed synthetic origin (`https://localhost`, per
+`androidScheme`/`iosScheme` in `capacitor.config.json`) where nothing is
+listening — so a plain `http://127.0.0.1:8000` dev-only fallback used to be
+the last resort there, which never worked against a real device. The
+resolution order is now:
 
 1. `window.CAULDRA_API_BASE_URL` (set this in a tiny inline script in
    `www/index.html`, before the main script tag, if you'd rather not edit the
@@ -230,16 +286,23 @@ now:
 3. `window.SUPPLY_AI_API_URL` (back-compat with the prior override name)
 4. Same-origin (`location.origin`) — correct for the web deployment,
    unreachable in a native build since step 5 catches that case first
-5. **Native build with none of the above set:** falls back to
-   `http://127.0.0.1:8000` for local development *and logs a `console.warn`*
-   — it does not fail silently, and it will not work against a real device or
-   TestFlight/Play build. Set #1 or #2 to your real backend URL before
-   building for a device.
+5. **Native build with none of the above set:** now resolves to the
+   `NATIVE_PRODUCTION_API_BASE_URL` constant (top of `app.js`), currently
+   `https://cauldra.up.railway.app` — the real Railway production backend,
+   not a placeholder. There is no `127.0.0.1`/localhost fallback left in the
+   native path; if that constant were ever emptied out, `resolveApiBaseUrl()`
+   throws immediately instead of silently reverting to a device-local
+   address. Moving the backend later (e.g. to
+   `https://api.cauldra.cohren.com`) is a one-line edit to that constant —
+   nothing else in the function needs to change.
 
-Before shipping a native build, also add that same origin
-(`https://localhost` if `server.url` stays unset per §5, or your real domain
-once §5's later stage happens) to the backend's `SUPPLY_AI_CORS_ORIGINS` env
-var — CORS is already fully configurable there, no code change needed.
+The backend's `SUPPLY_AI_CORS_ORIGINS` env var already needs to allow
+requests from a native build's origin. Since native builds now call
+`https://cauldra.up.railway.app` directly (not `location.origin`, which stays
+the synthetic `https://localhost` Capacitor origin only for loading the
+bundle itself), confirm whatever origin Railway's CORS config expects for
+this app is already covered — no code change needed there, just verify the
+env var.
 
 **Service Worker — intentionally not registered inside the native shell.**
 `index.html` now checks `window.Capacitor.isNativePlatform()` (the real
@@ -252,8 +315,10 @@ versions, so not depending on it there removes a real source of platform risk
 rather than hoping it behaves like desktop Safari/Chrome. This check has only
 been verified in a plain browser (`window.Capacitor` correctly `undefined`
 there, so the Service Worker still registers for the web deployment) — the
-actual skip-on-native branch could not be exercised end-to-end because, per
-§1, `android/`/`ios/` haven't been generated in this environment.
+actual skip-on-native branch still has not been exercised end-to-end on a
+real device/emulator (no Android Studio/emulator available in this
+environment, per §1); `android/` now exists structurally, so this is now a
+device/emulator-testing gap rather than a "platform doesn't exist yet" one.
 
 **The data layer itself needed no changes to be cross-engine.** IndexedDB
 (outbox, `products_cache`, `suppliers_cache`), `crypto.randomUUID()` (with a
@@ -284,6 +349,10 @@ untestable without a real Android/iOS build (flagged per this project's
   pattern above means a wrong `navigator.onLine` reading only delays a sync
   attempt, it can't cause a false "success" — but the actual on-device
   timing hasn't been observed).
-- The Service-Worker-skip branch and the native backend-URL configuration,
-  both blocked on `android/`/`ios/` not existing yet (§1).
+- The Service-Worker-skip branch and the native backend-URL resolution to
+  `https://cauldra.up.railway.app` — `android/` exists and `npx cap sync
+  android` succeeded (§1), but neither has been exercised on an actual
+  device/emulator (no Android Studio/emulator available in this
+  environment). Confirming Railway's CORS config actually accepts requests
+  from the packaged app is part of that same untested step.
 
