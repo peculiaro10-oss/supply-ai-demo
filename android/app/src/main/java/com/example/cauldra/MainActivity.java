@@ -50,7 +50,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
-    protected void onPause() {
+    public void onPause() {
         super.onPause();
         // Android's WebView cookie store persists to disk asynchronously.
         // onPause() is the last lifecycle callback Android reliably invokes
