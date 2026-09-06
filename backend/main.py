@@ -13,6 +13,8 @@ import hmac
 import random
 import string
 import urllib.parse
+import phonenumbers
+from phonenumbers import NumberParseException, PhoneNumberFormat
 from pywebpush import webpush, WebPushException
 from pathlib import Path
 from datetime import datetime, timedelta, date, time as dtime, timezone, tzinfo
@@ -2182,16 +2184,83 @@ def canonical_country_context(country: Optional[str], country_code: Optional[str
             return ctx
     raise HTTPException(status_code=400, detail="Please select a valid country or region.")
 
+def to_e164(raw: str, region_iso2: str) -> str:
+    """The one authoritative phone normalizer/validator in the app — backs
+    every phone field the business/employee/recovery flows accept. Real
+    validity (via Google's libphonenumber port), not a digit count:
+
+    - A national-format number (no leading '+') is parsed AGAINST
+      region_iso2 and must be a genuinely valid, dialable number for that
+      specific country (phonenumbers.parse() + is_valid_number()) —
+      "08031234567" only succeeds when region_iso2 is Nigeria.
+    - A number the user already typed/pasted with an explicit '+' (or a
+      leading international '00') is interpreted using ITS OWN embedded
+      country code — phonenumbers.parse() does this automatically and
+      region_iso2 is not consulted for it. A Nigerian business owner
+      pasting "+14155552671" gets a valid US E.164 number back, never a
+      mangled "NG-ified" version of it — this function must never silently
+      rewrite a clearly international number into the selected country.
+
+    Returns strict E.164 ("+2348031234567") on success. Raises 400 with a
+    country-named message on anything unparseable or invalid — this is the
+    backend's authoritative check; the frontend's live formatting/validation
+    is UX only and is never trusted on its own.
+    """
+    text = (raw or "").strip()
+    region = (region_iso2 or "").strip().upper()
+    if not text:
+        raise HTTPException(status_code=400, detail="Please enter a phone number.")
+    ctx = COUNTRY_CONTEXTS.get(region)
+    if not ctx:
+        raise HTTPException(status_code=400, detail="Select a valid country before entering a phone number.")
+    # A leading "00" is the near-universal ITU international-access prefix
+    # ("0044 7911 123456") — treat it exactly like an explicit '+' before
+    # parsing. phonenumbers only strips "00" itself when it happens to match
+    # the SPECIFIC selected region's own dialing-out prefix (e.g. Nigeria's
+    # real prefix is "009", not "00"), so without this a common, perfectly
+    # valid international paste would be misread as a bogus national number
+    # and rejected — exactly the "reject a legitimate pasted number" failure
+    # mode this function must avoid (section 6/16 of the spec).
+    if text.startswith("00") and not text.startswith("000"):
+        text = "+" + text[2:]
+    try:
+        parsed = phonenumbers.parse(text, region)
+    except NumberParseException:
+        raise HTTPException(status_code=400, detail=f"Enter a valid phone number for {ctx['name']}.")
+    if not phonenumbers.is_valid_number(parsed):
+        raise HTTPException(status_code=400, detail=f"Enter a valid phone number for {ctx['name']}.")
+    return phonenumbers.format_number(parsed, PhoneNumberFormat.E164)
+
+# Reverse lookup built once from the existing COUNTRY_CONTEXTS: calling code
+# -> every ISO2 region that uses it. Several calling codes are genuinely
+# shared (e.g. "+1" is Canada AND the United States AND more), so this can
+# only ever resolve an UNAMBIGUOUS code — see canonical_phone_for_country()
+# below, which is the only reader of this map.
+_CALLING_CODE_TO_REGIONS: Dict[str, List[str]] = {}
+for _cc_iso2, _cc_ctx in COUNTRY_CONTEXTS.items():
+    _CALLING_CODE_TO_REGIONS.setdefault(_cc_ctx["code"], []).append(_cc_iso2)
+
 def canonical_phone_for_country(raw: Optional[str], phone_country_code: str) -> str:
-    digits = re.sub(r"\D", "", str(raw or ""))
-    prefix_digits = re.sub(r"\D", "", phone_country_code or "")
-    if not digits or not prefix_digits:
-        return str(raw or "").strip()
-    if digits.startswith(prefix_digits):
-        local = digits[len(prefix_digits):]
-    else:
-        local = digits.lstrip("0")
-    return f"{phone_country_code}{local}" if local else phone_country_code
+    """COMPATIBILITY WRAPPER ONLY — kept because its signature (a calling
+    code like "+234", not an ISO2 region) may still be relied on by a call
+    site elsewhere. Every INTERNAL authoritative call site in this file
+    (register_business, create_user, update_business_profile, the /users/me
+    phone-change branch) has been migrated to call to_e164() directly with a
+    real ISO2, which is unambiguous and does not go through this function.
+
+    A calling code alone cannot always identify one country ("+1" is shared
+    by the US, Canada, and others) — rather than silently guessing, this
+    raises a clear validation error when the code is ambiguous instead of
+    picking an arbitrary match, which could otherwise validate/format a
+    number under the wrong country's numbering plan."""
+    text = str(raw or "").strip()
+    code = str(phone_country_code or "").strip()
+    if not text or not code:
+        return text
+    regions = _CALLING_CODE_TO_REGIONS.get(code, [])
+    if len(regions) != 1:
+        raise HTTPException(status_code=400, detail="Could not determine a specific country for this phone number. Please select a country explicitly.")
+    return to_e164(text, regions[0])
 
 def canonical_business_country_values(country: Optional[str], country_code: Optional[str], language: Optional[str] = "en") -> dict:
     ctx = canonical_country_context(country, country_code)
@@ -2264,7 +2333,16 @@ def phones_match(submitted: str, stored: str) -> bool:
     the send destination. Country-code prefixes can be entered inconsistently
     (with/without '+', with/without the leading 0), so we accept an exact
     digit match or a suffix match of reasonable length, rather than requiring
-    byte-for-byte formatting to line up."""
+    byte-for-byte formatting to line up.
+
+    This suffix-matching leniency exists ONLY for backward compatibility with
+    accounts whose stored User.phone predates to_e164()/E.164 normalization
+    (or a legacy row that was never re-saved since). It is intentionally NOT
+    the primary phone-normalization mechanism — every current write path
+    (registration, employee creation, profile updates) now stores real E.164
+    via to_e164(), and forgot_password() already compares the E.164-
+    normalized submitted number first; this function is the fallback for
+    whatever didn't go through that yet, not a substitute for it."""
     a = normalize_phone(submitted)
     b = normalize_phone(stored)
     if not a or not b:
@@ -4888,7 +4966,8 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
 
     country_values = canonical_business_country_values(data.country, data.country_code, data.language)
     language = str(data.language or "en").strip().lower() or "en"
-    canonical_owner_phone = canonical_phone_for_country(data.owner_phone, country_values["phone_country_code"])
+    canonical_business_phone = to_e164(data.phone, country_values["country_code"])
+    canonical_owner_phone = to_e164(data.owner_phone, country_values["country_code"])
 
     # Risk signal only (never a hard block): flag when this owner identity has
     # started a trial before, for later review. A shared email/phone across
@@ -4923,7 +5002,7 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
             business_code=generate_dynamic_business_code(db, data.company_name),
             company_name=data.company_name,
             email=str(data.email),
-            phone=canonical_phone_for_country(data.phone, country_values["phone_country_code"]),
+            phone=canonical_business_phone,
             address=data.address,
             currency=country_values["currency"],
             tax_id=data.tax_id,
@@ -5372,7 +5451,10 @@ def forgot_password(payload: ForgotPasswordRequest, request: Request, db: Sessio
     else:
         if not payload.phone or not normalize_phone(payload.phone):
             raise HTTPException(status_code=400, detail="Please provide your phone number.")
-        phone = payload.phone.strip()
+    # Business must be resolved before the SMS phone can be validated — the
+    # region for to_e164() below is THIS business's country, never the
+    # signed-out caller's own device/browser locale (password recovery can
+    # happen while signed out of every account).
     biz = get_business_by_code(db, business_id)
     if not biz:
         raise HTTPException(status_code=404, detail="Business not found. Please check the Business ID and try again.")
@@ -5391,7 +5473,24 @@ def forgot_password(payload: ForgotPasswordRequest, request: Request, db: Sessio
         if channel == "email":
             identity_verified = bool(user.email) and user.email.strip().casefold() == email.casefold()
         else:
-            identity_verified = bool(user.phone) and phones_match(phone, user.phone)
+            # Real country-aware validation before comparing, not just a
+            # digit check — an unparseable/invalid-for-this-business's-
+            # country number folds into the same generic "could not verify"
+            # failure below (rate-limited like any other mismatch) rather
+            # than a distinct error, so this step never reveals the
+            # business's country to a caller who hasn't already proven they
+            # know the account's real phone number.
+            try:
+                submitted_phone_e164 = to_e164(payload.phone, biz.country_code) if biz.country_code else None
+            except HTTPException:
+                submitted_phone_e164 = None
+            # phones_match() falls back to legacy digit-suffix comparison —
+            # kept only so an account whose stored phone predates this
+            # change (not yet real E.164) can still recover; it is not the
+            # primary normalization mechanism going forward (see its
+            # docstring). Comparing the properly-normalized E.164 value
+            # first is what actually enforces country-aware validity here.
+            identity_verified = bool(user.phone) and bool(submitted_phone_e164) and phones_match(submitted_phone_e164, user.phone)
     if not identity_verified:
         record_failure(db, "forgot-password", key)
         record_failure(db, "forgot-password-ip", client_ip)
@@ -5483,7 +5582,7 @@ def update_business_profile(profile_data: BusinessProfileSchema, user: User = De
     country_values = canonical_business_country_values(profile_data.country, profile_data.country_code, profile_data.language)
     biz.company_name = profile_data.company_name
     biz.email = profile_data.email
-    biz.phone = canonical_phone_for_country(profile_data.phone, country_values["phone_country_code"])
+    biz.phone = to_e164(profile_data.phone, country_values["country_code"])
     biz.address = profile_data.address
     biz.tax_id = profile_data.tax_id
     biz.country = country_values["country"]
@@ -5662,7 +5761,9 @@ def update_my_profile(data: UserProfileUpdate, user: User = Depends(get_authenti
         raw_phone = (changes["phone"] or "").strip()
         if raw_phone:
             biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-            user.phone = canonical_phone_for_country(raw_phone, (biz.phone_country_code if biz else None))
+            if not biz or not biz.country_code:
+                raise HTTPException(status_code=400, detail="Your business country is not set. Please set it before adding a phone number.")
+            user.phone = to_e164(raw_phone, biz.country_code)
         else:
             user.phone = ""
         touched.append("phone number")
@@ -5874,9 +5975,10 @@ def create_user(data: CreateUserRequest, user: User = Depends(get_current_user),
         raise HTTPException(status_code=409, detail="That username is already in use in this business.")
     exists = next((u for u in db.query(User).filter(User.business_id == user.business_id).all() if normalize_username(u.username) == normalize_username(data.username)), None)
     if exists: raise HTTPException(status_code=409, detail="That username is already in use in this business.")
+    canonical_employee_phone = to_e164(data.phone, business.country_code)
     new_user = User(
         username=data.username.strip(), password=hash_password(data.password), role=role,
-        firstname=data.firstname, lastname=data.lastname, email=str(data.email), phone=data.phone, position=data.position,
+        firstname=data.firstname, lastname=data.lastname, email=str(data.email), phone=canonical_employee_phone, position=data.position,
         business_id=user.business_id, must_change_password=True, disabled=False, auth_version=1,
         created_at=datetime.utcnow(),
     )

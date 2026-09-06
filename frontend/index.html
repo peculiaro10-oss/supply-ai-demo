@@ -871,8 +871,9 @@
                             <label class="block font-medium text-textSec mb-1"><span id="reg-phone-code-label">Phone Code</span> & Number <span class="text-danger">*</span></label>
                             <div class="flex gap-1.5">
                                 <input type="text" id="reg-biz-phone-prefix" readonly class="w-16 bg-bgMain/75 border border-borderCol rounded-xl px-2 py-2 text-xs text-textSec font-mono text-center cursor-not-allowed">
-                                <input type="text" id="reg-biz-phone" required placeholder="8000000000" class="flex-1 bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-mono">
+                                <input type="tel" id="reg-biz-phone" required placeholder="8000000000" class="flex-1 bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-mono">
                             </div>
+                            <p id="reg-biz-phone-error" class="hidden text-danger text-[10px] mt-1"></p>
                         </div>
                     </div>
                     <div>
@@ -911,7 +912,8 @@
                         </div>
                         <div>
                             <label class="block font-medium text-textSec mb-1">Phone Number <span class="text-danger">*</span></label>
-                            <input type="text" id="reg-owner-phone" required placeholder="8000000000" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-mono">
+                            <input type="tel" id="reg-owner-phone" required placeholder="8000000000" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-mono">
+                            <p id="reg-owner-phone-error" class="hidden text-danger text-[10px] mt-1"></p>
                         </div>
                     </div>
                     <div class="grid grid-cols-2 gap-2">
@@ -1089,6 +1091,7 @@
                 <div id="forgot-phone-field" class="hidden">
                     <label class="block font-medium text-textSec mb-1">Phone Number <span class="text-danger">*</span></label>
                     <input type="tel" id="forgot-phone" placeholder="8000000000" autocomplete="tel" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-mono">
+                    <p id="forgot-phone-error" class="hidden text-danger text-[10px] mt-1"></p>
                 </div>
                 <p class="text-[10px] text-textSec leading-relaxed bg-bgMain/50 border border-borderCol rounded-xl p-2.5">
                     The OTP code sent expires after 10 minutes and can only be used once.
@@ -1770,7 +1773,8 @@
                     </div>
                     <div>
                         <label class="block font-medium text-textSec mb-1"><span data-i18n="common.phoneNumber">Phone Number</span> <span class="text-danger">*</span></label>
-                        <input type="text" id="emp-phone" required placeholder="8000000000" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                        <input type="tel" id="emp-phone" required placeholder="8000000000" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                        <p id="emp-phone-error" class="hidden text-danger text-[10px] mt-1"></p>
                     </div>
                 </div>
                 <div>
@@ -3001,6 +3005,7 @@
     <input type="text" id="inventory-search" class="hidden" value="">
 
     <script src="/assets/vendor/zxing.umd.js"></script>
+    <script src="/assets/vendor/libphonenumber-js-1.11.15.min.js"></script>
     <script src="/js/app.js"></script>
     <script src="/js/heartbeat.js"></script>
 </body>

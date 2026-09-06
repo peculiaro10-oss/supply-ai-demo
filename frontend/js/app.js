@@ -1342,6 +1342,7 @@
                     date: "Date", amount: "Amount", status: "Status", actions: "Actions", description: "Description", category: "Category",
                     quantity: "Quantity", price: "Price", total: "Total", notes: "Notes", retry: "Retry", refresh: "Refresh",
                     signOut: "Sign Out", signOutConfirmBody: "Are you sure you want to sign out?", phoneNumber: "Phone number", localNumberWithPrefix: "Local number ({prefix})",
+                    invalidPhoneForCountry: "Enter a valid phone number for the selected country.",
                     signInOrRegister: "Sign in or register a business first.", noResultsFound: "No results found.",
                     somethingWentWrong: "Something went wrong. Please try again.", tryAgain: "Please try again.",
                     unsavedChanges: "You have unsaved changes.", confirmDelete: "Are you sure you want to delete this?",
@@ -15878,14 +15879,175 @@
             } catch (_) { return new Date(value).toLocaleTimeString(); }
         }
 
+        // Same name/signature every existing caller (registration submit,
+        // employee creation submit, profile update) already uses — only the
+        // implementation changed, from naive digit-stripping-plus-concat to
+        // real libphonenumber-js parsing/validation. Returns strict E.164 on
+        // success. On anything unparseable/invalid this returns a SAFE
+        // fallback (best-effort digits-with-plus, or the trimmed original) —
+        // never a malformed concatenated string — because the backend's
+        // to_e164() is the authoritative check and will reject it properly;
+        // this function is frontend UX convenience, not the source of truth.
         function normalizeBusinessPhone(raw) {
             const value = String(raw || "").trim();
             if (!value) return value;
+            const iso2 = resolvePhoneRegionIso2(businessProfile);
+            if (typeof libphonenumber !== "undefined" && iso2) {
+                try {
+                    const parsed = libphonenumber.parsePhoneNumberFromString(value, iso2);
+                    if (parsed && parsed.isValid()) return parsed.number; // E.164, e.g. "+2348031234567"
+                } catch (_) { /* fall through to the safe best-effort value below */ }
+            }
             if (value.startsWith("+")) return value.replace(/[^+0-9]/g, "");
-            const prefix = String(businessProfile?.phone_country_code || "").replace(/[^0-9+]/g, "");
-            const local = value.replace(/\D/g, "").replace(/^0+/, "");
-            return prefix ? `${prefix}${local}` : value;
+            return value;
         }
+
+        // ---------------------------------------------------------------------
+        // Country-aware phone input — ONE shared implementation backing every
+        // phone field Cauldra collects (business/owner during registration,
+        // employee creation, SMS password recovery). Backed by the locally-
+        // vendored libphonenumber-js (see index.html's <script> tag) — never a
+        // hand-rolled per-country regex or formatting mask. This is UX only:
+        // live formatting + advisory validation while typing. The backend's
+        // to_e164() remains the one authoritative check and is never bypassed
+        // by whatever this produces.
+        // ---------------------------------------------------------------------
+
+        // Resolves an ISO2 region code from whatever shape of "current country
+        // context" a caller happens to have on hand (a plain ISO2 string, or
+        // an object carrying either .iso2 (countryDatabase/resolveBusinessCountryContext
+        // shape) or .country_code (businessProfile/serialize_business shape)).
+        // Every phone field funnels through this ONE resolver so the four
+        // fields can never quietly diverge on how they read "the country".
+        function resolvePhoneRegionIso2(context) {
+            if (!context) return null;
+            if (typeof context === "string") { const v = context.trim().toUpperCase(); return v || null; }
+            const iso2 = context.iso2 || context.country_code;
+            return iso2 ? String(iso2).trim().toUpperCase() : null;
+        }
+
+        // getRegionIso2: a zero-arg function returning whatever country-context
+        // value is current for this field right now (called fresh on every
+        // keystroke/blur, since e.g. the registration country can change after
+        // the field is already wired). errorEl: optional inline message element
+        // (created once per field, toggled here — reuses the app's existing
+        // border-danger/text-danger inline-error convention, no new visual system).
+        function wireCountryAwarePhoneInput(inputEl, getRegionIso2, errorEl) {
+            if (!inputEl || typeof libphonenumber === "undefined") return;
+            const { AsYouType, isValidPhoneNumber } = libphonenumber;
+            const showError = (msg) => {
+                if (errorEl) { errorEl.textContent = msg; errorEl.classList.remove("hidden"); }
+                inputEl.classList.add("border-danger");
+            };
+            const hideError = () => {
+                if (errorEl) { errorEl.textContent = ""; errorEl.classList.add("hidden"); }
+                inputEl.classList.remove("border-danger");
+            };
+            inputEl.addEventListener("input", () => {
+                const iso2 = resolvePhoneRegionIso2(getRegionIso2 ? getRegionIso2() : null);
+                const raw = inputEl.value;
+                // No country resolved yet: leave the value exactly as typed,
+                // usable and never flagged invalid — there is nothing to
+                // format or validate against.
+                if (!raw) { hideError(); return; }
+                if (!iso2) return;
+                const prevCursor = inputEl.selectionStart ?? raw.length;
+                let formatted = null;
+                try { formatted = new AsYouType(iso2).input(raw); } catch (_) { /* best-effort only */ }
+                if (formatted && formatted !== raw) {
+                    inputEl.value = formatted;
+                    // Preserve roughly where the user was typing instead of
+                    // always snapping the caret to the end — a simple
+                    // length-delta offset (not a full masking engine),
+                    // matching how many formatting characters AsYouType just
+                    // inserted/removed at-or-before the caret.
+                    const delta = formatted.length - raw.length;
+                    const newCursor = Math.max(0, Math.min(formatted.length, prevCursor + delta));
+                    try { inputEl.setSelectionRange(newCursor, newCursor); } catch (_) {}
+                }
+                // Only ever CLEAR an existing error while the user is still
+                // typing (the number just became complete/valid) — a new
+                // error is never raised here, only on blur/submit, so a
+                // partially-typed number is never flagged red mid-keystroke.
+                if (errorEl && !errorEl.classList.contains("hidden") && isValidPhoneNumber(inputEl.value, iso2)) {
+                    hideError();
+                }
+            });
+            inputEl.addEventListener("blur", () => {
+                const iso2 = resolvePhoneRegionIso2(getRegionIso2 ? getRegionIso2() : null);
+                const raw = inputEl.value.trim();
+                if (!raw || !iso2) { hideError(); return; }
+                if (isValidPhoneNumber(raw, iso2)) hideError();
+                else showError(t("common.invalidPhoneForCountry"));
+            });
+        }
+
+        // Shared submit-time guard for the four wired fields — returns true
+        // (and shows the field's inline error) when the value is NOT a valid
+        // number for the resolved country, so a caller can block its fetch
+        // exactly like it already blocks on any other required-field failure.
+        // Frontend-only UX; to_e164() on the backend remains authoritative.
+        function phoneFieldHasBlockingError(inputEl, getRegionIso2, errorEl) {
+            if (!inputEl || typeof libphonenumber === "undefined") return false;
+            const raw = inputEl.value.trim();
+            if (!raw) return false; // emptiness is handled by the field's own `required`, not here
+            const iso2 = resolvePhoneRegionIso2(getRegionIso2 ? getRegionIso2() : null);
+            if (!iso2) return false; // no country yet — nothing to validate against
+            if (libphonenumber.isValidPhoneNumber(raw, iso2)) return false;
+            if (errorEl) { errorEl.textContent = t("common.invalidPhoneForCountry"); errorEl.classList.remove("hidden"); }
+            inputEl.classList.add("border-danger");
+            return true;
+        }
+
+        // Password recovery can happen while completely signed out, so it
+        // cannot lean on businessProfile/currentUserProfile for a country —
+        // it resolves its OWN business context, lazily, the moment the user
+        // finishes typing a Business ID, by reusing the exact same
+        // /auth/verify-business endpoint the sign-in flow already calls (no
+        // new backend endpoint). Left null until that resolves; the phone
+        // field simply behaves as a plain input until then (see
+        // wireCountryAwarePhoneInput's "no country yet" handling).
+        let forgotPasswordBusinessContext = null;
+        async function resolveForgotPasswordBusinessContext() {
+            const businessId = document.getElementById("forgot-business-id")?.value.trim();
+            if (!businessId) { forgotPasswordBusinessContext = null; return; }
+            try {
+                const res = await fetch(`${API_URL}/auth/verify-business`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ business_id: businessId }),
+                });
+                forgotPasswordBusinessContext = res.ok ? await res.json() : null;
+            } catch (_) {
+                forgotPasswordBusinessContext = null;
+            }
+        }
+
+        // Wire the four country-aware phone fields named by the spec. Each
+        // getRegionIso2 reads whatever country-context state that SPECIFIC
+        // screen already maintains — resolvePhoneRegionIso2() is what keeps
+        // them from quietly diverging on how "the country" is read.
+        wireCountryAwarePhoneInput(
+            document.getElementById("reg-biz-phone"),
+            () => window.selectedBusinessContext,
+            document.getElementById("reg-biz-phone-error"),
+        );
+        wireCountryAwarePhoneInput(
+            document.getElementById("reg-owner-phone"),
+            () => window.selectedBusinessContext, // reuses the business country — no separate owner-country selector (requirement 10)
+            document.getElementById("reg-owner-phone-error"),
+        );
+        wireCountryAwarePhoneInput(
+            document.getElementById("emp-phone"),
+            () => resolveBusinessCountryContext(),
+            document.getElementById("emp-phone-error"),
+        );
+        wireCountryAwarePhoneInput(
+            document.getElementById("forgot-phone"),
+            () => forgotPasswordBusinessContext,
+            document.getElementById("forgot-phone-error"),
+        );
+        document.getElementById("forgot-business-id")?.addEventListener("blur", resolveForgotPasswordBusinessContext);
 
         function applyBusinessLocale(profile = businessProfile) {
             if (!profile) return;
@@ -16291,11 +16453,31 @@
         async function handleForgotPassword(event) {
             event.preventDefault();
             const submit = document.getElementById('forgot-password-submit');
+            const channel = document.getElementById('forgot-channel').value;
+            // SMS-only submit-time guard — email recovery is completely
+            // unaffected. Validated against the recovery-business's OWN
+            // country (resolved when the Business ID field was left, see
+            // resolveForgotPasswordBusinessContext()), never the caller's
+            // own signed-in business, since recovery can happen while
+            // signed out of every account.
+            if (channel === 'sms' && phoneFieldHasBlockingError(
+                document.getElementById('forgot-phone'),
+                () => forgotPasswordBusinessContext,
+                document.getElementById('forgot-phone-error'),
+            )) {
+                setForgotMessage(t("common.invalidPhoneForCountry"), 'error');
+                return;
+            }
             const payload = {
                 business_id: document.getElementById('forgot-business-id').value.trim(),
                 username: document.getElementById('forgot-username').value.trim(),
                 email: document.getElementById('forgot-email').value.trim(),
-                channel: document.getElementById('forgot-channel').value
+                // Previously omitted here entirely, which meant SMS recovery
+                // could never actually succeed server-side (the backend's
+                // SMS branch requires payload.phone) — now sent for both
+                // channels; the backend only reads it for channel === "sms".
+                phone: document.getElementById('forgot-phone').value.trim(),
+                channel,
             };
             if (submit) { submit.disabled = true; submit.textContent = 'Sending...'; }
             try {
@@ -18721,16 +18903,32 @@
             const email = document.getElementById("reg-biz-email").value.trim();
             const phonePrefix = document.getElementById("reg-biz-phone-prefix").value.trim();
             const phoneNumberRaw = document.getElementById("reg-biz-phone").value.trim();
+            const ownerPhoneRawEl = document.getElementById("reg-owner-phone");
+            // Submit-time guard for both phones, in addition to the live
+            // formatting/validation already wired on these fields — never
+            // rely on live-typing validation alone. Live formatting already
+            // reformats reg-biz-phone/reg-owner-phone into national display
+            // form as the user types, so by submit time these already hold
+            // that formatted (not raw-digits) value; libphonenumber-js
+            // parses that correctly, and the backend's to_e164() re-derives
+            // E.164 from it independently regardless.
+            const bizPhoneInvalid = phoneFieldHasBlockingError(document.getElementById("reg-biz-phone"), () => window.selectedBusinessContext, document.getElementById("reg-biz-phone-error"));
+            const ownerPhoneInvalid = phoneFieldHasBlockingError(ownerPhoneRawEl, () => window.selectedBusinessContext, document.getElementById("reg-owner-phone-error"));
+            if (bizPhoneInvalid || ownerPhoneInvalid) {
+                showToast(t("common.invalidPhoneForCountry"), "error");
+                (bizPhoneInvalid ? document.getElementById("reg-biz-phone") : ownerPhoneRawEl)?.focus();
+                return;
+            }
             const phone = `${phonePrefix} ${phoneNumberRaw}`;
             const address = document.getElementById("reg-biz-address").value.trim();
             const currency = document.getElementById("reg-biz-currency").value;
             const language = document.getElementById("reg-biz-language")?.value || "en";
             const tax_id = document.getElementById("reg-biz-tax").value.trim();
-            
+
             const firstname = document.getElementById("reg-owner-firstname").value.trim();
             const lastname = document.getElementById("reg-owner-lastname").value.trim();
             const owner_email = document.getElementById("reg-owner-email").value.trim();
-            const ownerPhoneRaw = document.getElementById("reg-owner-phone").value.trim();
+            const ownerPhoneRaw = ownerPhoneRawEl.value.trim();
             const owner_phone = ownerPhoneRaw ? `${phonePrefix} ${ownerPhoneRaw}` : "";
             const username = document.getElementById("reg-owner-username").value.trim();
             const password = document.getElementById("reg-owner-password").value;
@@ -20345,6 +20543,14 @@
             const firstname = document.getElementById("emp-firstname").value.trim();
             const lastname = document.getElementById("emp-lastname").value.trim();
             const email = document.getElementById("emp-email").value.trim();
+            // Submit-time guard in addition to the live validation already
+            // wired on this field (never rely on live-typing validation
+            // alone) — validated against the active business's country.
+            if (phoneFieldHasBlockingError(document.getElementById("emp-phone"), () => resolveBusinessCountryContext(), document.getElementById("emp-phone-error"))) {
+                showToast(t("common.invalidPhoneForCountry"), "error");
+                document.getElementById("emp-phone")?.focus();
+                return;
+            }
             const phone = normalizeBusinessPhone(document.getElementById("emp-phone").value.trim());
             const username = document.getElementById("emp-username").value.trim();
             const password = document.getElementById("emp-password").value;
