@@ -10,10 +10,23 @@
 // data to whoever opens the browser next, so every request that isn't the
 // app shell or a known static asset is passed straight to the network.
 
-const SHELL_CACHE = "cauldra-shell-v4";
+const SHELL_CACHE = "cauldra-shell-v5";
 
 // Precached at install time. Kept small and static-only — anything dynamic
 // (products, sales, etc.) never belongs in this cache.
+//
+// SHELL_DOCUMENTS are the app's own code — not versioned by filename, so
+// they're treated like "/" itself (network-first with a cached fallback,
+// see isShellDocument()/the fetch handler below): always fresh when online,
+// fully usable offline otherwise. SHELL_ASSETS are third-party/vendor files
+// already versioned by filename, so they stay cache-first below.
+const SHELL_DOCUMENTS = [
+    "/js/app.js",
+    "/js/heartbeat.js",
+    "/css/base.css",
+    "/css/dashboard-fixes.css",
+    "/frontend/css/base.css",
+];
 const SHELL_ASSETS = [
     "/",
     "/assets/manifest.json",
@@ -26,6 +39,7 @@ const SHELL_ASSETS = [
     "/assets/vendor/fontawesome/css/all.min.css",
     "/assets/vendor/html5-qrcode-2.3.8.min.js",
     "/assets/vendor/zxing.umd.js",
+    ...SHELL_DOCUMENTS,
 ];
 
 self.addEventListener("install", (event) => {
@@ -50,12 +64,17 @@ function isStaticAsset(url) {
     return url.pathname.startsWith("/assets/");
 }
 
-// Every non-GET request, and every GET that isn't the shell/a static asset,
-// is assumed to be a live API call and must go straight to the network —
-// never served from or written into this cache.
+function isShellDocument(url) {
+    return SHELL_DOCUMENTS.includes(url.pathname);
+}
+
+// Every non-GET request, and every GET that isn't the shell/a static asset/
+// one of the app's own shell documents, is assumed to be a live API call and
+// must go straight to the network — never served from or written into this
+// cache.
 function isApiRequest(request, url) {
     if (request.method !== "GET") return true;
-    if (url.pathname === "/" || isStaticAsset(url)) return false;
+    if (url.pathname === "/" || isStaticAsset(url) || isShellDocument(url)) return false;
     return true;
 }
 
@@ -67,8 +86,9 @@ self.addEventListener("fetch", (event) => {
 
     if (isApiRequest(request, url)) return; // network-only, not our concern
 
-    if (url.pathname === "/" || request.mode === "navigate") {
-        // Network-first for the shell itself, so signed-in users get the
+    if (url.pathname === "/" || request.mode === "navigate" || isShellDocument(url)) {
+        // Network-first for the shell itself (the HTML document, and the
+        // app's own JS/CSS — see SHELL_DOCUMENTS), so signed-in users get the
         // latest app on every load while still having a cached fallback the
         // moment the network is unavailable.
         event.respondWith(

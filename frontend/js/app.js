@@ -331,19 +331,91 @@
                 if (!rows.length) { setSyncStatus("synced"); return; }
                 setSyncStatus("syncing", rows.length);
 
-                for (const op of rows) {
+                let syncedCount = 0;
+                for (const opSnapshot of rows) {
                     if (!(await isBackendReachable())) { setSyncStatus("offline"); break; }
+
+                    // Re-read the current record rather than trusting the
+                    // start-of-pass snapshot: an earlier op processed THIS
+                    // SAME pass (a product_create resolving a dependency —
+                    // see resolveOutboxDependenciesOnProductSynced()) may have
+                    // rewritten this op's payload/dependencies since `rows`
+                    // was captured.
+                    const op = await idbTx("outbox", "readonly", (store) => idbRequest(store.get(opSnapshot.op_id)));
+                    if (!op || op.status === "synced" || op.status === "conflict") continue;
+
+                    // Dependency ordering (see completePOSCheckoutOffline() /
+                    // resolveOutboxDependenciesOnProductSynced()): a sale that
+                    // referenced a still-unsynced offline-created product
+                    // waits here until that product's own create op is gone
+                    // from the outbox (synced and removed) — never attempted,
+                    // never marked as failed, just deferred to a later pass.
+                    if (Array.isArray(op.depends_on_op_ids) && op.depends_on_op_ids.length) {
+                        let stillOutstanding = false;
+                        for (const depId of op.depends_on_op_ids) {
+                            const dep = await idbTx("outbox", "readonly", (store) => idbRequest(store.get(depId)));
+                            if (dep) { stillOutstanding = true; break; }
+                        }
+                        if (stillOutstanding) continue;
+                    }
+
+                    // Identity re-verification — never weaken/bypass the
+                    // backend's own enforce_offline_replay_identity(); this is
+                    // the client-side half of the same guarantee. A queued op
+                    // only ever replays under the identity that originally
+                    // queued it: if a different account is now signed in on
+                    // this browser/device, stop and surface a conflict rather
+                    // than ever sending it under the new session.
+                    // auth_version is only compared when both sides have one
+                    // recorded, so outbox rows queued before this field
+                    // existed are never retroactively treated as a mismatch.
+                    const identityMismatch =
+                        op.business_id !== currentOfflineScope()
+                        || op.user_id !== (currentUserProfile?.id ?? null)
+                        || (op.auth_version != null && currentUserProfile?.auth_version != null && op.auth_version !== currentUserProfile.auth_version);
+                    if (identityMismatch) {
+                        await updateOutboxOp(op.op_id, { status: "conflict", last_error: "This offline change belongs to a different or expired signed-in account and was not sent." });
+                        continue;
+                    }
+
                     await updateOutboxOp(op.op_id, { status: "syncing" });
                     try {
                         const res = await fetch(`${API_URL}${op.endpoint}`, {
                             method: op.method,
-                            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+                            headers: {
+                                "Content-Type": "application/json",
+                                "Authorization": `Bearer ${authToken}`,
+                                // Replay identity for the backend's
+                                // enforce_offline_replay_identity() — the
+                                // ORIGINAL identity that queued this op, not
+                                // necessarily the one currently signed in
+                                // (already verified to match, immediately
+                                // above, before this fetch is ever made).
+                                "x-cauldra-offline-replay": "1",
+                                "x-cauldra-offline-business-id": String(op.business_id),
+                                "x-cauldra-offline-user-id": String(op.user_id),
+                                "x-cauldra-offline-auth-version": String(op.auth_version ?? currentUserProfile?.auth_version ?? 1),
+                            },
                             body: op.method === "DELETE" ? undefined : JSON.stringify(op.payload),
                         });
                         const data = await res.json().catch(() => ({}));
                         if (res.ok) {
                             await handleSyncedOperation(op, data);
                             await removeOutboxOp(op.op_id);
+                            syncedCount++;
+                        } else if (res.status === 401) {
+                            // The access token expired mid-sync (or was
+                            // otherwise rejected) — not this op's fault and
+                            // not a permanent failure. Undo the "syncing"
+                            // mark (left exactly as pending; no attempt/
+                            // backoff consumed) and pause the whole run
+                            // rather than burning through the rest of the
+                            // queue with a token already known to be bad.
+                            // Preserve the pending work; never delete it.
+                            await updateOutboxOp(op.op_id, { status: "pending" });
+                            setSyncStatus("auth_required");
+                            refreshAccessToken(); // best-effort silent recovery via the refresh cookie; the next trigger resumes if it succeeds
+                            break;
                         } else if ([400, 403, 404, 409].includes(res.status)) {
                             // A genuine business-logic rejection (or a request the
                             // server will never accept) — retrying forever would
@@ -362,7 +434,20 @@
 
                 const remaining = await countPendingOutbox();
                 const anyConflicts = (await getOutboxForCurrentBusiness()).some((op) => op.status === "conflict");
-                setSyncStatus(remaining ? "pending" : (anyConflicts ? "pending" : "synced"));
+                if (syncStatusState !== "offline" && syncStatusState !== "auth_required") {
+                    setSyncStatus(remaining ? "pending" : (anyConflicts ? "pending" : "synced"));
+                }
+                // Reconciliation: once the queue is fully drained and at
+                // least one op actually landed this run, re-fetch
+                // authoritative server data (reusing the existing loadData()
+                // pipeline as-is) rather than trusting only each op's own
+                // incremental local patch — catches anything a specific
+                // response didn't fully reflect (e.g. inventory moved by
+                // someone else in the meantime) and refreshes
+                // dashboards/totals from the real source of truth.
+                if (syncedCount > 0 && !remaining && typeof loadData === "function") {
+                    loadData().catch(() => {});
+                }
             } finally {
                 syncInFlight = false;
             }
@@ -372,6 +457,37 @@
             const attempts = (op.attempts || 0) + 1;
             const backoffMs = Math.min(5 * 60 * 1000, 5000 * Math.pow(2, attempts)); // 10s, 20s, 40s ... capped at 5 min
             await updateOutboxOp(op.op_id, { status: "pending", attempts, next_retry_at: Date.now() + backoffMs, last_error: reason });
+        }
+
+        // A product created offline only ever gets a real id once its
+        // product_create op syncs. Any OTHER still-queued op that referenced
+        // the temporary negative id (currently: a sale_checkout whose cart
+        // included it — see completePOSCheckoutOffline()'s depends_on_op_ids)
+        // must have that id rewritten to the real one, and the now-resolved
+        // dependency removed from its depends_on_op_ids, so it becomes
+        // eligible to sync on the next pass. This rewrite always happens
+        // locally, before the dependent op is ever attempted — the fake id
+        // is never sent to the backend.
+        async function resolveOutboxDependenciesOnProductSynced(createOpId, localId, serverId) {
+            try {
+                const rows = await getOutboxForCurrentBusiness();
+                for (const dependent of rows) {
+                    if (dependent.type !== "sale_checkout") continue;
+                    if (!Array.isArray(dependent.payload?.items)) continue;
+                    let changed = false;
+                    const items = dependent.payload.items.map((item) => {
+                        if (item.product_id === localId) { changed = true; return { ...item, product_id: serverId }; }
+                        return item;
+                    });
+                    const hadDep = Array.isArray(dependent.depends_on_op_ids) && dependent.depends_on_op_ids.includes(createOpId);
+                    if (changed || hadDep) {
+                        await updateOutboxOp(dependent.op_id, {
+                            payload: changed ? { ...dependent.payload, items } : dependent.payload,
+                            depends_on_op_ids: hadDep ? dependent.depends_on_op_ids.filter((id) => id !== createOpId) : dependent.depends_on_op_ids,
+                        });
+                    }
+                }
+            } catch (_) {}
         }
 
         // Applies the server's authoritative result of a synced operation back
@@ -385,6 +501,7 @@
                     const idx = globalProducts.findIndex((p) => p.id === op.meta.local_id);
                     if (idx !== -1) { globalProducts[idx] = { ...globalProducts[idx], ...serverData, id: serverData.id, _pendingSync: false }; }
                     await cacheProductsLocally(globalProducts);
+                    await resolveOutboxDependenciesOnProductSynced(op.op_id, op.meta.local_id, serverData.id);
                 } else if (op.type === "product_update" || op.type === "product_delete" || op.type === "expense_create" || op.type === "sale_checkout") {
                     // These reference an id/product that already existed
                     // server-side (or, for sales, only ever sell already-synced
@@ -443,7 +560,13 @@
 
             const online = navigator.onLine;
             let icon = "fa-circle-check", text = "All changes synced", cls = "text-textSec";
-            if (!online || syncStatusState === "offline") {
+            if (syncStatusState === "auth_required") {
+                // Authentication expired mid-sync (see runSync()'s 401
+                // branch) — pending work is preserved, not deleted; it just
+                // waits here for a valid session instead of retrying blindly.
+                icon = "fa-user-lock"; cls = "text-warning";
+                text = pending ? `Signed out · ${pending} change${pending === 1 ? "" : "s"} waiting` : "Signed out";
+            } else if (!online || syncStatusState === "offline") {
                 icon = "fa-cloud"; cls = "text-warning";
                 text = pending ? `Offline · ${pending} change${pending === 1 ? "" : "s"} saved locally` : "Offline";
             } else if (syncStatusState === "syncing") {
@@ -451,7 +574,7 @@
                 text = `Syncing${pending ? " " + pending : ""} change${pending === 1 ? "" : "s"}…`;
             } else if (conflicts > 0) {
                 icon = "fa-triangle-exclamation"; cls = "text-danger";
-                text = `${conflicts} change${conflicts === 1 ? "" : "s"} could not sync`;
+                text = `${conflicts} change${conflicts === 1 ? "" : "s"} need${conflicts === 1 ? "s" : ""} attention`;
             } else if (pending > 0) {
                 icon = "fa-clock"; cls = "text-warning";
                 text = `${pending} change${pending === 1 ? "" : "s"} waiting to sync`;
@@ -459,9 +582,16 @@
                 icon = "fa-circle-check"; cls = "text-success";
                 text = "All changes synced";
             }
-            el.className = `flex items-center gap-1.5 text-[10px] font-medium mx-2 shrink-0 ${cls}`;
+            // Clickable whenever a manual retry could plausibly do something
+            // (the explicit "manual retry by the user" sync trigger) — a
+            // harmless no-op otherwise, since runSync() itself no-ops with
+            // nothing pending.
+            const clickable = pending > 0 || conflicts > 0 || syncStatusState === "offline" || syncStatusState === "auth_required";
+            el.className = `flex items-center gap-1.5 text-[10px] font-medium mx-2 shrink-0 ${cls}${clickable ? " cursor-pointer" : ""}`;
             el.innerHTML = `<i class="fa-solid ${icon}"></i><span>${text}</span>`;
-            el.classList.toggle("hidden", online && syncStatusState !== "syncing" && !pending && !conflicts);
+            el.title = clickable ? "Tap to retry syncing now" : "";
+            el.onclick = clickable ? () => runSync() : null;
+            el.classList.toggle("hidden", online && syncStatusState !== "syncing" && syncStatusState !== "auth_required" && !pending && !conflicts);
         }
 
         window.addEventListener("online", () => { updateSyncStatusUI(); scheduleSyncSoon(); });
@@ -17812,6 +17942,7 @@
             // refreshAccessToken() and could re-fetch business data before the
             // guest transition is even visible.
             renderMobileNav();
+            updateSyncStatusUI();
             showToast(options.toastMessage || t("common.signedOutSuccess"), options.toastType || "info");
             signOutInProgress = false;
         }
@@ -18522,7 +18653,8 @@
                         position: data.position,
                         phone: data.phone,
                         email: data.email,
-                        must_change_password: data.must_change_password
+                        must_change_password: data.must_change_password,
+                        auth_version: data.auth_version ?? null
                     };
                     businessProfile = {
                         id: data.business_id || null,
@@ -18533,6 +18665,7 @@
                     };
 
                     startAuthRefreshHeartbeat();
+                    scheduleSyncSoon(); // a fresh sign-in is one of the sensible moments to drain any pending offline work
 
                     verifiedOnboardingReference = null; // consumed server-side; never reusable
                     closeBusinessAuthModal();
@@ -18760,7 +18893,8 @@
                     position: data.position,
                     phone: data.phone,
                     email: data.email,
-                    must_change_password: !!data.must_change_password
+                    must_change_password: !!data.must_change_password,
+                    auth_version: data.auth_version ?? null
                 };
                 businessProfile = {
                     id: data.business_id || verifiedSignInBusiness.id,
@@ -18777,7 +18911,7 @@
                 };
 
                 startAuthRefreshHeartbeat();
-
+                scheduleSyncSoon(); // a fresh sign-in is one of the sensible moments to drain any pending offline work
 
                 closeBusinessAuthModal();
                 redirectAuthenticatedBusinessToDashboard();
@@ -22217,6 +22351,30 @@
         // /sales/checkout's own idempotency check (see main.py) guarantee a
         // retried sync can't decrement inventory or record the sale twice.
         async function completePOSCheckoutOffline(items) {
+            // Dependency check (see resolveOutboxDependenciesOnProductSynced()):
+            // an item can reference a product that only exists as a still-
+            // unsynced offline create (negative local id). Real database ids
+            // are never sent to the backend — instead this queues the sale
+            // with an explicit dependency on that product's own pending
+            // create op, and runSync() defers replaying it until that create
+            // has actually synced and the id has been resolved. If a negative
+            // id has no matching pending create at all (should not normally
+            // happen), refuse rather than ever queue a request carrying a
+            // fake id the backend could never resolve.
+            const pendingCreateOps = items.some(item => item.product_id < 0)
+                ? (await getOutboxForCurrentBusiness()).filter(op => op.type === "product_create")
+                : [];
+            const dependsOnOpIds = [];
+            for (const item of items) {
+                if (item.product_id >= 0) continue;
+                const dep = pendingCreateOps.find(op => op.meta?.local_id === item.product_id);
+                if (!dep) {
+                    showToast("One of the items in this sale hasn't finished syncing yet. Please try again in a moment.", "error");
+                    return;
+                }
+                if (!dependsOnOpIds.includes(dep.op_id)) dependsOnOpIds.push(dep.op_id);
+            }
+
             let dailyTotal = 0;
             for (const item of items) {
                 const p = globalProducts.find(pr => pr.id === item.product_id);
@@ -22232,8 +22390,10 @@
             const opId = generateOpId();
             await addOutboxOp({
                 op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
+                auth_version: currentUserProfile?.auth_version ?? null,
                 type: "sale_checkout", endpoint: "/sales/checkout", method: "POST",
-                payload: { items, client_ref: opId }, meta: {},
+                payload: { items, client_ref: opId }, client_ref: opId, meta: {},
+                depends_on_op_ids: dependsOnOpIds,
                 label: `Sale (${items.length} item${items.length === 1 ? "" : "s"})`,
                 status: "pending", attempts: 0, next_retry_at: 0, created_at: Date.now(), last_error: null,
             });
@@ -23481,8 +23641,9 @@
         async function handleRecordExpenseOffline(payload, opId) {
             await addOutboxOp({
                 op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
+                auth_version: currentUserProfile?.auth_version ?? null,
                 type: "expense_create", endpoint: "/expenses/", method: "POST",
-                payload: { ...payload, client_ref: opId }, meta: {},
+                payload: { ...payload, client_ref: opId }, client_ref: opId, meta: {},
                 label: `Expense: ${payload.category} (${formatCurrency(payload.amount)})`,
                 status: "pending", attempts: 0, next_retry_at: 0, created_at: Date.now(), last_error: null,
             });
@@ -23864,7 +24025,8 @@
                     currentUserProfile = {
                         id: data.id, username: data.username, role: String(data.role || '').toLowerCase(),
                         firstname: data.firstname, lastname: data.lastname, position: data.position,
-                        phone: data.phone, email: data.email, must_change_password: !!data.must_change_password
+                        phone: data.phone, email: data.email, must_change_password: !!data.must_change_password,
+                        auth_version: data.auth_version ?? null
                     };
                     businessProfile = {
                         id: data.business_id, business_id: data.business_id, business_code: data.business_code,
@@ -23878,6 +24040,12 @@
                     updateCompanyHeaderDisplay();
                     syncLanguageFromProfile(businessProfile);
                     updateGuestHeaderState();
+                    // Session (re)established — one of the sensible moments to
+                    // drain any pending offline work (covers app startup via
+                    // refreshAccessTokenAtStartup(), the 10-minute heartbeat,
+                    // and the visibilitychange-triggered check, since all three
+                    // funnel through this one function).
+                    scheduleSyncSoon();
                     __diagOutcome = "success";
                     return true;
                 } catch (e) {
@@ -24050,7 +24218,8 @@
                 currentUserProfile = {
                     id: data.id, username: data.username, role: String(data.role || '').toLowerCase(),
                     firstname: data.firstname, lastname: data.lastname, position: data.position,
-                    phone: data.phone, email: data.email, must_change_password: !!data.must_change_password
+                    phone: data.phone, email: data.email, must_change_password: !!data.must_change_password,
+                    auth_version: data.auth_version ?? null
                 };
                 businessProfile = {
                     id: data.business_id, business_id: data.business_id, business_code: data.business_code,
@@ -24064,6 +24233,7 @@
                 syncLanguageFromProfile(businessProfile);
                 updateGuestHeaderState();
                 startAuthRefreshHeartbeat();
+                scheduleSyncSoon(); // session validated — a sensible moment to drain any pending offline work
                 if (currentUserProfile.must_change_password) {
                     const lock = document.getElementById("password-change-modal");
                     if (lock) { lock.classList.remove("hidden"); lock.style.display = "flex"; setTimeout(() => document.getElementById("pw-change-current")?.focus(), 50); }
@@ -25519,8 +25689,9 @@
             await cacheProductsLocally(globalProducts);
             await addOutboxOp({
                 op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
+                auth_version: currentUserProfile?.auth_version ?? null,
                 type: "product_create", endpoint: "/products/", method: "POST",
-                payload: { ...payload, client_ref: opId }, meta: { local_id: localId },
+                payload: { ...payload, client_ref: opId }, client_ref: opId, meta: { local_id: localId },
                 label: `Add product "${payload.name}"`, status: "pending", attempts: 0, next_retry_at: 0,
                 created_at: Date.now(), last_error: null,
             });
@@ -25604,7 +25775,13 @@
             if (_dupOverrideCandidateId !== null && _dupOverrideSignature !== signature) _dupClearOverride();
 
             const mutationRef = generateOpId();
-            const requestPayload = { ...payload, client_ref: mutationRef };
+            // Optimistic-concurrency token (see Product.updated_at / base_updated_at
+            // in main.py): the updated_at this client last saw for this product.
+            // Absent for a product that predates this feature or hasn't been
+            // re-fetched since — the backend skips the check entirely then,
+            // exactly as before this field existed.
+            const cachedProductForEdit = globalProducts.find(p => p.id === id);
+            const requestPayload = { ...payload, client_ref: mutationRef, base_updated_at: cachedProductForEdit?.updated_at || null };
             if (_dupOverrideCandidateId !== null) requestPayload.duplicate_override_candidate_id = _dupOverrideCandidateId;
 
             try {
@@ -25674,12 +25851,17 @@
 
         async function handleUpdateProductOffline(id, payload, opId) {
             const idx = globalProducts.findIndex((p) => p.id === id);
+            // Captured BEFORE the optimistic local mutation just below, so this
+            // is the version the user actually edited from, not the version
+            // that already reflects this same pending change.
+            const baseUpdatedAt = idx !== -1 ? (globalProducts[idx].updated_at || null) : null;
             if (idx !== -1) { globalProducts[idx] = { ...globalProducts[idx], ...payload, _pendingSync: true }; }
             await cacheProductsLocally(globalProducts);
             await addOutboxOp({
                 op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
+                auth_version: currentUserProfile?.auth_version ?? null,
                 type: "product_update", endpoint: `/products/${id}`, method: "PATCH",
-                payload: { ...payload, client_ref: opId }, meta: { local_id: id },
+                payload: { ...payload, client_ref: opId, base_updated_at: baseUpdatedAt }, client_ref: opId, meta: { local_id: id },
                 label: `Update product "${payload.name}"`, status: "pending", attempts: 0, next_retry_at: 0,
                 created_at: Date.now(), last_error: null,
             });
@@ -25750,6 +25932,7 @@
             const opId = generateOpId();
             await addOutboxOp({
                 op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
+                auth_version: currentUserProfile?.auth_version ?? null,
                 type: "product_delete", endpoint: `/products/${productId}`, method: "DELETE",
                 payload: null, meta: {},
                 label: `Delete product "${name}"`, status: "pending", attempts: 0, next_retry_at: 0,

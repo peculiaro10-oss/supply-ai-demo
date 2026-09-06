@@ -667,6 +667,15 @@ class Product(Base):
     # the same client_ref returns the original product instead of duplicating it.
     client_ref = Column(String, nullable=True, index=True)
     synced_at = Column(SQLDateTime, nullable=True)
+    # Optimistic-concurrency guard for offline-sync updates (see ProductUpdate.
+    # base_updated_at and update_product() below): bumped automatically by
+    # SQLAlchemy's onupdate on every successful field change. A queued offline
+    # edit carries the updated_at it last saw; if the row has moved on since
+    # (someone else's change landed first, online or from another queued
+    # replay), the update is rejected with 409 instead of silently overwriting
+    # newer data. Nullable so historical rows created before this column
+    # existed are never treated as a false conflict (see migration 0021).
+    updated_at = Column(SQLDateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
 
 class Supplier(Base):
     __tablename__ = "suppliers"
@@ -720,12 +729,13 @@ class Expense(Base):
       which is an unrelated staff-management approval workflow) — adding a
       foreign key to a model that doesn't exist isn't possible, so this stays
       a plain string until that system is built.
-    - client_ref / synced_at: present so a future offline-sync feature (also
-      not yet built anywhere in this app) can be added without a schema
-      migration — client_ref is what a future offline client would generate
-      locally before a server ID exists, and is unique per business so a
-      retried sync of the same locally-created expense can't double-insert.
-      Both are unused by any endpoint today.
+    - client_ref / synced_at: offline-sync support (same pattern as Product,
+      which mirrors this original version). client_ref is a client-generated
+      id the offline outbox attaches before a server id exists; create_expense
+      uses it as the idempotency key so a retried sync of the same
+      locally-created expense returns the original record instead of
+      double-inserting. synced_at is stamped when a client_ref-carrying
+      (offline-originated) expense is recorded — see create_expense below.
     """
     __tablename__ = "expenses"
     id = Column(Integer, primary_key=True, index=True)
@@ -4383,6 +4393,11 @@ class ProductUpdate(BaseModel):
     expiry_date: Optional[datetime] = None
     client_ref: Optional[str] = None
     duplicate_override_candidate_id: Optional[int] = None
+    # Optimistic-concurrency token (see Product.updated_at). Optional and
+    # backward-compatible: a client that never sends it (or an old cached
+    # product with no updated_at yet) skips the check entirely, exactly as
+    # before this field existed.
+    base_updated_at: Optional[datetime] = None
 
 class StockUpdate(BaseModel):
     quantity_change: int
@@ -5987,6 +6002,7 @@ def list_products(limit: int = Query(200, ge=1, le=500), offset: int = Query(0, 
                 "id": p.id, "sku": p.sku, "barcode": p.barcode, "name": p.name, "category": p.category, "size": p.size, "quantity": int(warehouse_quantity or 0),
                 "total_quantity": p.quantity, "min_stock_level": p.min_stock_level, "cost_price": p.cost_price, "wholesale_price": p.wholesale_price,
                 "retail_price": p.retail_price, "warehouse": warehouse_name, "created_at": to_utc_iso(p.created_at),
+                "updated_at": to_utc_iso(p.updated_at),
                 "expiry_date": p.expiry_date.isoformat() if p.expiry_date else None
             })
     else:
@@ -5995,6 +6011,7 @@ def list_products(limit: int = Query(200, ge=1, le=500), offset: int = Query(0, 
                 "id": p.id, "sku": p.sku, "barcode": p.barcode, "name": p.name, "category": p.category, "size": p.size, "quantity": p.quantity,
                 "total_quantity": p.quantity, "min_stock_level": p.min_stock_level, "cost_price": p.cost_price, "wholesale_price": p.wholesale_price,
                 "retail_price": p.retail_price, "warehouse": p.warehouse, "created_at": to_utc_iso(p.created_at),
+                "updated_at": to_utc_iso(p.updated_at),
                 "expiry_date": p.expiry_date.isoformat() if p.expiry_date else None
             })
     return rows
@@ -6356,7 +6373,7 @@ def create_product(data: ProductCreate, request: Request, user: User = Depends(g
     )
     p=Product(sku=sku, barcode=barcode, name=data.name, category=data.category, size=data.size, quantity=data.quantity, min_stock_level=data.min_stock_level, cost_price=data.cost_price, wholesale_price=data.wholesale_price or data.retail_price*0.85, retail_price=data.retail_price, warehouse=warehouse_name, initial_stock=data.quantity, expiry_date=data.expiry_date, business_id=user.business_id, owner_id=user.id, client_ref=client_ref, synced_at=(datetime.utcnow() if client_ref else None))
     db.add(p); db.flush(); db.add(WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=p.warehouse,quantity=p.quantity)); auto_upsert_general_catalog(db,p); add_audit(db,user,"PRODUCT_CREATED",f"Added product {p.name}."); mark_business_brain_dirty(db, user.business_id)
-    response = {"id":p.id,"sku":p.sku,"barcode":p.barcode,"name":p.name}
+    response = {"id":p.id,"sku":p.sku,"barcode":p.barcode,"name":p.name,"updated_at":to_utc_iso(p.updated_at)}
     complete_idempotent_mutation(claim, response)
     try:
         db.commit()
@@ -6373,6 +6390,7 @@ def update_product(product_id: int, data: ProductUpdate, request: Request, user:
     changes = data.model_dump(exclude_unset=True)
     client_ref = str(changes.pop("client_ref", "") or "").strip()[:100] or None
     _dup_override_id = changes.pop("duplicate_override_candidate_id", None)
+    base_updated_at = changes.pop("base_updated_at", None)
     claim, replay = claim_idempotent_mutation(
         db, user.business_id, f"product_update:{product_id}", client_ref,
         {key: (value.isoformat() if isinstance(value, datetime) else value) for key, value in changes.items()},
@@ -6381,6 +6399,28 @@ def update_product(product_id: int, data: ProductUpdate, request: Request, user:
         return replay
     p = db.query(Product).filter(Product.id == product_id, Product.business_id == user.business_id).first()
     if not p: raise HTTPException(status_code=404, detail="The product could not be found in this inventory.")
+    # Optimistic concurrency: reject a write that was computed against a
+    # version of this product that is no longer current — most relevant to a
+    # replayed offline edit that queued while another change (online, or a
+    # different device's own queued edit) already landed first. base_updated_at
+    # is optional; a client that never sends it (or a product with no
+    # updated_at recorded yet) is never blocked by this check.
+    #
+    # p.updated_at is a NAIVE datetime that is already UTC (see to_utc_iso()'s
+    # docstring — the one convention this whole file uses for every stored
+    # timestamp). base_updated_at came from the client echoing back a
+    # to_utc_iso()-formatted value it was given, so Pydantic parses it as
+    # TIMEZONE-AWARE. Comparing via .timestamp() on the naive side would
+    # silently use the server process's local timezone instead of UTC — this
+    # normalizes the incoming value to the same naive-UTC shape instead, so
+    # the comparison is correct regardless of the server's local timezone.
+    if base_updated_at is not None and p.updated_at is not None:
+        incoming = base_updated_at.astimezone(timezone.utc).replace(tzinfo=None) if base_updated_at.tzinfo else base_updated_at
+        if incoming.replace(microsecond=0) != p.updated_at.replace(microsecond=0):
+            raise HTTPException(
+                status_code=409,
+                detail="This product was changed elsewhere since you last loaded it. Refresh and try again.",
+            )
     if "sku" in changes and changes["sku"] and changes["sku"] != p.sku:
         if db.query(Product).filter(Product.business_id == user.business_id, Product.sku == changes["sku"], Product.id != p.id).first():
             raise HTTPException(status_code=409, detail="That SKU is already in use in this business.")
@@ -6465,7 +6505,7 @@ def update_product(product_id: int, data: ProductUpdate, request: Request, user:
             "id": p.id, "sku": p.sku, "barcode": p.barcode, "name": p.name, "category": p.category,
             "size": p.size, "quantity": p.quantity, "min_stock_level": p.min_stock_level,
             "cost_price": p.cost_price, "wholesale_price": p.wholesale_price, "retail_price": p.retail_price,
-            "warehouse": p.warehouse, "expiry_date": p.expiry_date,
+            "warehouse": p.warehouse, "expiry_date": p.expiry_date, "updated_at": to_utc_iso(p.updated_at),
         },
     }
     complete_idempotent_mutation(claim, response)
@@ -7546,11 +7586,14 @@ def business_brain_history(
 #
 # Foundation-only per explicit scope: no profit/loss, no revenue calculation,
 # no payment-source model (none exists in this codebase — payment_source is a
-# free-text field until a real account/payment-source system is built), no
-# offline sync (none exists in this codebase either — client_ref exists in the
-# schema for a future sync client but nothing populates it today). Every
-# financial fact the frontend could lie about — business, creator, timestamp —
-# is set here from the authenticated session, never from the request body.
+# free-text field until a real account/payment-source system is built).
+# Offline sync IS implemented for expense creation: create_expense below
+# accepts client_ref, enforces it via claim_idempotent_mutation (so a retried
+# offline-queue replay can't double-record the same expense), stamps
+# synced_at, and honors enforce_offline_replay_identity() like every other
+# offline-capable mutation. Every financial fact the frontend could lie
+# about — business, creator, timestamp — is set here from the authenticated
+# session, never from the request body.
 # -----------------------------------------------------------------------------
 @app.get("/expenses/categories")
 def list_expense_categories(user: User = Depends(get_current_user)):
