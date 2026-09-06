@@ -675,6 +675,15 @@
         // backend that never comes back doesn't retry forever.
         let startupReconnectAttempts = 0;
         let currentUserProfile = null;
+        // Effective permissions for the CURRENT signed-in user, as computed by
+        // the backend's get_effective_permissions() and returned alongside the
+        // profile at every auth-success site (register/login/refresh/validate
+        // — see startPresenceHeartbeat()'s neighboring calls). The frontend
+        // never computes these itself; this is a read-only cache of what the
+        // backend already decided. hasPermission()/hasFeaturePermission()
+        // below are the only things that should read this map.
+        let currentEffectivePermissions = {};
+        function hasPermission(code) { return !!currentEffectivePermissions[code]; }
         let businessProfile = null;
         // True only for the brief span of an explicit, user-confirmed sign-out
         // (set at the start of handleSignOut(), cleared at its end). While
@@ -16466,9 +16475,39 @@
             return String(currentUserProfile?.role || '').toLowerCase();
         }
 
+        // Maps the app's existing feature-name strings (used all over
+        // applyRoleRestrictions() and elsewhere) onto real backend permission
+        // codes, so nav/feature visibility is driven by the SAME effective
+        // permissions the backend actually enforces (section 9) instead of
+        // the old hardcoded ROLE_FEATURES sets. This is the fix for the
+        // confirmed bug: ROLE_FEATURES.manager was simply missing 'suppliers'
+        // and 'warehouses' even though the backend has always authorized
+        // Manager for both — a permission code was never consulted at all,
+        // just a second, independently-maintained (and here, wrong) list.
+        // A feature name with no entry here falls back to the old
+        // ROLE_FEATURES set, so nothing not yet mapped can regress.
+        const FEATURE_TO_PERMISSION = {
+            'inventory': 'inventory.view',
+            'add product': 'inventory.add_product',
+            'new sale': 'sales.create',
+            'purchase orders': 'po.view',
+            'suppliers': 'supplier.view',
+            'warehouses': 'warehouse.view',
+            'ai center': 'ai.use',
+            'business brain': 'ai.use',
+            'price monitor': 'procurement.price_monitor',
+            'predictive monitor': 'ai.use',
+            'daily sales': 'sales.create',
+            'team presence': 'team.view_presence',
+            'expenses': 'expenses.view',
+            'profit': 'reports.profit',
+        };
         function hasFeaturePermission(featureName) {
+            const key = String(featureName).toLowerCase();
+            const code = FEATURE_TO_PERMISSION[key];
+            if (code) return hasPermission(code);
             const role = getCurrentRole();
-            return !!ROLE_FEATURES[role]?.has(String(featureName).toLowerCase());
+            return !!ROLE_FEATURES[role]?.has(key);
         }
 
         function clearAuthError() {
@@ -17834,18 +17873,45 @@
 
                 async function endPresenceSession() {
             if (!authToken) return;
+            // /auth/logout (called separately, alongside this — see
+            // handleSignOut) now also accepts this session_id and closes the
+            // SAME presence row server-side in that one request (section 22);
+            // this call to /presence/logout remains as a second, independent
+            // path so presence termination still works even against an
+            // older-shaped deployment or if that combined call is ever
+            // skipped (e.g. skipServerLogout).
             try { await fetch(`${API_URL}/presence/logout`, { method: "POST", headers: {"Content-Type":"application/json","Authorization":`Bearer ${authToken}`}, body: JSON.stringify({session_id: window.supplyPresenceSessionId || null}) }); } catch (_) {}
             window.supplyPresenceSessionId = null;
         }
 
+        // Genuine-interaction signal for the Online/Inactive distinction
+        // (section 17) — deliberately NOT a network call per event. A single
+        // delegated listener just flips this flag; the next scheduled
+        // heartbeat (at most 45s later) reports it and resets it. This is
+        // the entire "throttling" mechanism: at most one extra boolean per
+        // 45-second heartbeat, never one request per click/keystroke.
+        let hadActivitySinceLastPing = true; // starts true so the very first heartbeat after login already reports activity
+        document.addEventListener("click", () => { hadActivitySinceLastPing = true; }, { capture: true, passive: true });
+        document.addEventListener("keydown", () => { hadActivitySinceLastPing = true; }, { capture: true, passive: true });
+        document.addEventListener("touchstart", () => { hadActivitySinceLastPing = true; }, { capture: true, passive: true });
+
+        // Heartbeat interval: 45 seconds (see PRESENCE_INACTIVE_THRESHOLD /
+        // PRESENCE_STALE_THRESHOLD in main.py for the matching 30-minute
+        // Inactive and ~3-minute stale/Offline thresholds this cadence is
+        // chosen against). Called at every successful-authentication site
+        // (register-business, employee/admin login, refreshAccessToken(),
+        // validateAuthenticationSession()) — see each of those below —
+        // never left to some unrelated screen to eventually trigger.
         function startPresenceHeartbeat() {
             if (businessDeletionInProgress) return; // never (re)start while a deletion is underway
             if (window.supplyPresenceTimer) clearInterval(window.supplyPresenceTimer);
             const ping = async () => {
                 if (businessDeletionInProgress || !authToken) return;
-                try { const res=await fetch(`${API_URL}/presence/heartbeat`,{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${authToken}`},body:JSON.stringify({session_id:window.supplyPresenceSessionId||null})}); const d=await res.json(); if(res.ok) window.supplyPresenceSessionId=d.session_id; } catch(_) {}
+                const activity = hadActivitySinceLastPing;
+                hadActivitySinceLastPing = false;
+                try { const res=await fetch(`${API_URL}/presence/heartbeat`,{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${authToken}`},body:JSON.stringify({session_id:window.supplyPresenceSessionId||null, activity})}); const d=await res.json(); if(res.ok) window.supplyPresenceSessionId=d.session_id; } catch(_) { hadActivitySinceLastPing = hadActivitySinceLastPing || activity; }
             };
-            ping(); window.supplyPresenceTimer=setInterval(ping,60000);
+            ping(); window.supplyPresenceTimer=setInterval(ping,45000); // 45s heartbeat — immediate first ping above, so a fresh login is never Offline for even one interval
         }
 
         // Asks for confirmation before actually signing out — the sign-out
@@ -17891,9 +17957,6 @@
             // 401 for a row that no longer exists. Skipping them avoids that
             // guaranteed-to-fail round trip entirely, rather than merely
             // relying on their try/catch to hide it.
-            // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) -----
-            console.log(`[auth-diag-frontend] handleSignOut() CALLED caller=` + (new Error().stack || "").split("\n").slice(1, 6).join(" | "));
-            // --- END TEMPORARY DEV DIAGNOSTIC -------------------------------
             // Blocks every background auth path (heartbeat, visibilitychange,
             // session validation) from re-establishing a session while this
             // runs — see refreshAccessToken()/validateAuthenticationSession().
@@ -17909,6 +17972,7 @@
 
             authToken = "";
             currentUserProfile = null;
+            currentEffectivePermissions = {};
             businessProfile = null;
             globalProducts = [];
             inventoryViewProducts = [];
@@ -17995,6 +18059,7 @@
             stopAuthRefreshHeartbeat();
             authToken = "";
             currentUserProfile = null;
+            currentEffectivePermissions = {};
             businessProfile = null;
             globalProducts = [];
             inventoryViewProducts = [];
@@ -18679,6 +18744,8 @@
                     };
 
                     startAuthRefreshHeartbeat();
+                    startPresenceHeartbeat(); // Presence session established immediately on a fresh sign-in — never left to some unrelated screen (section 21)
+                    currentEffectivePermissions = data.permissions || {};
                     scheduleSyncSoon(); // a fresh sign-in is one of the sensible moments to drain any pending offline work
 
                     verifiedOnboardingReference = null; // consumed server-side; never reusable
@@ -18925,6 +18992,8 @@
                 };
 
                 startAuthRefreshHeartbeat();
+                startPresenceHeartbeat(); // Presence session established immediately on a fresh sign-in — never left to some unrelated screen (section 21)
+                currentEffectivePermissions = data.permissions || {};
                 scheduleSyncSoon(); // a fresh sign-in is one of the sensible moments to drain any pending offline work
 
                 closeBusinessAuthModal();
@@ -19905,6 +19974,13 @@
                             </div>
 
                             <div class="flex items-center gap-1.5 shrink-0">
+                                ${(getCurrentRole()==='admin' || (getCurrentRole()==='manager' && rawRole==='staff')) && rawRole!=='admin' ? `
+                                <button type="button"
+                                    onclick="openEmployeePermissionsModal(${Number(u.id)})"
+                                    class="w-8 h-8 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 flex items-center justify-center transition cursor-pointer"
+                                    title="Access &amp; Permissions">
+                                    <i class="fa-solid fa-shield-halved text-[10px]"></i>
+                                </button>` : ''}
                                 <button type="button"
                                     onclick="promptResetEmployeePassword(${Number(u.id)}, '${String(u.username || '').replace(/'/g, "\'")}' )"
                                     class="w-8 h-8 rounded-lg bg-primary/10 hover:bg-primary/20 text-primary flex items-center justify-center transition cursor-pointer"
@@ -19934,6 +20010,128 @@
                         </div>
                     </div>`;
             }).join("");
+        }
+
+        // =====================================================================
+        // ACCESS & PERMISSIONS (Team Management > Employee > Access & Permissions)
+        //
+        // Optional job/access PRESETS (section 4) are a pure frontend
+        // convenience: picking one just pre-ticks/un-ticks the checkboxes
+        // below, exactly as if the admin/manager had clicked each one by hand.
+        // Nothing about "which preset was used" is ever sent to the backend or
+        // stored anywhere — POST /users/{id}/permissions only ever receives a
+        // single {permission, granted} pair, validated against the SAME
+        // registry every other authorization check uses. A preset can never
+        // become a second source of truth: it is forgotten the instant the
+        // checkboxes it set are saved.
+        // =====================================================================
+        const JOB_PRESETS = {
+            general_staff: { label: "General Staff", grants: ["inventory.view", "sales.create"] },
+            sales: { label: "Sales", grants: ["inventory.view", "sales.create", "sales.wholesale", "sales.refund", "sales.view_history"] },
+            inventory_warehouse: { label: "Inventory / Warehouse", grants: ["inventory.view", "inventory.add_product", "inventory.edit_product", "inventory.adjust_stock", "inventory.transfer_stock", "warehouse.view"] },
+            procurement: { label: "Procurement", grants: ["supplier.view", "po.view", "po.create", "po.send", "procurement.price_monitor"] },
+            finance: { label: "Finance", grants: ["expenses.record", "expenses.view_all", "expenses.export", "reports.sales", "reports.profit"] },
+        };
+
+        let employeePermissionsTargetId = null;
+        let employeePermissionsData = null; // last-loaded { user_id, role, categories } from GET /users/{id}/permissions
+
+        async function openEmployeePermissionsModal(userId) {
+            employeePermissionsTargetId = userId;
+            document.getElementById('employee-permissions-modal')?.classList.remove('hidden');
+            await loadEmployeePermissions();
+        }
+        function closeEmployeePermissionsModal() {
+            document.getElementById('employee-permissions-modal')?.classList.add('hidden');
+            employeePermissionsTargetId = null; employeePermissionsData = null;
+        }
+
+        async function loadEmployeePermissions() {
+            const box = document.getElementById('employee-permissions-body');
+            if (!box || !employeePermissionsTargetId) return;
+            box.innerHTML = `<div class="py-8 text-center text-xs text-textSec"><i class="fa-solid fa-spinner fa-spin mr-1.5"></i> Loading permissions…</div>`;
+            try {
+                const r = await fetch(`${API_URL}/users/${employeePermissionsTargetId}/permissions`, { headers: { "Authorization": `Bearer ${authToken}` } });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) { box.innerHTML = `<div class="p-4 text-center text-xs text-danger">${escapeHtml(friendlyErrorMessage(d, "Could not load permissions."))}</div>`; return; }
+                employeePermissionsData = d;
+                renderEmployeePermissions();
+            } catch (_) {
+                box.innerHTML = `<div class="p-4 text-center text-xs text-danger">Could not load permissions. Please try again.</div>`;
+            }
+        }
+
+        function renderEmployeePermissions() {
+            const box = document.getElementById('employee-permissions-body');
+            if (!box || !employeePermissionsData) return;
+            const categories = employeePermissionsData.categories || {};
+            const presetOptions = Object.entries(JOB_PRESETS).map(([key, p]) => `<option value="${key}">${escapeHtml(p.label)}</option>`).join('');
+            const presetRow = `<div class="mb-3 flex items-center gap-2">
+                <select id="employee-permissions-preset" class="flex-1 bg-bgMain border border-borderCol rounded-lg px-2 py-1.5 text-[11px] text-textMain cursor-pointer">
+                    <option value="">Apply a quick preset (optional)…</option>${presetOptions}
+                </select>
+                <button type="button" onclick="applyEmployeePermissionPreset()" class="text-[11px] px-3 py-1.5 rounded-lg bg-primary/15 text-primary border border-primary/30 font-semibold cursor-pointer whitespace-nowrap">Apply</button>
+            </div>
+            <div class="text-[9px] text-textSec mb-3">Presets just tick the boxes below — nothing is saved until you toggle a permission, and every box stays individually editable.</div>`;
+
+            const groupsHtml = Object.entries(categories).map(([category, rows]) => {
+                const rowsHtml = rows.map(row => {
+                    const disabled = !row.editable_by_me;
+                    const stateLabel = disabled ? 'Hard restriction' : (row.is_override ? (row.current_effective ? 'Explicit grant' : 'Explicit denial') : 'Inherited default');
+                    const stateColor = disabled ? 'text-textSec' : (row.is_override ? (row.current_effective ? 'text-success' : 'text-danger') : 'text-textSec');
+                    return `<label class="flex items-center justify-between gap-2 py-1.5 border-b border-borderCol/40 last:border-0 ${disabled ? 'opacity-50' : 'cursor-pointer'}">
+                        <span class="flex items-center gap-2 min-w-0">
+                            <input type="checkbox" data-permission-code="${escapeHtml(row.code)}" ${row.current_effective ? 'checked' : ''} ${disabled ? 'disabled' : ''}
+                                onchange="toggleEmployeePermissionCheckbox(this)" class="accent-primary cursor-pointer">
+                            <span class="text-[11px] text-textMain truncate">${escapeHtml(row.label)}${row.reserved ? ' <span class=\"text-[8px] text-textSec\">(coming soon)</span>' : ''}</span>
+                        </span>
+                        <span class="text-[9px] ${stateColor} shrink-0">${stateLabel}</span>
+                    </label>`;
+                }).join('');
+                return `<div class="mb-3">
+                    <div class="text-[9px] font-bold uppercase tracking-wider text-textSec mb-1">${escapeHtml(category)}</div>
+                    <div class="bg-bgMain border border-borderCol rounded-xl px-3">${rowsHtml}</div>
+                </div>`;
+            }).join('');
+
+            box.innerHTML = presetRow + (groupsHtml || `<div class="py-8 text-center text-xs text-textSec">No permissions to show.</div>`);
+        }
+
+        function applyEmployeePermissionPreset() {
+            const key = document.getElementById('employee-permissions-preset')?.value;
+            const preset = JOB_PRESETS[key];
+            if (!preset || !employeePermissionsData) return;
+            const grantSet = new Set(preset.grants);
+            const checkboxes = document.querySelectorAll('#employee-permissions-body input[data-permission-code]');
+            checkboxes.forEach(cb => {
+                if (cb.disabled) return; // never touch a hard-restricted/uneditable row
+                const wants = grantSet.has(cb.dataset.permissionCode);
+                if (cb.checked !== wants) { cb.checked = wants; toggleEmployeePermissionCheckbox(cb); }
+            });
+        }
+
+        async function toggleEmployeePermissionCheckbox(checkbox) {
+            const code = checkbox.dataset.permissionCode;
+            const granted = checkbox.checked;
+            checkbox.disabled = true;
+            try {
+                const r = await fetch(`${API_URL}/users/${employeePermissionsTargetId}/permissions`, {
+                    method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+                    body: JSON.stringify({ permission: code, granted }),
+                });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) {
+                    showToast(friendlyErrorMessage(d, "Could not update this permission."), "error");
+                    checkbox.checked = !granted; // revert — never leave the UI claiming a save that didn't happen
+                } else {
+                    await loadEmployeePermissions(); // re-render from the server's own response, never assume
+                }
+            } catch (_) {
+                showToast("Could not update this permission. Please try again.", "error");
+                checkbox.checked = !granted;
+            } finally {
+                checkbox.disabled = false;
+            }
         }
 
         // Exports exactly the filtered set getFilteredEmployees() already
@@ -23555,8 +23753,23 @@
             if (brainHistoryWrap && !brainHistoryWrap.contains(event.target)) closeBusinessBriefHistoryCustomPanel();
         });
 
-        async function openTeamPresenceModal(){ if(!authToken)return; document.getElementById('team-presence-modal').classList.remove('hidden'); await loadTeamPresence(); }
-        function closeTeamPresenceModal(){document.getElementById('team-presence-modal').classList.add('hidden');}
+        // Live refresh while the modal is open (section 24) — simplest reliable
+        // implementation for the current architecture: lightweight polling,
+        // no WebSocket infrastructure. 20-second interval: frequent enough
+        // that a login/logout or an Online<->Inactive transition shows up
+        // promptly for someone watching, without hammering the endpoint.
+        let teamPresencePollTimer = null;
+        async function openTeamPresenceModal(){
+            if(!authToken)return;
+            document.getElementById('team-presence-modal').classList.remove('hidden');
+            await loadTeamPresence();
+            if (teamPresencePollTimer) clearInterval(teamPresencePollTimer);
+            teamPresencePollTimer = setInterval(loadTeamPresence, 20000);
+        }
+        function closeTeamPresenceModal(){
+            document.getElementById('team-presence-modal').classList.add('hidden');
+            if (teamPresencePollTimer) { clearInterval(teamPresencePollTimer); teamPresencePollTimer = null; }
+        }
         // Team Presence shows the full employee roster (same underlying directory
         // as Employees) with each person's current/last known presence state
         // merged in. Core profile fields never disappear when someone goes
@@ -23579,14 +23792,21 @@
                 c.innerHTML = employees.map(x => {
                     const name = `${x.firstname||''} ${x.lastname||''}`.trim() || x.username;
                     const roleLabel = ({admin:t("team.admin"),manager:t("team.manager"),staff:t("team.staff")})[x.role] || x.role;
+                    // Server-authoritative status only (section 27) — this
+                    // renders exactly what compute_presence_status() in
+                    // main.py decided; it never re-derives Online/Inactive/
+                    // Offline from timestamps itself.
                     let presenceHtml;
-                    if (x.online) {
+                    if (x.status === "online") {
                         presenceHtml = `<div class="text-success text-[10px] font-semibold">● Online</div><div class="text-[10px] text-textSec">Online since ${formatBusinessDateTime(x.online_since)}</div>`;
+                    } else if (x.status === "inactive") {
+                        presenceHtml = `<div class="text-warning text-[10px] font-semibold">◐ Inactive</div><div class="text-[10px] text-textSec">Last active ${formatBusinessDateTime(x.last_activity_at || x.last_seen_at)}</div>`;
                     } else if (x.signed_out_at) {
                         // Session ended via an explicit sign-out.
                         presenceHtml = `<div class="text-textSec text-[10px] font-semibold">○ Offline</div><div class="text-[10px] text-textSec">Signed out ${formatBusinessDateTime(x.signed_out_at)}</div>`;
                     } else if (x.last_seen_at) {
-                        // Session simply went stale (timed out / tab closed) — no explicit sign-out was recorded.
+                        // Session simply went stale (heartbeat missing beyond the
+                        // ~3-minute threshold) — no explicit sign-out was recorded.
                         presenceHtml = `<div class="text-textSec text-[10px] font-semibold">○ Offline</div><div class="text-[10px] text-textSec">Last seen ${formatBusinessDateTime(x.last_seen_at)}</div>`;
                     } else {
                         presenceHtml = `<div class="text-textSec text-[10px] font-semibold">○ Offline</div><div class="text-[10px] text-textSec">No presence recorded yet</div>`;
@@ -23609,8 +23829,8 @@
             const rows = lastTeamPresence.map(x => ({
                 name: `${x.firstname || ""} ${x.lastname || ""}`.trim() || x.username,
                 role: x.role, position: x.position || "",
-                status: x.online ? "Online" : "Offline",
-                online_since: x.online_since || null, last_seen_at: x.last_seen_at || null, signed_out_at: x.signed_out_at || null,
+                status: x.status ? (x.status.charAt(0).toUpperCase() + x.status.slice(1)) : (x.online ? "Online" : "Offline"),
+                online_since: x.online_since || null, last_activity_at: x.last_activity_at || null, last_seen_at: x.last_seen_at || null, signed_out_at: x.signed_out_at || null,
             }));
             return {
                 filenameBase: `cauldra_team_presence_${csvDateStamp()}`,
@@ -23624,6 +23844,7 @@
                         { key: "position", label: "Position", type: "text" },
                         { key: "status", label: "Status", type: "text" },
                         { key: "online_since", label: "Online Since", type: "datetime" },
+                        { key: "last_activity_at", label: "Last Active", type: "datetime" },
                         { key: "last_seen_at", label: "Last Seen", type: "datetime" },
                         { key: "signed_out_at", label: "Signed Out At", type: "datetime" },
                     ],
@@ -24231,7 +24452,12 @@
                     // drain any pending offline work (covers app startup via
                     // refreshAccessTokenAtStartup(), the 10-minute heartbeat,
                     // and the visibilitychange-triggered check, since all three
-                    // funnel through this one function).
+                    // funnel through this one function). Also (re)establishes
+                    // Presence for the same reason — this is the single most
+                    // important path for it, since it's what runs on every
+                    // fresh page load/app-startup session restoration.
+                    startPresenceHeartbeat();
+                    currentEffectivePermissions = data.permissions || {};
                     scheduleSyncSoon();
                     __diagOutcome = "success";
                     return true;
@@ -24344,6 +24570,7 @@
             stopAuthRefreshHeartbeat();
             authToken = "";
             currentUserProfile = null;
+            currentEffectivePermissions = {};
             businessProfile = null;
             globalProducts = [];
             inventoryViewProducts = [];
@@ -24393,9 +24620,6 @@
                     credentials: "include",
                     headers: { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" }
                 });
-                // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) -----
-                console.log(`[auth-diag-frontend] validateAuthenticationSession() GET /auth/me status=${res.status}`);
-                // --- END TEMPORARY DEV DIAGNOSTIC -------------------------------
                 if (!res.ok) {
                     if (res.status === 401 && await refreshAccessToken()) return true;
                     if (res.status === 401) handleAuthenticationFailure("Your session has expired. Please sign in again.");
@@ -24420,6 +24644,8 @@
                 syncLanguageFromProfile(businessProfile);
                 updateGuestHeaderState();
                 startAuthRefreshHeartbeat();
+                startPresenceHeartbeat(); // Presence session established immediately (section 21)
+                currentEffectivePermissions = data.permissions || {};
                 scheduleSyncSoon(); // session validated — a sensible moment to drain any pending offline work
                 if (currentUserProfile.must_change_password) {
                     const lock = document.getElementById("password-change-modal");

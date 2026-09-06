@@ -1722,6 +1722,17 @@
         </div>
     </div>
 
+    <!-- ACCESS & PERMISSIONS MODAL (Team Management > Employee > Access & Permissions) -->
+    <div id="employee-permissions-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-[110] hidden flex items-center justify-center p-4">
+        <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-md w-full shadow-2xl flex flex-col max-h-[85vh]">
+            <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3 shrink-0">
+                <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-shield-halved text-cyan-400"></i> Access &amp; Permissions</h3>
+                <button type="button" onclick="closeEmployeePermissionsModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+            </div>
+            <div id="employee-permissions-body" class="overflow-y-auto flex-1 pr-1"></div>
+        </div>
+    </div>
+
     <!-- ADD EMPLOYEE MODAL -->
     <div id="add-employee-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-[110] hidden flex items-center justify-center p-4">
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-sm w-full shadow-2xl flex flex-col">
