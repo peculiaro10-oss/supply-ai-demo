@@ -1467,6 +1467,9 @@
                     historyAll: "All", historyRecommendations: "Recommendations", historyForecasts: "Forecasts", historyEmpty: "No earlier intelligence has been recorded yet.",
                     healthyState: "Nothing urgent needs your attention right now.", noComingUp: "No supported forecast is ready yet.", noCurrentRecommendation: "No supported recommendation is needed right now.",
                     dashAttentionEmpty: "Nothing needs your attention right now.", dashComingEmpty: "Still learning your business patterns.", dashRecommendEmpty: "More data is needed before Cauldra can make a reliable recommendation.",
+                    dashLearningEmpty: "Cauldra is still learning from your business activity.",
+                    patternsLearned: "Patterns learned", predictionsConfirmed: "Predictions confirmed", daysObserved: "Days observed",
+                    learningNote: "Cauldra is continuously learning from your sales, inventory, and business patterns.",
                     unavailable: "Business Brain unavailable", stillLearning: "Cauldra is still learning from your business data.",
                     attentionCount: { one: "1 thing deserves your attention.", other: "{count} things deserve your attention." },
                     noPriorities: "No immediate priorities were found in your current data.",
@@ -24561,19 +24564,22 @@
             return `<div class="business-brief-area ${extraClass}"><h4><i class="fa-solid ${icon} ${tone}"></i>${brainEsc(title)}</h4><div class="business-brief-area-body">${body}</div></div>`;
         }
 
-        // Dashboard-only variant of businessBriefCard: a <details> section that is
-        // collapsible on phones (compact stacked list) and forced open, card-style,
-        // on tablet/desktop via CSS. The modal keeps using businessBriefCard.
-        function businessBriefDashCard(title, icon, tone, body, opts = {}) {
-            const hint = opts.hint ? `<span class="bb-sec-hint">${brainEsc(opts.hint)}</span>` : '';
-            return `<details class="business-brief-area business-brief-dash-section"${opts.open ? ' open' : ''}>`
-                + `<summary><span class="bb-sec-title"><i class="fa-solid ${icon} ${tone}"></i>${brainEsc(title)}</span>${hint}<i class="fa-solid fa-chevron-down bb-sec-chevron" aria-hidden="true"></i></summary>`
-                + `<div class="business-brief-area-body">${body}</div></details>`;
+        // Dashboard-only variant of businessBriefCard: same always-visible panel
+        // shape, with an extra class (business-brief-dash-section, see
+        // base.css) for the dashboard's more compact "briefing strip" sizing.
+        // Deliberately NOT a <details>/<summary> accordion any more — the
+        // dashboard summary must stay visibly open at every breakpoint, with
+        // its content injected immediately, never requiring a click to
+        // reveal. Clicking is reserved for "View all" links only, which
+        // navigate to the full Business Brain and never collapse this panel.
+        function businessBriefDashCard(title, icon, tone, body) {
+            return `<div class="business-brief-area business-brief-dash-section"><h4><i class="fa-solid ${icon} ${tone}"></i>${brainEsc(title)}</h4>`
+                + `<div class="business-brief-area-body">${body}</div></div>`;
         }
 
         function businessBriefMore(total) {
             const additional = Math.max(0, Number(total || 0) - 2);
-            return additional ? `<button type="button" class="business-brief-more" onclick="checkFeatureAccess('business brain', openBusinessBrainModal)">View ${additional} more <span aria-hidden="true">→</span></button>` : '';
+            return additional ? `<button type="button" class="business-brief-more" onclick="checkFeatureAccess('business brain', openBusinessBrainModal)">View all (${additional}) <span aria-hidden="true">→</span></button>` : '';
         }
 
         function businessBriefSignalRow(item, compact = false) {
@@ -24619,6 +24625,30 @@
             return `Based on ${days} completed business day${days === 1 ? '' : 's'}, Cauldra is tracking ${patterns} supported pattern${patterns === 1 ? '' : 's'} and ${evaluated} evaluated forecast${evaluated === 1 ? '' : 's'}.`;
         }
 
+        // Dashboard-only compact metrics for "What Cauldra Is Learning" — see
+        // getBusinessBriefLearningSummary() above for the full modal's prose
+        // variant, which this does not replace or alter. When there isn't yet
+        // enough history (data.learning) this shows the same honest "still
+        // learning" state as everywhere else; otherwise it shows real counts
+        // only (patterns learned, predictions confirmed, days observed) plus
+        // a static, non-data descriptive note. Never invents a number, and
+        // omits any metric the backend doesn't supply.
+        function getBusinessBriefLearningBody(data = businessBrainData) {
+            if (!data) return businessBriefEmpty('fa-chart-simple', t("businessBrain.dashLearningEmpty"));
+            if (data.learning) {
+                return businessBriefEmpty('fa-seedling', data.learning_message || t("businessBrain.dashLearningEmpty"), 'text-primary');
+            }
+            const patterns = (data.memory || []).length;
+            const evaluated = Number(data.outcomes?.evaluated_predictions || 0);
+            const days = Number(data.history_days || 0);
+            const stat = (label, value) => `<div class="business-brief-learning-stat"><span>${brainEsc(label)}</span><strong>${brainEsc(String(value))}</strong></div>`;
+            return `<div class="business-brief-learning-stats">`
+                + stat(t("businessBrain.patternsLearned"), patterns)
+                + stat(t("businessBrain.predictionsConfirmed"), evaluated)
+                + stat(t("businessBrain.daysObserved"), days)
+                + `</div><p class="business-brief-learning-note">${brainEsc(t("businessBrain.learningNote"))}</p>`;
+        }
+
         function renderDashboardContext() {
             const salesRow = document.getElementById('dashboard-sales-today-row');
             const salesAmount = document.getElementById('dashboard-sales-today-amount');
@@ -24661,12 +24691,12 @@
             const recommendationBody = recommendations.length
                 ? recommendations.slice(0, 2).map(row => businessBriefSignalRow(row, true)).join('') + businessBriefMore(recommendations.length)
                 : businessBriefEmpty('fa-circle-info', t("businessBrain.dashRecommendEmpty"));
-            const learningBody = businessBriefEmpty('fa-chart-simple', getBusinessBriefLearningSummary(), businessBrainData?.learning ? 'text-primary' : 'text-textSec');
+            const learningBody = getBusinessBriefLearningBody();
             container.innerHTML = [
-                businessBriefDashCard(t("businessBrain.needsYourAttention"), 'fa-bell', attention.length ? 'text-warning' : 'text-success', attentionBody, { open: attention.length > 0, hint: attention.length ? String(attention.length) : '' }),
-                businessBriefDashCard(t("businessBrain.comingUp"), 'fa-calendar-days', 'text-primary', comingBody, { hint: coming.length ? String(coming.length) : '' }),
-                businessBriefDashCard(t("businessBrain.cauldraRecommends"), 'fa-lightbulb', 'text-success', recommendationBody, { hint: recommendations.length ? String(recommendations.length) : '' }),
-                businessBriefDashCard(t("businessBrain.whatCauldraIsLearning"), 'fa-chart-simple', 'text-primary', learningBody, {}),
+                businessBriefDashCard(t("businessBrain.needsYourAttention"), 'fa-bell', attention.length ? 'text-warning' : 'text-success', attentionBody),
+                businessBriefDashCard(t("businessBrain.comingUp"), 'fa-calendar-days', 'text-primary', comingBody),
+                businessBriefDashCard(t("businessBrain.cauldraRecommends"), 'fa-lightbulb', 'text-success', recommendationBody),
+                businessBriefDashCard(t("businessBrain.whatCauldraIsLearning"), 'fa-chart-simple', 'text-primary', learningBody),
             ].join('');
         }
 

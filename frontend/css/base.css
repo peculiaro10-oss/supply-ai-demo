@@ -163,22 +163,23 @@
         .bd-metric>strong{font-size:13px;font-weight:800;line-height:1.15;font-variant-numeric:tabular-nums;}
         .business-day-bar #business-day-header-action-btn{margin-left:.9rem;}
 
-        /* Business Brain dashboard: four sections, collapsible on phones, forced
-           open (card-style) on tablet/desktop. Empty sections show honest states. */
-        .business-brief-dash-section>summary{list-style:none;display:flex;align-items:center;gap:.5rem;cursor:pointer;min-height:44px;}
-        .business-brief-dash-section>summary::-webkit-details-marker{display:none;}
-        .business-brief-dash-section>summary .bb-sec-title{display:flex;align-items:center;gap:.45rem;color:#E2E8F0;font-size:11px;font-weight:800;}
-        .business-brief-dash-section>summary .bb-sec-hint{margin-left:auto;font-size:10px;font-weight:700;color:#7C8BA1;background:#0B1120;border:1px solid #172033;border-radius:999px;padding:.03rem .42rem;}
-        .business-brief-dash-section>summary .bb-sec-chevron{font-size:9px;color:#7C8BA1;transition:transform .15s ease;margin-left:.15rem;}
-        .business-brief-dash-section[open]>summary .bb-sec-chevron{transform:rotate(180deg);}
-        .business-brief-dash-section>.business-brief-area-body{margin-top:.6rem;}
+        /* Business Brain dashboard: four compact panels, ALWAYS visibly open at
+           every breakpoint (including phones) — never collapsible/accordion.
+           Plain divs (see businessBriefDashCard() in app.js), styled as a
+           tighter "briefing strip" variant of the full modal's
+           .business-brief-area: smaller padding, tighter title margin, and a
+           smaller title so four columns stay compact on desktop. Empty
+           sections show honest states, never hidden. */
+        .business-brief-dash-section{padding:.7rem .75rem;}
+        .business-brief-dash-section>h4{font-size:10px;margin-bottom:.5rem;}
+        .business-brief-dash-section>.business-brief-area-body{gap:.4rem;}
+        .business-brief-learning-stats{display:flex;flex-direction:column;gap:.3rem;}
+        .business-brief-learning-stat{display:flex;align-items:baseline;justify-content:space-between;gap:.5rem;font-size:10px;color:#7C8BA1;}
+        .business-brief-learning-stat>strong{color:#E2E8F0;font-size:12px;font-weight:800;}
+        .business-brief-learning-note{margin-top:.15rem;color:#7C8BA1;font-size:10px;line-height:1.45;}
 
         @media (min-width:640px){
             .business-brief-grid,.business-brief-overview-grid,.business-brief-memory-groups{grid-template-columns:repeat(2,minmax(0,1fr));}
-            .business-brief-dash-section>.business-brief-area-body{display:block!important;margin-top:0;}
-            .business-brief-dash-section>summary{cursor:default;min-height:0;margin-bottom:.65rem;}
-            .business-brief-dash-section>summary .bb-sec-hint,
-            .business-brief-dash-section>summary .bb-sec-chevron{display:none;}
         }
 
         /* iPad portrait / small laptop: Business Day metrics drop to their own
@@ -276,9 +277,10 @@
             .bd-metrics{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;}
             .bd-metric{margin-left:0;padding:.55rem .65rem;border:1px solid #172033;border-radius:.7rem;}
             .business-day-bar #business-day-header-action-btn{margin-left:0;width:100%;}
-            /* Business Brain sections: compact collapsible list on phones. */
-            .business-brief-dash-section{padding:.15rem .75rem;}
-            .business-brief-dash-section>.business-brief-area-body{margin-top:.5rem;padding-bottom:.35rem;}
+            /* Business Brain sections: always visible on phones too — stacked,
+               compact, no accordion/collapse and no tap required to see data. */
+            .business-brief-grid{grid-template-columns:minmax(0,1fr);gap:.6rem;}
+            .business-brief-dash-section{padding:.65rem .7rem;}
             #business-brain-modal{padding:0!important;align-items:stretch!important;}
             .business-brief-modal-shell{max-height:100dvh!important;min-height:100dvh;border-radius:0!important;border-left:0!important;border-right:0!important;padding:1rem!important;}
             .brain-tab-btn,.business-brief-history-filters button{min-height:44px;}
