@@ -16023,10 +16023,22 @@
             }
         }
 
-        // Wire the four country-aware phone fields named by the spec. Each
-        // getRegionIso2 reads whatever country-context state that SPECIFIC
-        // screen already maintains — resolvePhoneRegionIso2() is what keeps
-        // them from quietly diverging on how "the country" is read.
+        // Loud, one-time startup check: a missing/failed-to-load vendor
+        // script must never fail silently as "formatting just doesn't
+        // happen" — every wireCountryAwarePhoneInput() call below already
+        // no-ops safely if the library isn't there, but this makes the ROOT
+        // CAUSE (the script tag 404ing, wrong filename, blocked by CSP,
+        // etc.) immediately visible in the console instead of looking like a
+        // JS logic bug.
+        if (typeof window.libphonenumber === "undefined") {
+            console.error("[phone] libphonenumber-js failed to load — phone formatting/validation is disabled. Check that /assets/vendor/libphonenumber-js-1.11.15.min.js actually loads (Network tab) and that its <script> tag is present before app.js in index.html.");
+        }
+
+        // Wire every real phone-number input in the app to the SAME
+        // country-aware formatter/validator. Each getRegionIso2 reads
+        // whatever country-context state that SPECIFIC screen already
+        // maintains — resolvePhoneRegionIso2() is what keeps them from
+        // quietly diverging on how "the country" is read.
         wireCountryAwarePhoneInput(
             document.getElementById("reg-biz-phone"),
             () => window.selectedBusinessContext,
@@ -16037,10 +16049,26 @@
             () => window.selectedBusinessContext, // reuses the business country — no separate owner-country selector (requirement 10)
             document.getElementById("reg-owner-phone-error"),
         );
+        // The Team Management "Add Employee" modal — its value IS actually
+        // submitted, by handleCreateEmployee() -> POST /users.
         wireCountryAwarePhoneInput(
             document.getElementById("emp-phone"),
             () => resolveBusinessCountryContext(),
             document.getElementById("emp-phone-error"),
+        );
+        // The sign-in screen's own "create-account-extra-fields" phone input.
+        // Wired for live formatting only, same as every other field — but
+        // note (see the audit in this session's report) that
+        // handleSecureEmployeeAuthSubmit() currently never reads or submits
+        // firstname/lastname/email/phone from this form at all; it only
+        // signs in with username/password. That gap predates this change
+        // and is not a phone-formatting bug, so it is left exactly as-is
+        // rather than invented/redesigned here — flagging it is as far as
+        // this task goes.
+        wireCountryAwarePhoneInput(
+            document.getElementById("employee-create-phone"),
+            () => resolveBusinessCountryContext(),
+            null,
         );
         wireCountryAwarePhoneInput(
             document.getElementById("forgot-phone"),
@@ -16048,6 +16076,23 @@
             document.getElementById("forgot-phone-error"),
         );
         document.getElementById("forgot-business-id")?.addEventListener("blur", resolveForgotPasswordBusinessContext);
+        // Business Profile settings (edit an EXISTING business's phone) and
+        // My Profile (edit your own phone) — both submit through
+        // normalizeBusinessPhone() already (unchanged call sites), so wiring
+        // live formatting here is the same pattern extended to the two
+        // profile-update surfaces the original task also named ("normalize
+        // phone changes through existing business/user profile-update
+        // endpoints"), not a new feature.
+        wireCountryAwarePhoneInput(
+            document.getElementById("company-phone-input"),
+            () => businessProfile,
+            null,
+        );
+        wireCountryAwarePhoneInput(
+            document.getElementById("profile-phone"),
+            () => businessProfile,
+            null,
+        );
 
         function applyBusinessLocale(profile = businessProfile) {
             if (!profile) return;
