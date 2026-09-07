@@ -18817,27 +18817,9 @@
         // so this can never actually proceed for an unverified email.
         async function startOnboardingPaymentVerification() {
             const email = (evVerifiedEmail || '').trim();
-            if (!email) { evShowState(1); return; }
-            if (!onboardingSelectedPlan) { switchBizAuthView('plan'); return; }
-            const btn = document.getElementById("ev-continue-paystack-btn");
-            if (btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Starting secure payment…`; }
-            try {
-                const res = await fetch(`${API_URL}/onboarding/payment/init`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ email, plan: onboardingSelectedPlan, billing_interval: onboardingSelectedInterval })
-                });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok) throw new Error(showApiError(res, data, t("subscription.couldNotStartVerification")));
-                // Only the reference travels through the redirect — the backend
-                // re-derives plan/interval from its own verified record when the
-                // user returns, never from anything stashed client-side.
-                sessionStorage.setItem('cauldra_pending_onboarding_reference', data.reference);
-                window.location.href = data.authorization_url;
-            } catch (err) {
-                showToast(friendlyErrorMessage(err?.message || err, t("subscription.couldNotStartVerification")), "error");
-                if (btn) { btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-lock"></i> Continue to Paystack`; }
-            }
+            if (!email) {evShowState(1); return;}
+            if (!onboardingSelectedPlan) {switchBizAuthView('plan'); return;}
+            return CauldraPayments.start('onboarding', {email, plan:onboardingSelectedPlan, billing_interval:onboardingSelectedInterval});
         }
         const continueToPaystackAfterVerify = startOnboardingPaymentVerification;
 
@@ -19896,14 +19878,19 @@
                 nextBillingBox.classList.add("hidden");
             }
 
-            const cardBox = document.getElementById("billing-card-box");
-            if (usage.card_verified && usage.card_last4) {
-                cardBox.classList.remove("hidden");
-                const brand = usage.card_type ? usage.card_type.charAt(0).toUpperCase() + usage.card_type.slice(1) : 'Card';
-                document.getElementById("billing-card-value").textContent = `${brand} •••• ${usage.card_last4}`;
-            } else {
-                cardBox.classList.add("hidden");
-            }
+            const cardBox = document.getElementById('billing-card-box');
+            cardBox.classList.remove('hidden');
+            const value = document.getElementById('billing-card-value');
+            value.textContent = usage.card_verified && usage.card_last4
+                ? `${usage.card_type || 'Card'} •••• ${usage.card_last4}` : 'No saved payment method';
+            document.getElementById('billing-card-expiry').textContent = usage.card_exp_month && usage.card_exp_year
+                ? `Expires ${usage.card_exp_month}/${usage.card_exp_year}` : '';
+            const methodButton = document.getElementById('billing-method-button');
+            methodButton.hidden = getCurrentRole() !== 'admin';
+            methodButton.textContent = usage.card_verified ? 'Change payment method' : 'Add payment method';
+            methodButton.onclick = () => usage.can_start_trial
+                ? openTrialConfirm(usage.plan, usage.billing_interval)
+                : CauldraPayments.start('method');
 
             const cancelRow = document.getElementById("billing-cancel-row");
             const cancelBtn = document.getElementById("billing-cancel-btn");
@@ -20078,27 +20065,12 @@
         }
 
         async function confirmStartTrial() {
-            if (!pendingTrialSelection) return;
-            if (!document.getElementById("trial-consent-checkbox").checked) {
-                showToast(t("subscription.agreeTermsFirst"), "error");
-                return;
+            if (!pendingTrialSelection || !document.getElementById('trial-consent-checkbox').checked) {
+                showToast(t('subscription.agreeTermsFirst'), 'error'); return;
             }
-            const btn = document.getElementById("trial-confirm-submit-btn");
-            btn.disabled = true; btn.textContent = 'Starting…';
-            try {
-                const res = await fetch(`${API_URL}/subscription/trial/init`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
-                    body: JSON.stringify({ plan: pendingTrialSelection.plan, billing_interval: pendingTrialSelection.interval })
-                });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok) throw new Error(showApiError(res, data, t("subscription.couldNotStartCardVerification")));
-                sessionStorage.setItem('cauldra_pending_trial_reference', data.reference);
-                window.location.href = data.authorization_url;
-            } catch (err) {
-                showToast(friendlyErrorMessage(err?.message || err, t("subscription.couldNotStartCardVerification")), "error");
-                btn.disabled = false; btn.textContent = 'Start 14-Day Free Trial';
-            }
+            const selection = pendingTrialSelection;
+            closeTrialConfirmModal();
+            return CauldraPayments.start('trial', {plan:selection.plan, billing_interval:selection.interval});
         }
 
         // --- Cancel trial / subscription ---
@@ -20145,19 +20117,26 @@
 
         // --- Direct paid checkout / free plan switch ---
         async function subscribeNow(plan, interval) {
-            try {
-                const res = await fetch(`${API_URL}/subscription/checkout`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
-                    body: JSON.stringify({ plan, billing_interval: interval })
-                });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok) throw new Error(showApiError(res, data, t("subscription.couldNotStartCheckout")));
-                sessionStorage.setItem('cauldra_pending_checkout_reference', data.reference || '');
-                window.location.href = data.authorization_url;
-            } catch (err) {
-                showToast(friendlyErrorMessage(err?.message || err, t("subscription.couldNotStartCheckout")), "error");
+            const rank = {core:0, starter:1, business:2, enterprise:3};
+            const current = String(billingUsageCache?.plan || '').toLowerCase();
+            if (['active', 'past_due'].includes(billingUsageCache?.status)
+                    && rank[plan] > rank[current]) {
+                try {
+                    const response = await fetch(`${API_URL}/subscription/upgrade-quote`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: {'Content-Type':'application/json', 'Authorization':`Bearer ${authToken}`},
+                        body: JSON.stringify({plan, billing_interval:interval})
+                    });
+                    const quote = await response.json();
+                    if (!response.ok) throw new Error('upgrade_quote_failed');
+                    return CauldraPayments.start('upgrade', {quote_reference:quote.quote_reference});
+                } catch (_) {
+                    showToast('A secure upgrade quote could not be prepared. Please try again.', 'error');
+                    return;
+                }
             }
+            return CauldraPayments.start('checkout', {plan, billing_interval:interval});
         }
 
         async function switchPlanImmediate(plan, interval) {
@@ -20254,159 +20233,8 @@
 
         // --- Return from Paystack (trial card verification or direct checkout) ---
         async function handlePaystackReturn() {
-            const params = new URLSearchParams(window.location.search);
-            const reference = params.get('reference') || params.get('trxref');
-            if (!reference) return;
-
-            // New-business onboarding references are generated server-side with
-            // the cauldra_onboard_ prefix. Do not require sessionStorage to
-            // survive the trip to Paystack and back.
-            const pendingOnboardingRef = sessionStorage.getItem('cauldra_pending_onboarding_reference');
-            const isOnboardingReturn =
-                String(reference).startsWith('cauldra_onboard_') ||
-                pendingOnboardingRef === reference;
-
-            if (isOnboardingReturn) {
-                if (redirectAuthenticatedBusinessToDashboard()) {
-                    sessionStorage.removeItem('cauldra_pending_onboarding_reference');
-                    window.history.replaceState({}, document.title, '/');
-                    return;
-                }
-                openBusinessAuthModal();
-                switchBizAuthView('payment-verifying');
-
-                try {
-                    const res = await fetch(`${API_URL}/onboarding/payment/confirm`, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Accept': 'application/json'
-                        },
-                        body: JSON.stringify({ reference })
-                    });
-
-                    const data = await res.json().catch(() => ({}));
-
-                    if (!res.ok) {
-                        throw new Error(showApiError(
-                            res,
-                            data,
-                            "We couldn't verify your payment method. Please try again."
-                        ));
-                    }
-
-                    // The backend is authoritative for the selected plan and
-                    // billing interval after Paystack verification.
-                    onboardingSelectedPlan = data.plan;
-                    onboardingSelectedInterval = data.billing_interval;
-                    verifiedOnboardingReference = reference;
-                    // Prefill (not lock) the owner-email field with the address that
-                    // was actually verified - the backend independently enforces the
-                    // match at registration regardless of what ends up submitted.
-                    if (data.email) {
-                        const ownerEmailInput = document.getElementById('reg-owner-email');
-                        if (ownerEmailInput && !ownerEmailInput.value) ownerEmailInput.value = data.email;
-                    }
-
-                    sessionStorage.removeItem('cauldra_pending_onboarding_reference');
-
-                    // Remove the Paystack query parameters only after the
-                    // server has successfully verified the reference.
-                    window.history.replaceState(
-                        {},
-                        document.title,
-                        window.location.pathname
-                    );
-
-                    if (!publicPlanCatalog) {
-                        await loadPublicPlanCatalog();
-                    }
-
-                    const refundNotice = data.refund_status === 'succeeded'
-                        ? ' The verification charge refund has succeeded.'
-                        : data.refund_status === 'failed'
-                            ? ' The verification charge refund failed and can be retried safely.'
-                            : ' The verification charge refund is pending Paystack processing.';
-                    showToast(
-                        "Payment method verified! Complete your business details to start your free trial." + refundNotice,
-                        "success"
-                    );
-
-                    // Required new-business sequence:
-                    // Paystack -> server verification -> Register Your Business
-                    switchBizAuthView('register');
-                } catch (err) {
-                    showToast(
-                        friendlyErrorMessage(
-                            err?.message || err,
-                            "We couldn't verify your payment method. Please try again."
-                        ),
-                        "error"
-                    );
-
-                    switchBizAuthView('payment-email');
-                }
-
-                return;
-            }
-
-            // Existing authenticated Paystack flows remain unchanged.
-            if (!authToken) return;
-
-            const pendingTrialRef = sessionStorage.getItem('cauldra_pending_trial_reference');
-            const pendingCheckoutRef = sessionStorage.getItem('cauldra_pending_checkout_reference');
-            window.history.replaceState({}, document.title, window.location.pathname);
-
-            if (pendingTrialRef && pendingTrialRef === reference) {
-                sessionStorage.removeItem('cauldra_pending_trial_reference');
-                try {
-                    const res = await fetch(`${API_URL}/subscription/trial/confirm`, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${authToken}`
-                        },
-                        body: JSON.stringify({ reference })
-                    });
-                    const data = await res.json().catch(() => ({}));
-                    if (!res.ok) throw new Error(showApiError(res, data, t("subscription.couldNotConfirmCardVerification")));
-                    showToast(t("subscription.trialStarted"), "success");
-                    if (data.refund_status === 'succeeded') {
-                        showToast("The verification charge refund has succeeded.", "success");
-                    } else if (data.refund_status === 'failed') {
-                        showToast("The trial is active, but the verification charge refund failed and can be retried safely.", "error");
-                    } else {
-                        showToast("The verification charge refund is pending Paystack processing.", "info");
-                    }
-                } catch (err) {
-                    showToast(friendlyErrorMessage(err?.message || err, t("subscription.couldNotConfirmCardVerification")), "error");
-                }
-                return;
-            }
-
-            if (pendingCheckoutRef && pendingCheckoutRef === reference) {
-                sessionStorage.removeItem('cauldra_pending_checkout_reference');
-                try {
-                    const res = await fetch(`${API_URL}/subscription/checkout/confirm`, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${authToken}`
-                        },
-                        body: JSON.stringify({ reference })
-                    });
-                    const data = await res.json().catch(() => ({}));
-                    if (!res.ok) throw new Error(showApiError(res, data, t("subscription.couldNotConfirmPayment")));
-                    showToast(t("subscription.paymentConfirmed"), "success");
-                    checkSubscriptionWarningForDashboard();
-                    loadBillingPanel();
-                } catch (err) {
-                    showToast(friendlyErrorMessage(err?.message || err, t("subscription.couldNotConfirmPayment")), "error");
-                }
-            }
+            const params = new URLSearchParams(location.search);
+            return CauldraPayments.resumeReturn(params.get('reference') || params.get('trxref'));
         }
 
         function populateBusinessForm(profile) {
@@ -29246,7 +29074,7 @@
                 await handleEmailVerifyReturn();
                 return;
             }
-            const hasPaymentReturn = !!(params.get('reference') || params.get('trxref'));
+            const hasPaymentReturn = !!(params.get('reference') || params.get('trxref') || sessionStorage.getItem('cauldra_payment_attempt_v1'));
             if (hasPaymentReturn) {
                 await handlePaystackReturn();
                 return;

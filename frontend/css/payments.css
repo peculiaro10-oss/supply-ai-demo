@@ -1,0 +1,39 @@
+/* Shared payment UI: fluid width + bounded, independently scrolling body.
+   Paystack's checkout surface is owned and styled exclusively by Paystack. */
+#payment-overlay[hidden], #payment-overlay [hidden], #billing-method-button[hidden] { display: none !important; }
+#payment-overlay { position:fixed; inset:0; z-index:90; display:flex; align-items:center; justify-content:center; padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left)); background:rgba(0,0,0,.76); color:#e8eefb; font-family:Inter,system-ui,sans-serif; }
+.payment-dialog { width:100%; max-width:520px; max-height:calc(100vh - 24px); max-height:calc(100dvh - 24px); min-width:0; display:flex; flex-direction:column; border:1px solid #2b354b; border-radius:20px; background:#101827; box-shadow:0 24px 80px #0008; overflow:hidden; }
+.payment-header { flex-shrink:0; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 20px; border-bottom:1px solid #2b354b; }
+.payment-brand { font-size:14px; font-weight:800; letter-spacing:.15em; }
+.payment-body { min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:24px; overflow-wrap:anywhere; }
+.payment-eyebrow { color:#94a4c0; font-size:10px; letter-spacing:.12em; margin:0 0 8px; }
+#payment-title { font-size:24px; line-height:1.25; font-weight:750; margin:0 0 20px; }
+.payment-summary { border:1px solid #2e3c59; background:#0b1220; padding:16px; border-radius:12px; margin-bottom:16px; }
+#payment-plan { font-size:14px; text-transform:capitalize; }
+#payment-amount { font-size:28px; font-weight:750; margin-top:8px; }
+#payment-explanation, #payment-status { font-size:14px; line-height:1.65; }
+#payment-explanation { color:#b3bed2; }
+.payment-state { display:flex; gap:12px; align-items:center; margin:20px 0; padding:14px; background:#17243b; border-radius:12px; border:1px solid #30486a; }
+#payment-overlay[data-state=success] .payment-state { background:#0d3029; border-color:#22755c; }
+#payment-overlay[data-state=error] .payment-state { background:#33202b; border-color:#7a4051; }
+#payment-spinner { width:18px; height:18px; flex-shrink:0; border:2px solid #6e819e; border-top-color:#b7c9ff; border-radius:50%; animation:payment-spin .8s linear infinite; }
+.payment-actions { display:flex; flex-wrap:wrap; gap:10px; }
+.payment-actions button { flex:1 1 180px; }
+#payment-overlay button, .payment-action { min-height:44px; padding:10px 14px; border-radius:10px; border:1px solid #476ad1; background:#264bbe; color:#fff; font-size:13px; line-height:1.4; font-weight:650; cursor:pointer; white-space:normal; overflow-wrap:anywhere; }
+.payment-action { margin-top:12px; width:100%; }
+#payment-close { background:#192438!important; border-color:#44526b!important; }
+#payment-overlay button:focus-visible, #billing-modal button:focus-visible { outline:3px solid #adc6ff; outline-offset:3px; }
+#payment-overlay button:disabled { opacity:.55; cursor:wait; }
+.payment-security { color:#a7b6cf; text-align:center; font-size:12px; margin:20px 0 0; }
+#billing-modal > div { min-width:0; max-height:calc(100dvh - 32px); }
+#billing-modal .flex-1 { min-height:0; }
+#billing-modal button { min-height:44px; }
+#billing-plan-cards > *, #billing-card-box { min-width:0; overflow-wrap:anywhere; }
+#billing-card-value { white-space:normal; }
+@media (max-width:599px) { .payment-body { padding:18px; } .payment-header { padding:10px 16px; } #payment-title { font-size:22px; } .payment-actions { flex-direction:column; } .payment-actions button { flex:none; width:100%; } #billing-modal { padding:10px; } #billing-modal > div { max-height:calc(100dvh - 20px); } }
+@media (min-width:600px) and (max-width:1023px) { .payment-dialog { max-width:540px; } #billing-modal > div { max-width:680px; } }
+@media (min-width:1024px) and (max-width:1199px) { .payment-dialog { max-width:560px; } #billing-modal > div { max-width:760px; } }
+@media (min-width:1200px) { #billing-modal > div { max-width:800px; } }
+@media (max-height:500px) { #payment-overlay { align-items:flex-start; } .payment-body { padding:14px 18px; } #payment-title { margin-bottom:12px; } .payment-state { margin:12px 0; } }
+@media (prefers-reduced-motion:reduce) { #payment-spinner { animation:none; } }
+@keyframes payment-spin { to { transform:rotate(360deg); } }

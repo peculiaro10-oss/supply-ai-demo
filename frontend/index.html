@@ -129,6 +129,7 @@
     <script src="/assets/vendor/html5-qrcode-2.3.8.min.js"></script>
 
     <link rel="stylesheet" href="/css/base.css">
+    <link rel="stylesheet" href="/css/payments.css">
     <link rel="stylesheet" href="/css/dashboard-fixes.css">
 </head>
 <body class="bg-bgMain text-textMain font-sans antialiased min-h-screen flex selection:bg-primary/35 selection:text-primary" onclick="closeAllActionDropdowns(event)">
@@ -1411,7 +1412,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-2xl w-full shadow-2xl flex flex-col max-h-[90vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-credit-card text-primary"></i> Subscription &amp; Billing</h3>
-                <button type="button" onclick="closeBillingModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeBillingModal()" aria-label="Close Subscription and Billing" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <div class="flex-1 overflow-y-auto pr-1 space-y-4 text-xs">
@@ -1447,6 +1448,8 @@
                             <div id="billing-card-box" class="hidden bg-cardBg border border-borderCol rounded-xl p-2.5 col-span-2">
                                 <p class="text-textSec text-[10px]">Payment Method</p>
                                 <p id="billing-card-value" class="text-textMain font-semibold mt-0.5 font-mono">—</p>
+                                <p id="billing-card-expiry" class="text-textSec mt-1"></p>
+                                <button id="billing-method-button" type="button" class="payment-action" hidden>Add payment method</button>
                             </div>
                         </div>
                         <div id="billing-cancel-row" class="hidden pt-1">
@@ -3245,6 +3248,23 @@
 
     <script src="/assets/vendor/zxing.umd.js"></script>
     <script src="/assets/vendor/libphonenumber-js-1.11.15.min.js"></script>
+
+    <div id="payment-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="payment-title" aria-describedby="payment-explanation">
+        <section class="payment-dialog">
+            <header class="payment-header"><span class="payment-brand">CAULDRA</span><button id="payment-close" type="button" aria-label="Back to Billing">Back</button></header>
+            <div class="payment-body">
+                <p class="payment-eyebrow">SUBSCRIPTION &amp; BILLING</p>
+                <h2 id="payment-title">Secure payment</h2>
+                <div class="payment-summary"><p id="payment-plan">Your selected plan</p><p id="payment-amount">—</p></div>
+                <p id="payment-explanation">Paystack handles your payment details. Cauldra confirms the payment securely.</p>
+                <div class="payment-state" role="status" aria-live="polite" aria-atomic="true"><span id="payment-spinner" aria-hidden="true" hidden></span><p id="payment-status">Preparing checkout…</p></div>
+                <div class="payment-actions"><button id="payment-check" type="button" hidden>Check payment status</button><button id="payment-resume" type="button" hidden>Resume secure checkout</button><button id="payment-retry-init" type="button" hidden>Retry this attempt</button></div>
+                <p class="payment-security">Secured by Paystack</p>
+            </div>
+        </section>
+    </div>
+
+    <script src="/js/payments.js"></script>
     <script src="/js/app.js"></script>
     <script src="/js/heartbeat.js"></script>
 </body>

@@ -10,7 +10,7 @@
 // data to whoever opens the browser next, so every request that isn't the
 // app shell or a known static asset is passed straight to the network.
 
-const SHELL_CACHE = "cauldra-shell-v5";
+const SHELL_CACHE = "cauldra-shell-v6-payments";
 
 // Precached at install time. Kept small and static-only — anything dynamic
 // (products, sales, etc.) never belongs in this cache.
@@ -22,6 +22,8 @@ const SHELL_CACHE = "cauldra-shell-v5";
 // already versioned by filename, so they stay cache-first below.
 const SHELL_DOCUMENTS = [
     "/js/app.js",
+    "/js/payments.js",
+    "/css/payments.css",
     "/js/heartbeat.js",
     "/css/base.css",
     "/css/dashboard-fixes.css",

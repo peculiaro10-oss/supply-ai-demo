@@ -14,11 +14,13 @@
     "cap:add:ios": "npx cap add ios"
   },
   "dependencies": {
-    "@capacitor/core": "latest"
+    "@capacitor/app": "8.1.1",
+    "@capacitor/core": "latest",
+    "@capacitor/inappbrowser": "3.0.3"
   },
   "devDependencies": {
-    "@capacitor/cli": "latest",
     "@capacitor/android": "latest",
+    "@capacitor/cli": "latest",
     "@capacitor/ios": "latest"
   }
 }

@@ -359,14 +359,16 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; "
-            "img-src 'self' data: blob: https://flagcdn.com; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self'; "
-            "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self' data:"
+            "img-src 'self' data: blob: https://flagcdn.com; media-src 'self' blob:; worker-src 'self' blob:; "
+            "connect-src 'self' https://api.paystack.co https://standard.paystack.co https://*.ingest.sentry.io; "
+            "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://js.paystack.co https://browser.sentry-cdn.com; "
+            "frame-src https://checkout.paystack.com; font-src 'self' data:"
         )
         if IS_PRODUCTION:
             response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         return response
 
-# app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # --- Development-only request timing (performance refactor, section 3) -----
 # Logs `[perf] METHOD PATH duration_ms status_code` for every request, plus a
@@ -1701,7 +1703,7 @@ class PaymentRecord(Base):
     refund_requested_at = Column(SQLDateTime, nullable=True)
     refund_updated_at = Column(SQLDateTime, nullable=True)
     refund_last_error = Column(Text, nullable=True)
-    paystack_transaction_id = Column(String, nullable=True)
+    paystack_transaction_id = Column(String, nullable=True, unique=True)
     refunded_at = Column(SQLDateTime, nullable=True)
     paid_at = Column(SQLDateTime, nullable=True)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
@@ -12476,6 +12478,113 @@ def cancel_pending_downgrade(request: Request, user: User = Depends(get_current_
 # PAYSTACK_SECRET_KEY never leaves the server: it is only ever used here, in
 # server-side request headers, and is never returned in any API response.
 # -----------------------------------------------------------------------------
+
+def checkout_return_url(request: Request) -> str:
+    # Native callbacks must use the actual API host, never Capacitor localhost.
+    return str(request.base_url).rstrip('/') + '/payments/return'
+
+
+@app.get('/payments/return')
+def payment_navigation_return(reference: str = '', trxref: str = ''):
+    # Navigation only. Neither this page nor the app link grants entitlement.
+    from fastapi.responses import HTMLResponse
+    ref = reference or trxref
+    if not re.fullmatch(r'[A-Za-z0-9_.=-]{1,200}', ref):
+        raise HTTPException(status_code=400, detail='Invalid payment reference.')
+    safe_ref = urllib.parse.quote(ref, safe='')
+    web_url = (SUPPLY_AI_FRONTEND_URL or '') + '/?reference=' + safe_ref
+    import html
+    return HTMLResponse('<!doctype html><html><meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>Return to Cauldra</title><body style="background:#070b14;color:#fff;font:18px system-ui;padding:24px">'
+        '<h1>Return to Cauldra</h1><p>Your payment status will be checked securely in Cauldra.</p>'
+        '<p><a style="color:#9db6ff" href="cauldra://payment-return?reference=' + safe_ref + '">Return to the app</a></p>'
+        '<p><a style="color:#9db6ff" href="' + html.escape(web_url, quote=True) + '">Continue in browser</a></p></body></html>',
+        headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+
+
+def initialize_owned_checkout(db, request, record, email, metadata, user=None):
+    """Official server initialize. Only allowlisted checkout data crosses back."""
+    metadata = {**metadata, 'customer_email': str(email).strip().casefold()}
+    if user:
+        metadata['user_id'] = user.id
+    if isinstance(record, PaymentRecord):
+        record.transaction_metadata = json.dumps(metadata)
+    db.add(record)
+    if user:
+        pending_claim = db.query(MutationIdempotency).filter_by(business_id=user.business_id,
+            client_ref=request.headers.get('Idempotency-Key'), status='processing').first()
+        if pending_claim:
+            pending_claim.response_json = json.dumps({'reference': record.paystack_reference})
+    db.commit()  # durable reference BEFORE the external write
+    body = {'email': email, 'amount': record.amount_kobo, 'currency': 'NGN',
+            'reference': record.paystack_reference, 'callback_url': checkout_return_url(request),
+            'metadata': metadata}
+    if not isinstance(record, PaymentRecord) or record.purpose in ('card_verification', 'payment_method'):
+        body['channels'] = ['card']
+    try:
+        payload = paystack_request('POST', '/transaction/initialize', body)
+        provider = payload.get('data') or {}
+        url = urllib.parse.urlsplit(str(provider.get('authorization_url') or ''))
+        if (url.scheme != 'https' or url.netloc != 'checkout.paystack.com'
+                or not provider.get('access_code') or provider.get('reference') != record.paystack_reference):
+            raise ValueError('Invalid checkout response')
+    except Exception as exc:
+        # Unknown transport outcomes remain reconcilable; never blindly retry
+        # a new reference after Paystack may have accepted initialization.
+        record.status = 'failed' if isinstance(exc, PaystackRequestError) and exc.definitive else 'pending'
+        db.commit()
+        raise HTTPException(status_code=502, detail={
+            'message': 'Checkout could not be opened. Check this payment before trying again.',
+            'reference': record.paystack_reference, 'status': record.status})
+    result = {'reference': record.paystack_reference, 'access_code': provider['access_code'],
+              'authorization_url': provider['authorization_url'], 'amount_kobo': record.amount_kobo,
+              'verification_amount_kobo': record.amount_kobo if body.get('channels') else None,
+              'currency': 'NGN', 'plan': record.plan, 'billing_interval': record.billing_interval,
+              'callback_url': body['callback_url']}
+    return result
+
+
+def claim_checkout(db, request, user, operation, values):
+    key = str(request.headers.get('Idempotency-Key') or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_-]{16,100}', key):
+        raise HTTPException(status_code=400, detail='A valid payment attempt key is required.')
+    existing = db.query(MutationIdempotency).filter_by(business_id=user.business_id, operation=operation, client_ref=key).first()
+    if existing and existing.status == 'processing':
+        recovery = parse_paystack_metadata(existing.response_json)
+        raise HTTPException(status_code=409, detail={'message': 'Payment initialization is pending. Check its status.', 'reference': recovery.get('reference')})
+    return claim_idempotent_mutation(db, user.business_id, operation, key, {**values, 'user_id': user.id})
+
+
+def safe_payment_method(sub, transaction):
+    """Only Paystack-issued reusable authorization and display metadata."""
+    auth = transaction.get('authorization') or {}
+    customer = transaction.get('customer') or {}
+    if auth.get('reusable') is not True or auth.get('channel') != 'card' or not auth.get('authorization_code'):
+        return False  # preserve a previous usable method
+    sub.paystack_authorization_code = auth['authorization_code']
+    sub.paystack_customer_code = customer.get('customer_code') or sub.paystack_customer_code
+    sub.card_verified = True
+    last4 = str(auth.get('last4') or '')
+    sub.card_last4 = last4 if re.fullmatch(r'\d{4}', last4) else None
+    sub.card_type = str(auth.get('brand') or auth.get('card_type') or '')[:40] or None
+    sub.card_exp_month = str(auth.get('exp_month') or '')[:2] or None
+    sub.card_exp_year = str(auth.get('exp_year') or '')[:4] or None
+    return True
+
+
+def transaction_id_available(db, transaction, record):
+    txid = str(transaction.get('id') or '')
+    if not txid:
+        return False
+    other = db.query(PaymentRecord).filter(PaymentRecord.paystack_transaction_id == txid)
+    if isinstance(record, PaymentRecord):
+        other = other.filter(PaymentRecord.id != record.id)
+    onboarding = db.query(OnboardingAuthorization).filter(OnboardingAuthorization.paystack_transaction_id == txid)
+    if isinstance(record, OnboardingAuthorization):
+        onboarding = onboarding.filter(OnboardingAuthorization.id != record.id)
+    return not other.first() and not onboarding.first()
+
+
 class PaystackRequestError(RuntimeError):
     """A provider rejection is safe to retry; a transport failure is not.
 
@@ -12500,14 +12609,14 @@ def paystack_request(method: str, path: str, json_body: Optional[dict] = None, t
     except Exception:
         raise PaystackRequestError("Paystack returned an unreadable response.", definitive=False)
     if not resp.ok or not payload.get("status"):
-        raise PaystackRequestError(payload.get("message", "Paystack rejected the request."), definitive=True)
+        raise PaystackRequestError("Paystack rejected the request.", definitive=True)
     return payload
 
 def paystack_verify_transaction(reference: str) -> dict:
     """Backend-authoritative check. We never trust a frontend 'payment successful'
     callback — every payment/authorization is independently re-verified here
     against Paystack's own transaction record before we act on it."""
-    payload = paystack_request("GET", f"/transaction/verify/{reference}")
+    payload = paystack_request("GET", f"/transaction/verify/{urllib.parse.quote(reference, safe='')}")
     return payload.get("data") or {}
 
 def parse_paystack_metadata(value) -> dict:
@@ -12609,6 +12718,8 @@ def reconcile_first_subscription_payment(
         return {"status": "pending", "already_processed": False}
 
     mismatches = first_subscription_verification_mismatches(verified_transaction, record, business)
+    if not transaction_id_available(db, verified_transaction, record):
+        mismatches.append("transaction_id_reused")
     if mismatches:
         transitioned = record.status != "flagged_verification_mismatch"
         record.status = "flagged_verification_mismatch"
@@ -12630,7 +12741,7 @@ def reconcile_first_subscription_payment(
     record.status = "success"
     record.paid_at = now
 
-    sub = get_or_create_subscription(db, business, commit=False)
+    sub = db.query(BusinessSubscription).filter_by(business_id=business.id).with_for_update().one()
     sub.plan = record.plan
     sub.billing_interval = record.billing_interval
     sub.status = "active"
@@ -12639,6 +12750,7 @@ def reconcile_first_subscription_payment(
     sub.current_period_start = now
     sub.current_period_end = add_billing_interval(now, record.billing_interval)
     sub.next_billing_at = sub.current_period_end
+    safe_payment_method(sub, verified_transaction)
     sub.latest_transaction_reference = record.paystack_reference
     sub.cancel_at_period_end = False
     sub.cancelled_at = None
@@ -13023,7 +13135,14 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
         raise HTTPException(status_code=403, detail="Please verify your email address before continuing to payment.")
 
     amount_kobo = PAYSTACK_TRIAL_VERIFICATION_AMOUNT_KOBO
-    reference = f"cauldra_onboard_{secrets.token_hex(10)}"
+    key = str(request.headers.get('Idempotency-Key') or '')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{16,100}', key):
+        raise HTTPException(status_code=400, detail='A valid payment attempt key is required.')
+    digest = hmac.new(PAYSTACK_SECRET_KEY.encode(), (str(data.email).casefold() + ':' + plan + ':' + interval + ':' + key).encode(), 'sha256').hexdigest()
+    reference = 'cauldra_onboard_' + digest[:40]
+    existing = db.query(OnboardingAuthorization).filter_by(paystack_reference=reference).first()
+    if existing:
+        raise HTTPException(status_code=409, detail={'message': 'This verification attempt already exists. Check its status.', 'reference': reference})
     now = datetime.utcnow()
     row = OnboardingAuthorization(
         paystack_reference=reference, email=str(data.email), plan=plan, billing_interval=interval,
@@ -13032,19 +13151,8 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
     )
     db.add(row); db.commit()
 
-    try:
-        payload = paystack_request("POST", "/transaction/initialize", {
-            "email": str(data.email), "amount": amount_kobo, "currency": "NGN", "reference": reference,
-            "channels": ["card"], "callback_url": paystack_callback_url(request),
-            "metadata": {"plan": plan, "billing_interval": interval, "purpose": "onboarding_card_verification"},
-        })
-    except Exception:
-        row.status = "failed"; db.commit()
-        record_failure(db, "onboarding-payment-init-ip", client_ip)
-        raise HTTPException(status_code=502, detail="We couldn't start card verification right now. Please try again.")
-
-    return {"authorization_url": payload["data"]["authorization_url"], "reference": reference,
-            "verification_amount_kobo": amount_kobo, "plan": plan, "billing_interval": interval}
+    return initialize_owned_checkout(db, request, row, str(data.email),
+        {'plan': plan, 'billing_interval': interval, 'purpose': 'onboarding_card_verification'})
 
 
 class OnboardingPaymentConfirmRequest(BaseModel):
@@ -13085,8 +13193,13 @@ def onboarding_payment_confirm(data: OnboardingPaymentConfirmRequest, request: R
     except Exception:
         raise HTTPException(status_code=502, detail="We couldn't verify that payment method with Paystack right now. Please try again.")
 
+    if tx.get('status') in ('pending', 'processing', 'ongoing', 'queued', 'abandoned'):
+        return JSONResponse(status_code=202, content={'status': 'pending', 'reference': reference})
+    if not transaction_id_available(db, tx, row):
+        raise HTTPException(status_code=409, detail='This payment could not be verified for this attempt.')
     if (tx.get("status") != "success" or int(tx.get("amount") or 0) != row.amount_kobo
-            or (tx.get("currency") or "").upper() != "NGN" or tx.get("reference") != reference):
+            or (tx.get("currency") or "").upper() != "NGN" or tx.get("reference") != reference
+            or str((tx.get("customer") or {}).get("email") or "").casefold() != row.email.casefold()):
         row.status = "failed"; db.commit()
         record_failure(db, "onboarding-payment-confirm-ip", client_ip)
         raise HTTPException(status_code=400, detail="Payment method verification did not succeed. Please try again with a valid card.")
@@ -13176,6 +13289,9 @@ def trial_init(data: TrialInitRequest, request: Request, user: User = Depends(ge
     if interval not in ("monthly", "annual"):
         interval = "monthly"
 
+    claim, replay = claim_checkout(db, request, user, 'paystack-trial', {'plan': plan, 'interval': interval})
+    if replay:
+        return replay
     amount_kobo = PAYSTACK_TRIAL_VERIFICATION_AMOUNT_KOBO
     reference = f"cauldra_trialcard_{business.business_code}_{secrets.token_hex(8)}"
     record = PaymentRecord(business_id=business.id, subscription_id=sub.id, plan=plan, billing_interval=interval,
@@ -13184,19 +13300,11 @@ def trial_init(data: TrialInitRequest, request: Request, user: User = Depends(ge
                             transaction_metadata=json.dumps({"business_id": business.id, "plan": plan, "billing_interval": interval, "purpose": "trial_card_verification"}))
     db.add(record); db.commit()
 
-    try:
-        payload = paystack_request("POST", "/transaction/initialize", {
-            "email": business.email or user.email, "amount": amount_kobo, "currency": "NGN", "reference": reference,
-            "channels": ["card"], "callback_url": paystack_callback_url(request),
-            "metadata": {"business_id": business.id, "plan": plan, "billing_interval": interval, "purpose": "trial_card_verification"},
-        })
-    except Exception:
-        record.status = "failed"; db.commit()
-        raise HTTPException(status_code=502, detail="We couldn't start card verification right now. Please try again.")
-
-    add_audit(db, user, "TRIAL_CARD_VERIFICATION_INITIATED", f"Started card verification for a {PLAN_CONFIG[plan]['label']} ({interval}) trial.", business_id=business.id)
+    result = initialize_owned_checkout(db, request, record, business.email or user.email,
+        {'business_id': business.id, 'plan': plan, 'billing_interval': interval, 'purpose': 'trial_card_verification'}, user)
+    complete_idempotent_mutation(claim, result)
     db.commit()
-    return {"authorization_url": payload["data"]["authorization_url"], "reference": reference, "verification_amount_kobo": amount_kobo, "plan": plan, "billing_interval": interval}
+    return result
 
 
 class TrialConfirmRequest(BaseModel):
@@ -13239,8 +13347,13 @@ def trial_confirm(data: TrialConfirmRequest, request: Request, user: User = Depe
         raise HTTPException(status_code=502, detail="We couldn't verify that payment method with Paystack right now. Please try again.")
 
     expected_meta = json.loads(record.transaction_metadata or "{}")
+    if tx.get('status') in ('pending', 'processing', 'ongoing', 'queued', 'abandoned'):
+        return JSONResponse(status_code=202, content={'status': 'pending', 'reference': reference})
+    if not transaction_id_available(db, tx, record):
+        raise HTTPException(status_code=409, detail='This payment could not be verified for this attempt.')
     if (tx.get("status") != "success" or int(tx.get("amount") or 0) != record.amount_kobo
-            or (tx.get("currency") or "").upper() != "NGN" or tx.get("reference") != reference):
+            or (tx.get("currency") or "").upper() != "NGN" or tx.get("reference") != reference
+            or str((tx.get("customer") or {}).get("email") or "").casefold() != str(expected_meta.get("customer_email") or business.email or user.email).casefold()):
         record.status = "failed"; db.commit()
         raise HTTPException(status_code=400, detail="Payment method verification did not succeed. Please try again with a valid card.")
 
@@ -13431,6 +13544,9 @@ def start_checkout(data: CheckoutRequest, request: Request, user: User = Depends
     if not PAYSTACK_SECRET_KEY:
         raise HTTPException(status_code=503, detail="Payment processing is not configured yet. Please contact support to subscribe.")
 
+    claim, replay = claim_checkout(db, request, user, 'paystack-checkout', {'plan': plan, 'interval': interval})
+    if replay:
+        return replay
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     amount_naira = PLAN_CONFIG[plan]["annual_price" if interval == "annual" else "monthly_price"]
     amount_kobo = int(amount_naira) * 100
@@ -13447,24 +13563,11 @@ def start_checkout(data: CheckoutRequest, request: Request, user: User = Depends
                             transaction_metadata=json.dumps(checkout_metadata))
     db.add(record); db.commit()
 
-    import requests
-    try:
-        resp = requests.post(
-            "https://api.paystack.co/transaction/initialize",
-            headers={"Authorization": f"Bearer {PAYSTACK_SECRET_KEY}", "Content-Type": "application/json"},
-            json={"email": checkout_email, "amount": amount_kobo, "currency": "NGN", "reference": reference,
-                  "callback_url": paystack_callback_url(request),
-                  "metadata": checkout_metadata},
-            timeout=15,
-        )
-        payload = resp.json()
-        if not resp.ok or not payload.get("status"):
-            raise RuntimeError(payload.get("message", "Paystack rejected the request."))
-    except Exception:
-        record.status = "failed"; db.commit()
-        raise HTTPException(status_code=502, detail="We couldn't start the payment right now. Please try again.")
+    result = initialize_owned_checkout(db, request, record, checkout_email, checkout_metadata, user)
+    complete_idempotent_mutation(claim, result)
+    db.commit()
+    return result
 
-    return {"authorization_url": payload["data"]["authorization_url"], "reference": reference, "amount_kobo": amount_kobo}
 
 
 class SubscriptionCheckoutConfirmRequest(BaseModel):
@@ -13497,7 +13600,7 @@ def confirm_subscription_checkout(
         .filter(
             PaymentRecord.paystack_reference == reference,
             PaymentRecord.business_id == user.business_id,
-            PaymentRecord.purpose == "subscription",
+            PaymentRecord.purpose.in_(("subscription", "subscription_upgrade")),
         )
         .with_for_update()
         .first()
@@ -13521,9 +13624,12 @@ def confirm_subscription_checkout(
         db.rollback()
         raise HTTPException(status_code=502, detail="Payment verification is temporarily unavailable. Please retry.")
 
-    result = reconcile_first_subscription_payment(db, record, business, verified_transaction)
+    result = (reconcile_upgrade_payment(db, record, verified_transaction) if record.purpose == "subscription_upgrade"
+              else reconcile_first_subscription_payment(db, record, business, verified_transaction))
     db.commit()
     payload = {**result, "reference": reference}
+    if result["status"] == "success":
+        payload["recurring_setup"] = finish_recurring_setup(db, record)
     if result["status"] == "pending":
         return JSONResponse(status_code=202, content=payload)
     if result["status"] == "failed":
@@ -13532,6 +13638,175 @@ def confirm_subscription_checkout(
         return JSONResponse(status_code=409, content={**payload, "detail": "Payment verification did not match this checkout and was not applied."})
     return payload
 
+
+
+def finish_recurring_setup(db, record):
+    """Persist external-write intent; never blindly repeat an uncertain write.
+
+    A transport interruption is exposed as requires_action. Existing provider
+    references remain available for reconciliation and no second debit is made.
+    """
+    meta = parse_paystack_metadata(record.transaction_metadata)
+    if meta.get('recurring_setup') in ('complete', 'not_configured', 'requires_action'):
+        return meta['recurring_setup']
+    sub = db.query(BusinessSubscription).filter_by(business_id=record.business_id).with_for_update().one()
+    plan_code = PLAN_CONFIG[sub.plan].get('paystack_annual_plan_code' if sub.billing_interval == 'annual' else 'paystack_monthly_plan_code')
+    if not plan_code or not sub.paystack_authorization_code or not sub.paystack_customer_code or sub.cancel_at_period_end:
+        meta['recurring_setup'] = 'not_configured'
+        record.transaction_metadata = json.dumps(meta); db.commit()
+        return 'not_configured'
+    if sub.paystack_subscription_code and record.purpose != 'subscription_upgrade':
+        return 'complete'
+    meta['recurring_setup'] = 'requires_action'
+    record.transaction_metadata = json.dumps(meta); db.commit()
+    try:
+        if sub.paystack_subscription_code:
+            old = paystack_fetch_subscription(sub.paystack_subscription_code)
+            if not old.get('email_token'):
+                return 'requires_action'
+            paystack_disable_subscription(sub.paystack_subscription_code, old['email_token'])
+        created = paystack_create_subscription(sub.paystack_customer_code, plan_code,
+            sub.paystack_authorization_code, start_date=sub.current_period_end)
+        if not created.get('subscription_code'):
+            return 'requires_action'
+        sub.paystack_subscription_code = created['subscription_code']
+        sub.paystack_plan_code = plan_code
+        meta['recurring_setup'] = 'complete'
+        record.transaction_metadata = json.dumps(meta); db.commit()
+        return 'complete'
+    except Exception:
+        # No provider payload, token, authorization or raw error is logged.
+        return 'requires_action'
+
+
+@app.post('/subscription/payment-method/init')
+def payment_method_init(request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    if user.role != 'admin':
+        raise HTTPException(status_code=403, detail='Only an Admin can change the payment method.')
+    if not PAYSTACK_SECRET_KEY:
+        raise HTTPException(status_code=503, detail='Payment processing is not configured.')
+    check_rate_limit(db, 'checkout', f'business:{user.business_id}')
+    business = db.query(BusinessProfile).filter_by(id=user.business_id).one()
+    sub = get_or_create_subscription(db, business)
+    if sub.pending_downgrade_plan:
+        raise HTTPException(status_code=409, detail='Cancel the scheduled downgrade before changing your payment method.')
+    claim, replay = claim_checkout(db, request, user, 'paystack-method', {})
+    if replay:
+        return replay
+    record = PaymentRecord(business_id=business.id, subscription_id=sub.id, plan=sub.plan,
+        billing_interval=sub.billing_interval, amount_kobo=PAYSTACK_TRIAL_VERIFICATION_AMOUNT_KOBO,
+        currency='NGN', paystack_reference='cauldra_method_' + secrets.token_hex(16),
+        purpose='payment_method', status='initialized')
+    result = initialize_owned_checkout(db, request, record, business.email or user.email,
+        {'purpose': 'payment_method', 'business_id': business.id, 'plan': sub.plan,
+         'billing_interval': sub.billing_interval}, user)
+    complete_idempotent_mutation(claim, result); db.commit()
+    return result
+
+
+def reconcile_payment_method(db, record, tx):
+    if record.status == 'success':
+        return {'status': 'success', 'already_processed': True}
+    if tx.get('status') in ('pending', 'ongoing', 'processing', 'queued', 'abandoned'):
+        return {'status': 'pending'}
+    meta = parse_paystack_metadata(record.transaction_metadata)
+    actual = parse_paystack_metadata(tx.get('metadata'))
+    auth = tx.get('authorization') or {}
+    if (tx.get('status') != 'success' or tx.get('reference') != record.paystack_reference
+            or tx.get('amount') != record.amount_kobo or tx.get('currency') != record.currency
+            or str((tx.get('customer') or {}).get('email') or '').casefold() != meta.get('customer_email')
+            or any(str(actual.get(k)) != str(meta.get(k)) for k in ('business_id', 'purpose', 'plan', 'billing_interval'))
+            or not transaction_id_available(db, tx, record)
+            or auth.get('reusable') is not True or auth.get('channel') != 'card' or not auth.get('authorization_code')):
+        record.status = 'flagged_verification_mismatch'; db.flush()
+        return {'status': 'flagged_verification_mismatch'}
+    sub = db.query(BusinessSubscription).filter_by(id=record.subscription_id).with_for_update().one()
+    # If a recurring subscription already exists, create a replacement with the
+    # new provider authorization at the existing renewal boundary. Preserve the
+    # old references until provider success. Uncertain writes cannot be replayed.
+    if meta.get('method_schedule') == 'requires_action':
+        return {'status': 'requires_action'}
+    if sub.pending_downgrade_plan or sub.plan != record.plan or sub.billing_interval != record.billing_interval:
+        return {'status': 'requires_action'}
+    old_code = sub.paystack_subscription_code
+    new_code = None
+    if old_code and not sub.cancel_at_period_end:
+        meta['method_schedule'] = 'requires_action'
+        record.transaction_metadata = json.dumps(meta); db.commit()
+        try:
+            old = paystack_fetch_subscription(old_code)
+            if not old.get('email_token') or not sub.paystack_plan_code or not sub.current_period_end:
+                return {'status': 'requires_action'}
+            paystack_disable_subscription(old_code, old['email_token'])
+            created = paystack_create_subscription((tx.get('customer') or {}).get('customer_code'),
+                sub.paystack_plan_code, auth['authorization_code'], start_date=sub.current_period_end)
+            new_code = created.get('subscription_code')
+            if not new_code:
+                return {'status': 'requires_action'}
+        except Exception:
+            return {'status': 'requires_action'}
+    safe_payment_method(sub, tx)
+    if new_code:
+        sub.paystack_subscription_code = new_code
+    record.paystack_transaction_id = str(tx['id'])
+    record.status = 'success'; record.paid_at = datetime.utcnow()
+    meta['method_schedule'] = 'complete'
+    record.transaction_metadata = json.dumps(meta)
+    add_audit(db, None, 'PAYMENT_METHOD_UPDATED', 'Paystack verified the replacement payment method.', business_id=record.business_id)
+    db.commit()
+    return {'status': 'success', **ensure_verification_refund(db, record, record.paystack_reference, tx['id'])}
+
+
+@app.post('/subscription/payment-method/confirm')
+def payment_method_confirm(data: SubscriptionCheckoutConfirmRequest, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    if user.role != 'admin':
+        raise HTTPException(status_code=403, detail='Only an Admin can confirm a payment method.')
+    record = db.query(PaymentRecord).filter_by(business_id=user.business_id, paystack_reference=data.reference, purpose='payment_method').with_for_update().first()
+    if not record:
+        raise HTTPException(status_code=404, detail='Payment attempt not found.')
+    if record.status == 'success':
+        return {'status': 'success', **ensure_verification_refund(db, record, data.reference, record.paystack_transaction_id)}
+    try:
+        tx = paystack_verify_transaction(data.reference)
+    except Exception:
+        raise HTTPException(status_code=502, detail='Payment verification is temporarily unavailable.')
+    result = reconcile_payment_method(db, record, tx)
+    db.commit()
+    return JSONResponse(status_code=200 if result['status'] == 'success' else 202 if result['status'] == 'pending' else 409, content=result)
+
+
+def reconcile_upgrade_payment(db, record, tx):
+    if record.status == 'success':
+        return {'status': 'success', 'already_processed': True}
+    if tx.get('status') in ('pending', 'processing', 'ongoing', 'queued', 'abandoned'):
+        return {'status': 'pending'}
+    meta = parse_paystack_metadata(record.transaction_metadata)
+    actual = parse_paystack_metadata(tx.get('metadata'))
+    quote = db.query(SubscriptionUpgradeQuote).filter_by(quote_reference=meta.get('quote_reference'), business_id=record.business_id).with_for_update().first()
+    business = db.query(BusinessProfile).filter_by(id=record.business_id).one()
+    sub = db.query(BusinessSubscription).filter_by(id=record.subscription_id).with_for_update().one()
+    if (not quote or quote.status != 'issued' or sub.plan != quote.from_plan
+            or sub.billing_interval != quote.from_interval or sub.current_period_end != quote.current_period_end_snapshot
+            or tx.get('status') != 'success' or tx.get('reference') != record.paystack_reference
+            or tx.get('amount') != record.amount_kobo or tx.get('currency') != 'NGN'
+            or actual.get('quote_reference') != quote.quote_reference
+            or str(actual.get('business_id')) != str(record.business_id)
+            or actual.get('purpose') != 'subscription_upgrade'
+            or str((tx.get('customer') or {}).get('email') or '').casefold() != str(meta.get('customer_email') or business.email).casefold()
+            or not transaction_id_available(db, tx, record)):
+        record.status = 'flagged_verification_mismatch'; db.flush()
+        return {'status': 'flagged_verification_mismatch'}
+    record.status = 'success'; record.paid_at = datetime.utcnow(); record.paystack_transaction_id = str(tx['id'])
+    sub.plan = quote.to_plan; sub.billing_interval = quote.to_interval
+    sub.status = 'active'; sub.payment_status = 'paid'; sub.paid_at = record.paid_at
+    sub.next_billing_at = sub.current_period_end; sub.latest_transaction_reference = record.paystack_reference
+    sub.cancel_at_period_end = False; sub.cancelled_at = None; sub.grace_period_ends_at = None
+    clear_pending_downgrade(sub); safe_payment_method(sub, tx)
+    business.subscription_plan = sub.plan; business.billing_interval = sub.billing_interval
+    quote.status = 'paid'; quote.consumed_at = record.paid_at
+    add_audit(db, None, 'SUBSCRIPTION_UPGRADED', 'Paystack verified the upgrade. Existing billing period preserved.', business_id=business.id)
+    db.flush()
+    return {'status': 'success'}
 
 # -----------------------------------------------------------------------------
 # SUBSCRIPTION UPGRADES WITH UNUSED-TIME PRORATION
@@ -13672,6 +13947,9 @@ def start_upgrade_checkout(data: UpgradeCheckoutRequest, request: Request, user:
         quote.status = "invalidated"; db.commit()
         raise HTTPException(status_code=409, detail="Your subscription changed since this quote was generated. Please request a new upgrade quote.")
 
+    claim, replay = claim_checkout(db, request, user, 'paystack-upgrade', {'quote_reference': quote_reference})
+    if replay:
+        return replay
     reference = f"cauldra_upgrade_{business.business_code}_{secrets.token_hex(8)}"
     record = PaymentRecord(
         business_id=business.id, subscription_id=sub.id, plan=quote.to_plan, billing_interval=quote.to_interval,
@@ -13691,26 +13969,11 @@ def start_upgrade_checkout(data: UpgradeCheckoutRequest, request: Request, user:
               business_id=business.id)
     db.commit()
 
-    import requests
-    try:
-        resp = requests.post(
-            "https://api.paystack.co/transaction/initialize",
-            headers={"Authorization": f"Bearer {PAYSTACK_SECRET_KEY}", "Content-Type": "application/json"},
-            json={"email": business.email or user.email, "amount": quote.amount_due_kobo, "currency": "NGN", "reference": reference,
-                  "callback_url": paystack_callback_url(request),
-                  "metadata": {"business_id": business.id, "purpose": "subscription_upgrade", "quote_reference": quote.quote_reference}},
-            timeout=15,
-        )
-        payload = resp.json()
-        if not resp.ok or not payload.get("status"):
-            raise RuntimeError(payload.get("message", "Paystack rejected the request."))
-    except Exception:
-        record.status = "failed"
-        add_audit(db, user, "SUBSCRIPTION_UPGRADE_PAYMENT_FAILED", f"Failed to initialize upgrade payment (reference {reference}). Existing plan and billing period unchanged.", business_id=business.id)
-        db.commit()
-        raise HTTPException(status_code=502, detail="We couldn't start the upgrade payment right now. Please try again.")
-
-    return {"authorization_url": payload["data"]["authorization_url"], "reference": reference, "amount_kobo": quote.amount_due_kobo}
+    meta = parse_paystack_metadata(record.transaction_metadata)
+    result = initialize_owned_checkout(db, request, record, business.email or user.email,
+        {**meta, 'business_id': business.id, 'quote_reference': quote.quote_reference}, user)
+    complete_idempotent_mutation(claim, result); db.commit()
+    return result
 
 
 def find_subscription_by_customer_code(db: Session, customer_code: str) -> Optional[BusinessSubscription]:
@@ -13748,6 +14011,22 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
     natural_id = reference or refund_reference or refund_transaction_reference or subscription_code or str(data.get("id", ""))
     event_key = f"{event_type}:{natural_id}" if natural_id else f"{event_type}:{hash_text(raw_body.decode('utf-8', 'ignore'))}"
 
+    if event_type == 'charge.success' and reference:
+        special = db.query(PaymentRecord).filter_by(paystack_reference=reference).first()
+        guest = db.query(OnboardingAuthorization).filter_by(paystack_reference=reference).first() if not special else None
+        if special and special.purpose in ('card_verification', 'payment_method'):
+            actor_id = parse_paystack_metadata(special.transaction_metadata).get('user_id')
+            actor = db.query(User).filter_by(business_id=special.business_id, role='admin').filter(User.id == actor_id).first() if actor_id else None
+            if actor:
+                result = (payment_method_confirm(SubscriptionCheckoutConfirmRequest(reference=reference), actor, db)
+                          if special.purpose == 'payment_method' else trial_confirm(TrialConfirmRequest(reference=reference), request, actor, db))
+                if isinstance(result, JSONResponse) and result.status_code == 202:
+                    raise HTTPException(status_code=503, detail='Verification is pending.')
+        elif guest:
+            result = onboarding_payment_confirm(OnboardingPaymentConfirmRequest(reference=reference), request, db)
+            if isinstance(result, JSONResponse) and result.status_code == 202:
+                raise HTTPException(status_code=503, detail='Verification is pending.')
+
     # Paystack retries webhook delivery. Insert the unique marker inside the
     # SAME transaction as every database effect below. If processing raises,
     # dependency cleanup rolls the transaction back, including this marker, so
@@ -13777,7 +14056,7 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
             refund_row = db.query(PaymentRecord).filter(
                 PaymentRecord.paystack_reference == refund_transaction_reference,
             ).first()
-            if refund_row is not None and refund_row.purpose != "card_verification":
+            if refund_row is not None and refund_row.purpose not in ("card_verification", "payment_method"):
                 refund_row = None
             if refund_row is None:
                 refund_row = db.query(OnboardingAuthorization).filter(
@@ -13786,7 +14065,7 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
         if refund_row is None and refund_reference:
             refund_row = db.query(PaymentRecord).filter(
                 PaymentRecord.refund_provider_id == refund_reference,
-                PaymentRecord.purpose == "card_verification",
+                PaymentRecord.purpose.in_(("card_verification", "payment_method")),
             ).first()
             if refund_row is None:
                 refund_row = db.query(OnboardingAuthorization).filter(
@@ -13814,86 +14093,17 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
 
     elif event_type == "charge.success" and reference:
         record = db.query(PaymentRecord).filter(PaymentRecord.paystack_reference == reference).first()
-        if record and record.status != "success" and record.purpose == "subscription_upgrade":
-            # Upgrade payment, initiated by /subscription/upgrade-checkout. The
-            # amount charged must match the frozen quote exactly — never trust
-            # data.amount alone, always cross-check against our own quote record.
-            meta = {}
-            try:
-                meta = json.loads(record.transaction_metadata or "{}")
-            except Exception:
-                meta = {}
-            quote_reference = meta.get("quote_reference", "")
-            quote = db.query(SubscriptionUpgradeQuote).filter(SubscriptionUpgradeQuote.quote_reference == quote_reference).first()
-            business = db.query(BusinessProfile).filter(BusinessProfile.id == record.business_id).first()
-            paid_amount_kobo = int(data.get("amount") or 0)
-            paid_currency = (data.get("currency") or "").upper()
-
-            if not quote or quote.status == "paid":
-                # Idempotency: a duplicate webhook delivery for an already-applied
-                # upgrade (or a quote we can no longer find) must do nothing further.
-                record.status = "success"; record.paid_at = now; db.flush()
-            elif paid_amount_kobo != quote.amount_due_kobo or paid_currency != "NGN" or data.get("status") != "success":
-                record.status = "flagged_amount_mismatch"; db.flush()
-                add_audit(db, None, "SUBSCRIPTION_UPGRADE_PAYMENT_FAILED",
-                          f"Upgrade charge for reference {reference} did not match the quoted amount (expected {quote.amount_due_kobo} kobo, got {paid_amount_kobo} {paid_currency}). Not activated — flagged for review. Existing plan and billing period unchanged.",
-                          business_id=business.id if business else None)
-                db.flush()
-            else:
-                record.status = "success"; record.paid_at = now
-                sub = get_or_create_subscription(db, business, commit=False)
-                old_plan, old_interval = sub.plan, sub.billing_interval
-                old_subscription_code = sub.paystack_subscription_code
-                # THE key behavior this feature exists for: the paid-for portion
-                # of the current billing period is honored exactly as-is. The new
-                # plan activates immediately, but current_period_start/end are
-                # left untouched — no reset, no accidental extra period.
-                sub.plan = quote.to_plan; sub.billing_interval = quote.to_interval
-                sub.status = "active"; sub.payment_status = "paid"; sub.paid_at = now
-                sub.next_billing_at = sub.current_period_end
-                sub.latest_transaction_reference = reference
-                sub.cancel_at_period_end = False; sub.cancelled_at = None; sub.grace_period_ends_at = None
-                resolve_notifications(db, f"sub_expired:{business.id}", business.id)
-                resolve_notifications(db, f"payment_failed:{business.id}", business.id)
-                # A genuine upgrade always supersedes any downgrade scheduled
-                # earlier in the same period (see section 10 of the downgrade
-                # design) — never let a stale lower-plan schedule re-apply later.
-                clear_pending_downgrade(sub)
-                business.subscription_plan = quote.to_plan; business.billing_interval = quote.to_interval
-                quote.status = "paid"; quote.consumed_at = now
-                db.flush()
-
-                # Safely hand off the recurring Paystack subscription so the
-                # customer is never charged by both the old and new plan: best-
-                # effort disable the old one, then schedule the new recurring
-                # subscription to start at the SAME preserved renewal boundary
-                # (not "now") so the next charge still lands on the original date.
+        if record and record.purpose == 'subscription_upgrade':
+            record = db.query(PaymentRecord).filter_by(id=record.id).with_for_update().one()
+            if record.status != 'success':
                 try:
-                    if old_subscription_code:
-                        try:
-                            fetched = paystack_fetch_subscription(old_subscription_code)
-                            email_token = fetched.get("email_token")
-                            if email_token:
-                                paystack_disable_subscription(old_subscription_code, email_token)
-                        except Exception:
-                            add_audit(db, None, "SUBSCRIPTION_UPGRADE_OLD_PAYSTACK_DISABLE_FAILED", f"Upgrade applied, but disabling the prior {PLAN_CONFIG[old_plan]['label']} ({old_interval}) recurring Paystack subscription failed. Verify manually to ensure no duplicate charge occurs.", business_id=business.id)
-                    new_plan_code = PLAN_CONFIG[quote.to_plan].get("paystack_annual_plan_code" if quote.to_interval == "annual" else "paystack_monthly_plan_code")
-                    if new_plan_code and sub.paystack_authorization_code and sub.paystack_customer_code:
-                        created = paystack_create_subscription(sub.paystack_customer_code, new_plan_code, sub.paystack_authorization_code, start_date=sub.current_period_end)
-                        sub.paystack_subscription_code = created.get("subscription_code")
-                        sub.paystack_plan_code = new_plan_code
-                        db.flush()
+                    tx = paystack_verify_transaction(reference)
                 except Exception:
-                    add_audit(db, None, "SUBSCRIPTION_UPGRADE_PAYSTACK_RESCHEDULE_FAILED", "Upgrade applied and billing period preserved, but scheduling the new recurring Paystack subscription failed. Automatic conversion at next renewal may not occur; verify manually.", business_id=business.id)
-                    db.flush()
-
-                add_audit(db, None, "SUBSCRIPTION_UPGRADED",
-                          f"Upgraded {PLAN_CONFIG[old_plan]['label']} ({old_interval}) -> {PLAN_CONFIG[quote.to_plan]['label']} ({quote.to_interval}). "
-                          f"Unused credit {quote.unused_credit_kobo/100:.2f} NGN applied; paid {quote.amount_due_kobo/100:.2f} NGN; reference {reference}. "
-                          f"Billing period preserved: {to_utc_iso(sub.current_period_start) if sub.current_period_start else '?'} - {to_utc_iso(sub.current_period_end) if sub.current_period_end else '?'}.",
-                          business_id=business.id)
-                db.flush()
-        elif record and record.status != "success" and record.purpose != "card_verification":
+                    raise HTTPException(status_code=502, detail='Payment verification is temporarily unavailable.')
+                result = reconcile_upgrade_payment(db, record, tx)
+                if result['status'] == 'pending':
+                    raise HTTPException(status_code=503, detail='Payment verification is pending.')
+        elif record and record.status != "success" and record.purpose == "subscription":
             # First-time subscribe, initiated by our own /subscription/checkout.
             # Lock the same PaymentRecord used by the authenticated callback so
             # webhook/callback races share one authority and one activation.
@@ -13930,6 +14140,13 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
             # Paystack customer_code we stored at trial start, then verify the
             # amount against OUR server-side authoritative price before
             # activating anything.
+            try:
+                verified = paystack_verify_transaction(reference)
+            except Exception:
+                raise HTTPException(status_code=502, detail='Payment verification is temporarily unavailable.')
+            if verified.get('reference') != reference or verified.get('status') != 'success':
+                raise HTTPException(status_code=503, detail='Payment verification is pending.')
+            data = verified
             customer_code = (data.get("customer") or {}).get("customer_code", "")
             sub = find_subscription_by_customer_code(db, customer_code)
             if sub:
@@ -13999,7 +14216,7 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
         sub = find_subscription_by_customer_code(db, (data.get("customer") or {}).get("customer_code", ""))
         if not sub and subscription_code:
             sub = db.query(BusinessSubscription).filter(BusinessSubscription.paystack_subscription_code == subscription_code).first()
-        if sub and sub.status not in ("cancelled",):
+        if sub and subscription_code == sub.paystack_subscription_code and sub.status not in ("cancelled",):
             sub.status = "cancelled"
             sub.cancelled_at = sub.cancelled_at or now
             add_audit(db, None, "SUBSCRIPTION_CANCELLED", f"Paystack reported the recurring subscription ended ({event_type}).", business_id=sub.business_id)
@@ -14028,6 +14245,10 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
 
     # The event marker becomes durable only with all database effects.
     db.commit()
+    if event_type == 'charge.success' and reference:
+        completed = db.query(PaymentRecord).filter_by(paystack_reference=reference, status='success').first()
+        if completed and completed.purpose in ('subscription', 'subscription_upgrade'):
+            finish_recurring_setup(db, completed)
     return {"status": "received"}
 
 def run_billable_ai(db: Session, user: User, operation: str, provider: str, model: str, callback):

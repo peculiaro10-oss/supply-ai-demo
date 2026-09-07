@@ -148,12 +148,21 @@ class PaystackVerificationPostgresTests(unittest.TestCase):
         business_id, _, email, token = self._tenant("F04 complete journey")
         fake_response = Mock()
         fake_response.ok = True
-        fake_response.json.return_value = {"status": True, "data": {"authorization_url": "https://paystack.test/authorize"}}
+        def initialize_request(method, url, *, json=None, **kwargs):
+            fake_response.json.return_value = {"status": True, "data": {
+                "authorization_url": "https://checkout.paystack.com/authorize",
+                "access_code": "access_test_checkout",
+                "reference": json["reference"],
+            }}
+            return fake_response
         client = TestClient(self.main.app)
-        with patch("requests.post", return_value=fake_response):
+        with patch("requests.request", side_effect=initialize_request):
             checkout = client.post(
                 "/subscription/checkout", json={"plan": "starter", "billing_interval": "monthly"},
-                headers={"Authorization": f"Bearer {token}"},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Idempotency-Key": f"checkout-{uuid.uuid4().hex}",
+                },
             )
         self.assertEqual(checkout.status_code, 200, checkout.text)
         reference = checkout.json()["reference"]
