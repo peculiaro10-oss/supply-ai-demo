@@ -714,6 +714,19 @@
         window.selectedBusinessContext = null;
         let warehouseRecords = [];
         let customWarehouses = [];
+        // Locations / Branches (multi-location architecture) — active AND
+        // inactive rows both kept here (Business Profile's Locations panel
+        // must still show a deactivated branch, just without live actions);
+        // every other consumer (warehouse create dropdown, Business Day
+        // location selector) filters to is_active itself.
+        let globalLocations = [];
+        // Which Location the Dashboard's Business Day control is currently
+        // showing/acting on. UI CONTEXT ONLY (section 12 — never a security
+        // boundary): every open/close call still re-validates location_id
+        // against the signed-in user's own business server-side. Reset to
+        // null on sign-out (see the auth-restore/logout paths) so a stale
+        // selection from a previous session/business is never reused.
+        let selectedBusinessDayLocationId = null;
         let businessEmployees = [];
         let inventoryViewProducts = [];
         let inventoryStatusCounts = { healthy: 0, low: 0, out: 0 };
@@ -18257,6 +18270,8 @@
             globalPurchaseOrders = [];
             warehouseRecords = [];
             customWarehouses = [];
+            globalLocations = [];
+            selectedBusinessDayLocationId = null;
             businessEmployees = [];
             employeeDirectoryUsers = [];
             posCart = [];
@@ -18344,6 +18359,8 @@
             globalPurchaseOrders = [];
             warehouseRecords = [];
             customWarehouses = [];
+            globalLocations = [];
+            selectedBusinessDayLocationId = null;
             businessEmployees = [];
             inventoryStatusCounts = { healthy: 0, low: 0, out: 0 };
             inventoryStatusFilter = null;
@@ -19453,6 +19470,7 @@
                         else renderBusinessProfileReadOnly(businessProfile);
                     }
                 } catch (e) {}
+                loadLocations();
             }
 
             closeAllSettingsModals();
@@ -23251,7 +23269,8 @@
             let d = { open: false, status: "NOT_STARTED", business_day: null };
             try {
                 if (hasAuthenticatedBusinessContext()) {
-                    const res = await fetch(`${API_URL}/sales/current-day`, { headers: { "Authorization": `Bearer ${authToken}` } });
+                    const qs = selectedBusinessDayLocationId ? `?location_id=${selectedBusinessDayLocationId}` : "";
+                    const res = await fetch(`${API_URL}/sales/current-day${qs}`, { headers: { "Authorization": `Bearer ${authToken}` } });
                     if (res.ok) d = await res.json();
                 }
             } catch (_) { /* keep the NOT_STARTED fallback rather than guessing */ }
@@ -23333,7 +23352,8 @@
             const btn = document.getElementById('business-day-header-action-btn');
             if (btn) btn.disabled = true;
             try {
-                const r = await fetch(`${API_URL}/sales/start-business-day`, { method: 'POST', headers: { "Authorization": `Bearer ${authToken}` } });
+                const qs = selectedBusinessDayLocationId ? `?location_id=${selectedBusinessDayLocationId}` : "";
+                const r = await fetch(`${API_URL}/sales/start-business-day${qs}`, { method: 'POST', headers: { "Authorization": `Bearer ${authToken}` } });
                 const d = await r.json();
                 if (!r.ok) throw new Error(showApiError(r, d, "The Business Day could not be opened."));
                 showToast("Business day started.", "success");
@@ -23355,7 +23375,8 @@
             const btn = document.getElementById('business-day-header-action-btn');
             if (btn) btn.disabled = true;
             try {
-                const r = await fetch(`${API_URL}/sales/end-business-day`, { method: 'POST', headers: { "Authorization": `Bearer ${authToken}` } });
+                const qs = selectedBusinessDayLocationId ? `?location_id=${selectedBusinessDayLocationId}` : "";
+                const r = await fetch(`${API_URL}/sales/end-business-day${qs}`, { method: 'POST', headers: { "Authorization": `Bearer ${authToken}` } });
                 const d = await r.json();
                 if (!r.ok) throw new Error(showApiError(r, d, t("sales.businessDayCloseFailed")));
                 showToast(t("sales.businessDayClosedSuccess"), 'success');
@@ -25212,6 +25233,226 @@
             }
         }
 
+        // The one authoritative Locations fetch — populates the Business
+        // Profile "Locations / Branches" panel, the warehouse-create
+        // Location dropdown, and the Dashboard's Business Day location
+        // selector, so all three can never show a different set of
+        // locations from each other. Admin and Manager both read this
+        // (backend: GET /locations/ is admin+manager); Staff never calls it
+        // (never reaches a screen that needs it).
+        async function loadLocations() {
+            if (!authToken || !['admin', 'manager'].includes(getCurrentRole())) {
+                globalLocations = [];
+                renderLocationsPanel();
+                renderBusinessDayLocationSelector();
+                updateWarehouseLocationDropdown();
+                return;
+            }
+            try {
+                const res = await fetch(`${API_URL}/locations/`, { credentials: "include", headers: { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" } });
+                if (res.status === 401) { handleAuthenticationFailure(); return; }
+                if (!res.ok) throw new Error("Unable to load locations.");
+                globalLocations = await res.json();
+            } catch (_) {
+                globalLocations = [];
+            }
+            renderLocationsPanel();
+            renderBusinessDayLocationSelector();
+            updateWarehouseLocationDropdown();
+        }
+
+        function renderLocationsPanel() {
+            const container = document.getElementById('locations-list-container');
+            const addBtn = document.getElementById('add-location-btn');
+            if (!container) return;
+            const isAdmin = getCurrentRole() === 'admin';
+            if (addBtn) addBtn.classList.toggle('hidden', !isAdmin);
+            if (!globalLocations.length) {
+                container.innerHTML = `<div class="text-[10px] text-textSec text-center py-3">No locations yet.</div>`;
+                return;
+            }
+            container.innerHTML = globalLocations.map(l => `
+                <div class="flex items-start justify-between gap-2 bg-bgMain border border-borderCol rounded-xl px-3 py-2 ${l.is_active === false ? 'opacity-60' : ''}">
+                    <div class="min-w-0">
+                        <div class="font-semibold text-textMain text-xs flex items-center gap-1.5 flex-wrap">
+                            <i class="fa-solid fa-location-dot text-primary"></i> ${escapeHtml(l.name)}
+                            ${l.is_main ? `<span class="text-[9px] uppercase tracking-wide bg-primary/15 text-primary px-1.5 py-0.5 rounded-full">Main</span>` : ''}
+                            ${l.is_active === false ? `<span class="text-[9px] uppercase tracking-wide bg-danger/15 text-danger px-1.5 py-0.5 rounded-full">Inactive</span>` : ''}
+                        </div>
+                        <div class="text-[10px] text-textSec mt-0.5 flex flex-wrap gap-x-2.5 gap-y-0.5">
+                            ${l.city || l.country ? `<span><i class="fa-solid fa-earth-africa mr-0.5"></i>${escapeHtml([l.city, l.country].filter(Boolean).join(', '))}</span>` : ''}
+                            ${l.timezone ? `<span><i class="fa-solid fa-clock mr-0.5"></i>${escapeHtml(l.timezone)}</span>` : ''}
+                            ${l.currency ? `<span><i class="fa-solid fa-coins mr-0.5"></i>${escapeHtml(l.currency)}</span>` : ''}
+                            ${l.contact_phone ? `<span class="font-mono"><i class="fa-solid fa-phone mr-0.5"></i>${escapeHtml(l.contact_phone)}</span>` : ''}
+                            <span><i class="fa-solid fa-warehouse mr-0.5"></i>${l.warehouse_count ?? 0} warehouse${l.warehouse_count === 1 ? '' : 's'}</span>
+                        </div>
+                    </div>
+                    ${isAdmin ? `
+                    <div class="flex items-center gap-1.5 shrink-0">
+                        <button type="button" onclick="openLocationFormModal(${l.id})" class="text-textSec hover:text-primary transition cursor-pointer" title="Edit location"><i class="fa-solid fa-pen text-[11px]"></i></button>
+                        ${!l.is_main ? `<button type="button" onclick="handleToggleLocationActive(${l.id}, ${l.is_active === false})" class="text-textSec hover:text-danger transition cursor-pointer" title="${l.is_active === false ? 'Reactivate' : 'Deactivate'} location"><i class="fa-solid fa-${l.is_active === false ? 'rotate-left' : 'ban'} text-[11px]"></i></button>` : ''}
+                    </div>` : ''}
+                </div>
+            `).join('');
+        }
+
+        function activeLocations() {
+            return (Array.isArray(globalLocations) ? globalLocations : []).filter(l => l.is_active !== false);
+        }
+
+        // --- Add/Edit Location modal --------------------------------------------
+        function openLocationFormModal(locationId) {
+            const form = document.getElementById('location-form');
+            if (!form) return;
+            form.reset();
+            document.getElementById('location-phone-error')?.classList.add('hidden');
+            document.getElementById('location-phone-input')?.classList.remove('border-danger');
+            populateLocationCountrySelect();
+            const existing = locationId ? globalLocations.find(l => l.id === locationId) : null;
+            document.getElementById('location-form-id').value = existing ? existing.id : '';
+            document.getElementById('location-form-title').textContent = existing ? 'Edit Location' : 'Add Location';
+            document.getElementById('location-form-submit').textContent = existing ? 'Save Changes' : 'Save Location';
+            if (existing) {
+                document.getElementById('location-name-input').value = existing.name || '';
+                if (existing.country_code) document.getElementById('location-country-select').value = existing.country_code;
+                document.getElementById('location-city-input').value = existing.city || '';
+                document.getElementById('location-timezone-input').value = existing.timezone || '';
+                document.getElementById('location-currency-input').value = existing.currency || '';
+                document.getElementById('location-phone-input').value = existing.contact_phone || '';
+                document.getElementById('location-email-input').value = existing.contact_email || '';
+                document.getElementById('location-address-input').value = existing.address || '';
+            }
+            wireCountryAwarePhoneInput(
+                document.getElementById('location-phone-input'),
+                () => document.getElementById('location-country-select').value,
+                document.getElementById('location-phone-error'),
+            );
+            document.getElementById('location-form-modal').classList.remove('hidden');
+        }
+        function closeLocationFormModal() {
+            document.getElementById('location-form-modal')?.classList.add('hidden');
+        }
+        function populateLocationCountrySelect() {
+            const select = document.getElementById('location-country-select');
+            if (!select || !Array.isArray(countryDatabase)) return;
+            const sorted = [...countryDatabase].sort((a, b) => a.name.localeCompare(b.name));
+            select.innerHTML = sorted.map(c => `<option value="${c.iso2}">${escapeHtml(c.name)}</option>`).join('');
+            if (businessProfile?.country_code) select.value = businessProfile.country_code;
+        }
+        // Defaults timezone/currency from the selected country WITHOUT
+        // overwriting a value the Admin already typed/edited (section 6:
+        // "must remain editable"; this only fills blanks, never clobbers).
+        function handleLocationCountryChange() {
+            const iso2 = document.getElementById('location-country-select')?.value;
+            const country = countryDatabase.find(c => c.iso2 === iso2);
+            if (!country) return;
+            const tzInput = document.getElementById('location-timezone-input');
+            const curInput = document.getElementById('location-currency-input');
+            if (tzInput && !tzInput.value) tzInput.value = countryTimezoneMap[iso2] || '';
+            if (curInput && !curInput.value) curInput.value = country.currency || '';
+        }
+
+        async function handleSaveLocation(event) {
+            event.preventDefault();
+            const id = document.getElementById('location-form-id').value;
+            const countrySelect = document.getElementById('location-country-select');
+            const iso2 = countrySelect?.value || '';
+            const phoneInput = document.getElementById('location-phone-input');
+            if (phoneFieldHasBlockingError(phoneInput, () => iso2, document.getElementById('location-phone-error'))) return;
+            const country = countryDatabase.find(c => c.iso2 === iso2);
+            const payload = {
+                name: document.getElementById('location-name-input').value.trim(),
+                country: country ? country.name : null,
+                country_code: iso2 || null,
+                city: document.getElementById('location-city-input').value.trim() || null,
+                timezone: document.getElementById('location-timezone-input').value.trim() || null,
+                currency: document.getElementById('location-currency-input').value.trim() || null,
+                contact_phone: phoneInput.value.trim() || null,
+                contact_email: document.getElementById('location-email-input').value.trim() || null,
+                address: document.getElementById('location-address-input').value.trim() || null,
+            };
+            const submitBtn = document.getElementById('location-form-submit');
+            if (submitBtn) submitBtn.disabled = true;
+            try {
+                const res = await fetch(`${API_URL}/locations/${id ? id : ''}`, {
+                    method: id ? 'PATCH' : 'POST', credentials: 'include',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+                    body: JSON.stringify(payload),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(showApiError(res, data, 'Could not save this location.'));
+                showToast(id ? 'Location updated.' : 'Location added.', 'success');
+                closeLocationFormModal();
+                await loadLocations();
+            } catch (e) {
+                showToast(friendlyErrorMessage(e.message, e.message), 'error');
+            } finally {
+                if (submitBtn) submitBtn.disabled = false;
+            }
+        }
+
+        async function handleToggleLocationActive(locationId, activate) {
+            const location = globalLocations.find(l => l.id === locationId);
+            if (!location) return;
+            if (!activate) {
+                const ok = await showCustomConfirm(`Deactivate ${location.name}? It must have no active warehouses.`, 'Deactivate Location');
+                if (!ok) return;
+            }
+            try {
+                const res = await fetch(`${API_URL}/locations/${locationId}`, {
+                    method: 'PATCH', credentials: 'include',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+                    body: JSON.stringify({ is_active: activate }),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(showApiError(res, data, 'Could not update this location.'));
+                showToast(activate ? 'Location reactivated.' : 'Location deactivated.', 'success');
+                await loadLocations();
+            } catch (e) {
+                showToast(friendlyErrorMessage(e.message, e.message), 'error');
+            }
+        }
+
+        // --- Warehouse create form: Location dropdown ---------------------------
+        // Hidden entirely for a single-location business (section 6/9's "don't
+        // overload the UI" principle) — a lone active Location is implicit and
+        // never needs a picker; the backend already defaults new warehouses to
+        // it when no location_id is sent.
+        function updateWarehouseLocationDropdown() {
+            const wrap = document.getElementById('new-warehouse-location-wrap');
+            const select = document.getElementById('new-warehouse-location');
+            if (!wrap || !select) return;
+            const active = activeLocations();
+            if (active.length <= 1) { wrap.classList.add('hidden'); select.innerHTML = ''; return; }
+            wrap.classList.remove('hidden');
+            select.innerHTML = active.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join('');
+            const mainLoc = active.find(l => l.is_main);
+            if (mainLoc) select.value = mainLoc.id;
+        }
+
+        // --- Dashboard Business Day location selector ---------------------------
+        function renderBusinessDayLocationSelector() {
+            const wrap = document.getElementById('business-day-location-select-wrap');
+            const select = document.getElementById('business-day-location-select');
+            if (!wrap || !select) return;
+            const active = activeLocations();
+            if (active.length <= 1) {
+                wrap.classList.add('hidden');
+                selectedBusinessDayLocationId = active.length === 1 ? active[0].id : null;
+                return;
+            }
+            wrap.classList.remove('hidden');
+            select.innerHTML = active.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join('');
+            const stillValid = selectedBusinessDayLocationId && active.some(l => l.id === selectedBusinessDayLocationId);
+            if (!stillValid) selectedBusinessDayLocationId = (active.find(l => l.is_main) || active[0]).id;
+            select.value = selectedBusinessDayLocationId;
+        }
+        function handleBusinessDayLocationChange() {
+            const select = document.getElementById('business-day-location-select');
+            selectedBusinessDayLocationId = select ? parseInt(select.value, 10) || null : null;
+            loadBusinessDayControl();
+        }
+
         async function loadInventoryView() {
             if (!authToken) {
                 inventoryViewProducts = [];
@@ -26246,7 +26487,7 @@
                 // the user open one of these while it's still silently
                 // fetching, which is the exact misleading state this is meant
                 // to prevent.
-                const coreBatch = Promise.all([loadWarehouses(), loadInventoryView()]);
+                const coreBatch = Promise.all([loadWarehouses(), loadInventoryView(), loadLocations()]);
                 const readinessBatch = Promise.allSettled([
                     checkSubscriptionWarningForDashboard(),
                     checkPendingReopenCountForDashboard(),
@@ -27781,9 +28022,13 @@
             const selectProduct = document.getElementById("transfer-product");
 
             const canDeactivateWarehouse = hasPermission('warehouse.deactivate');
+            const showLocationBadge = activeLocations().length > 1;
             listContainer.innerHTML = warehouseRecords.map(w => `
                 <div class="flex items-center justify-between bg-cardBg px-3 py-1.5 rounded-xl border border-borderCol text-xs text-textMain">
-                    <span class="font-medium min-w-0 truncate"><i class="fa-solid fa-warehouse text-primary mr-1.5"></i> ${escapeEmployeeHtml(w.name)}</span>
+                    <span class="font-medium min-w-0 truncate">
+                        <i class="fa-solid fa-warehouse text-primary mr-1.5"></i> ${escapeEmployeeHtml(w.name)}
+                        ${showLocationBadge ? `<span class="ml-1.5 text-[9px] text-textSec font-normal"><i class="fa-solid fa-location-dot mr-0.5"></i>${escapeEmployeeHtml(w.location_name || 'Unassigned')}</span>` : ''}
+                    </span>
                     <span class="flex items-center gap-2 shrink-0">
                         <span class="text-[10px] text-textSec font-mono">${t('warehouses.skuCount', { count: w.sku_count ?? 0 })}</span>
                         ${canDeactivateWarehouse ? `<button type="button" onclick="handleDeleteWarehouse(${w.id}, '${escapeEmployeeHtml(w.name).replace(/'/g, "\\'")}')" class="text-textSec hover:text-danger transition cursor-pointer" title="${t('warehouses.deleteWarehouse')}"><i class="fa-solid fa-trash-can text-[11px]"></i></button>` : ''}
@@ -27841,11 +28086,17 @@
             const nameInput = document.getElementById("new-warehouse-name");
             const name = nameInput.value.trim();
             if (!name) return;
+            const locationSelect = document.getElementById("new-warehouse-location");
+            const locationWrap = document.getElementById("new-warehouse-location-wrap");
+            const body = { name };
+            if (locationWrap && !locationWrap.classList.contains('hidden') && locationSelect?.value) {
+                body.location_id = parseInt(locationSelect.value, 10);
+            }
             try {
                 const res = await fetch(`${API_URL}/warehouses/`, {
                     method: "POST", credentials: "include",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
-                    body: JSON.stringify({ name })
+                    body: JSON.stringify(body)
                 });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) throw new Error(showApiError(res, data, t('warehouses.createFailed')));

@@ -418,6 +418,15 @@
                             <div id="business-day-header-sub" class="text-[10px] text-textSec truncate"></div>
                         </div>
                     </div>
+                    <!-- Location context (section 12) — hidden entirely unless the
+                         business has MORE THAN ONE active Location, so a
+                         single-location business (the common case) sees no
+                         selector at all. Client selection is UI context only;
+                         the backend independently validates/re-checks every
+                         open/close/current-summary call against it. -->
+                    <div id="business-day-location-select-wrap" class="hidden shrink-0">
+                        <select id="business-day-location-select" onchange="handleBusinessDayLocationChange()" class="bg-bgMain border border-borderCol text-textMain text-[11px] rounded-xl px-2.5 py-1.5 focus:outline-none focus:border-primary cursor-pointer font-semibold"></select>
+                    </div>
                     <!-- Sales Today / Net Profit live inside the Business Day bar (not Business Brain).
                          Same IDs the profit/sales dashboard code already targets; same click-through to
                          the Sales and Profit modals. Both read the CURRENT open Business Day session
@@ -1156,6 +1165,19 @@
             </div>
 
             <div data-dynamic-status></div>
+
+            <!-- LOCATIONS / BRANCHES — Business Profile HAS MANY Locations,
+                 each of which owns Warehouses (see backend Location model).
+                 Shown to Admin (full CRUD) and Manager (read-only); Staff
+                 never reaches this modal at all (menu-gated). This is NOT a
+                 second Business Profile — it is a sub-section of this one. -->
+            <div id="locations-panel" class="mb-3 pb-3 border-b border-borderCol">
+                <div class="flex items-center justify-between mb-1.5">
+                    <h4 class="font-semibold text-textSec uppercase tracking-wider text-[10px] flex items-center gap-1.5"><i class="fa-solid fa-map-location-dot text-primary"></i> Locations / Branches</h4>
+                    <button type="button" id="add-location-btn" onclick="openLocationFormModal(null)" class="hidden text-[10px] text-primary hover:underline font-semibold cursor-pointer flex items-center gap-1"><i class="fa-solid fa-plus"></i> Add Location</button>
+                </div>
+                <div id="locations-list-container" class="flex flex-col gap-1.5 max-h-[220px] overflow-y-auto"></div>
+            </div>
 
             <!-- MANAGER READ-ONLY VIEW. Rendered INSTEAD of the editable form
                  whenever the signed-in user is not an Admin: a genuine read-only
@@ -2525,6 +2547,62 @@
         </div>
     </div>
 
+    <!-- ADD/EDIT LOCATION MODAL — Admin only (Manager never opens this; the
+         panel above hides the button that would). z-[70] sits above the
+         Business Profile modal it is opened from top of. -->
+    <div id="location-form-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-[70] hidden flex items-center justify-center p-4">
+        <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-md w-full shadow-2xl flex flex-col max-h-[90vh]">
+            <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
+                <h3 id="location-form-title" class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-map-location-dot text-primary"></i> Add Location</h3>
+                <button type="button" onclick="closeLocationFormModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+            </div>
+            <form id="location-form" onsubmit="handleSaveLocation(event)" class="space-y-2.5 text-xs flex-1 overflow-y-auto pr-1">
+                <input type="hidden" id="location-form-id" value="">
+                <div>
+                    <label class="block font-medium text-textSec mb-1">Location / Branch Name</label>
+                    <input type="text" id="location-name-input" placeholder="Lagos HQ" required class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-semibold">
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                    <div>
+                        <label class="block font-medium text-textSec mb-1">Country</label>
+                        <select id="location-country-select" onchange="handleLocationCountryChange()" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary cursor-pointer"></select>
+                    </div>
+                    <div>
+                        <label class="block font-medium text-textSec mb-1">City</label>
+                        <input type="text" id="location-city-input" placeholder="Lagos" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                    <div>
+                        <label class="block font-medium text-textSec mb-1">Timezone</label>
+                        <input type="text" id="location-timezone-input" placeholder="Africa/Lagos" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                    </div>
+                    <div>
+                        <label class="block font-medium text-textSec mb-1">Currency</label>
+                        <input type="text" id="location-currency-input" placeholder="NGN (₦)" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                    </div>
+                </div>
+                <div>
+                    <label class="block font-medium text-textSec mb-1">Contact Phone</label>
+                    <input type="text" id="location-phone-input" placeholder="Local number for this location" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                    <p id="location-phone-error" class="hidden text-[10px] text-danger mt-1"></p>
+                </div>
+                <div>
+                    <label class="block font-medium text-textSec mb-1">Contact Email</label>
+                    <input type="email" id="location-email-input" placeholder="branch@mycompany.com" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                </div>
+                <div>
+                    <label class="block font-medium text-textSec mb-1">Address</label>
+                    <input type="text" id="location-address-input" placeholder="12 Main Street" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                </div>
+                <div class="flex justify-end gap-2 pt-3 border-t border-borderCol mt-1">
+                    <button type="button" onclick="closeLocationFormModal()" class="bg-bgMain hover:bg-cardHover text-textSec px-3.5 py-2 rounded-xl font-semibold transition border border-borderCol cursor-pointer">Cancel</button>
+                    <button type="submit" id="location-form-submit" class="bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-semibold transition shadow-md cursor-pointer">Save Location</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- WAREHOUSES MODAL -->
     <div id="warehouse-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-lg w-full shadow-2xl flex flex-col max-h-[85vh]">
@@ -2539,9 +2617,15 @@
             <div class="flex-1 overflow-y-auto pr-1 space-y-4 text-xs">
                 <div id="add-warehouse-form-wrap" class="p-3 rounded-xl bg-bgMain border border-borderCol">
                     <h4 class="font-semibold text-textMain mb-2 text-xs" data-i18n="warehouses.addNewLocation">Add New Storage Location</h4>
-                    <form onsubmit="handleCreateWarehouse(event)" class="flex gap-2">
-                        <input type="text" id="new-warehouse-name" placeholder="Branch Store" data-i18n-placeholder="warehouses.branchStorePlaceholder" class="flex-1 bg-cardBg border border-borderCol rounded-xl px-2.5 py-1.5 text-textMain focus:outline-none focus:border-primary">
-                        <button type="submit" class="bg-primary hover:bg-primaryHover text-white px-3.5 py-1.5 rounded-xl font-semibold transition cursor-pointer" data-i18n="common.add">Add</button>
+                    <form onsubmit="handleCreateWarehouse(event)" class="flex flex-col gap-2">
+                        <div class="flex gap-2">
+                            <input type="text" id="new-warehouse-name" placeholder="Branch Store" data-i18n-placeholder="warehouses.branchStorePlaceholder" class="flex-1 bg-cardBg border border-borderCol rounded-xl px-2.5 py-1.5 text-textMain focus:outline-none focus:border-primary">
+                            <button type="submit" class="bg-primary hover:bg-primaryHover text-white px-3.5 py-1.5 rounded-xl font-semibold transition cursor-pointer" data-i18n="common.add">Add</button>
+                        </div>
+                        <div id="new-warehouse-location-wrap" class="hidden">
+                            <label class="block font-medium text-textSec mb-1 text-[10px]">Business Location <i class="fa-solid fa-map-location-dot ml-0.5"></i></label>
+                            <select id="new-warehouse-location" class="w-full bg-cardBg border border-borderCol rounded-xl px-2.5 py-1.5 text-textMain focus:outline-none focus:border-primary cursor-pointer text-[11px]"></select>
+                        </div>
                     </form>
                 </div>
 

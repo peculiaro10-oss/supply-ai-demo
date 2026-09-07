@@ -2999,7 +2999,7 @@ def checkout_key_expr():
     dialect-specific branching needed."""
     return func.coalesce(SaleModel.client_ref, literal("S") + cast(SaleModel.id, String))
 
-def compute_financial_summary(db: Session, business_id: int, start_utc: Optional[datetime], end_utc: Optional[datetime]) -> Dict[str, Any]:
+def compute_financial_summary(db: Session, business_id: int, start_utc: Optional[datetime], end_utc: Optional[datetime], location_id: Optional[int] = None) -> Dict[str, Any]:
     """Revenue, COGS, gross/net profit and margin for [start_utc, end_utc) —
     or across all time if both are None — computed with DB-side aggregation
     (not a Python loop over every row) so this stays fast regardless of how
@@ -3044,6 +3044,21 @@ def compute_financial_summary(db: Session, business_id: int, start_utc: Optional
         expense_filters += [Expense.created_at >= start_utc, Expense.created_at < end_utc]
         sale_adj_filters += [SaleModel.timestamp >= start_utc, SaleModel.timestamp < end_utc]
         expense_adj_filters += [Expense.created_at >= start_utc, Expense.created_at < end_utc]
+    # Location scoping (section 20/21): a row is only attributable to a
+    # specific Location through its own Business Day session
+    # (business_day_id -> BusinessDay.location_id) — never guessed from a
+    # timezone or from whichever session happens to be open right now. A row
+    # with no business_day_id (legacy, pre-migration) has no known location
+    # and is correctly EXCLUDED from a location-filtered view, exactly like
+    # an unknown COGS snapshot is treated as unknown rather than silently
+    # zero. Every query below that reuses sales_filters/expense_filters/
+    # sale_adj_filters/expense_adj_filters therefore inherits this scoping
+    # automatically — nothing further needed at each individual query site.
+    if location_id is not None:
+        sales_filters += [SaleModel.business_day_id == BusinessDay.id, BusinessDay.location_id == location_id]
+        expense_filters += [Expense.business_day_id == BusinessDay.id, BusinessDay.location_id == location_id]
+        sale_adj_filters += [SaleModel.business_day_id == BusinessDay.id, BusinessDay.location_id == location_id]
+        expense_adj_filters += [Expense.business_day_id == BusinessDay.id, BusinessDay.location_id == location_id]
 
     sales_row = (
         db.query(
@@ -3126,6 +3141,8 @@ def compute_financial_summary(db: Session, business_id: int, start_utc: Optional
     refund_filters = [RefundLine.business_id == business_id]
     if start_utc is not None and end_utc is not None:
         refund_filters += [RefundLine.created_at >= start_utc, RefundLine.created_at < end_utc]
+    if location_id is not None:
+        refund_filters += [RefundLine.business_day_id == BusinessDay.id, BusinessDay.location_id == location_id]
     refund_row = (
         db.query(
             func.coalesce(func.sum(RefundLine.refund_amount), 0.0),
@@ -3147,6 +3164,8 @@ def compute_financial_summary(db: Session, business_id: int, start_utc: Optional
     refund_txn_filters = [RefundTransaction.business_id == business_id]
     if start_utc is not None and end_utc is not None:
         refund_txn_filters += [RefundTransaction.created_at >= start_utc, RefundTransaction.created_at < end_utc]
+    if location_id is not None:
+        refund_txn_filters += [RefundTransaction.business_day_id == BusinessDay.id, BusinessDay.location_id == location_id]
     refund_transaction_count = db.query(func.count(RefundTransaction.id)).filter(*refund_txn_filters).scalar() or 0
 
     total_sales -= refund_amount
@@ -3187,11 +3206,23 @@ def compute_financial_summary(db: Session, business_id: int, start_utc: Optional
         "period_start": to_utc_iso(start_utc), "period_end": to_utc_iso(end_utc),
     }
 
-def financial_summary_for_period(db: Session, business: "BusinessProfile", period: str, custom_start: Optional[str] = None, custom_end: Optional[str] = None) -> Dict[str, Any]:
+def financial_summary_for_period(db: Session, business: "BusinessProfile", period: str, custom_start: Optional[str] = None, custom_end: Optional[str] = None, location_id: Optional[int] = None) -> Dict[str, Any]:
     start_utc, end_utc = resolve_financial_period(business, period, custom_start, custom_end)
-    summary = compute_financial_summary(db, business.id, start_utc, end_utc)
+    summary = compute_financial_summary(db, business.id, start_utc, end_utc, location_id=location_id)
     summary["period"] = period
     return summary
+
+def validate_location_for_business(db: Session, business_id: int, location_id: Optional[int]) -> Optional[int]:
+    """Shared guard for every reporting endpoint's optional ?location_id= —
+    never trusts a raw id without confirming it is a real, active Location
+    belonging to THIS business (section 21's "backend still validates
+    location belongs to business")."""
+    if location_id is None:
+        return None
+    loc = db.query(Location).filter(Location.id == location_id, Location.business_id == business_id).first()
+    if not loc:
+        raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+    return loc.id
 
 def get_business_by_code(db: Session, business_code: str) -> Optional[BusinessProfile]:
     cleaned = re.sub(r"[^A-Za-z0-9]", "", (business_code or "")).casefold()
@@ -4180,23 +4211,43 @@ def business_local_today(db: Session, business_id: int) -> str:
 
 BUSINESS_DAY_ALREADY_ACTIVE_MSG = "Another Business Day is currently open. Close it before opening or reopening another Business Day."
 
-def get_active_business_day(db: Session, business_id: int) -> Optional[BusinessDay]:
+def get_active_business_day(db: Session, business_id: int, location_id: Optional[int] = None) -> Optional[BusinessDay]:
     """The one source of truth for "what Business Day session is currently
     active" — the row where is_open is True, if any. NEVER date-based: a
     business may have many BusinessDay sessions on the same business-local
     date (see the BusinessDay model docstring), so this looks at lifecycle
-    state only, not `date`. At most one such row can exist at a time,
-    enforced by a partial unique index (see startup migrations); if a reopen
-    ever raced its way past that somehow, ordering by opened_at desc at
-    least returns the most-recently-opened one rather than an arbitrary row."""
+    state only, not `date`. At most one such row can exist PER LOCATION,
+    enforced by a partial unique index on (business_id, location_id) (see
+    migration 0025_business_day_per_location); if a reopen ever raced its
+    way past that somehow, ordering by opened_at desc at least returns the
+    most-recently-opened one rather than an arbitrary row.
+
+    location_id is optional for backward compatibility: omitted, this
+    returns whichever session is active ANYWHERE in the business (correct
+    for a single-location business, and for callers — like the POS checkout
+    auto-open path — that have no location context of their own yet). Passed
+    explicitly, it scopes strictly to that one location, which is what every
+    Dashboard open/close/current-summary action now does once a business has
+    more than one active Location."""
+    q = db.query(BusinessDay).filter(BusinessDay.business_id == business_id, BusinessDay.is_open == True)
+    if location_id is not None:
+        q = q.filter(BusinessDay.location_id == location_id)
+    return q.order_by(BusinessDay.opened_at.desc()).first()
+
+def get_active_business_days(db: Session, business_id: int) -> List[BusinessDay]:
+    """Every currently-open session across ALL of this business's locations —
+    used only by the Dashboard's "which location(s) are currently open"
+    context (GET /business-days/active-sessions) and to decide whether a
+    location selector must be shown at all (a single active location never
+    needs one — section 12)."""
     return (
         db.query(BusinessDay)
         .filter(BusinessDay.business_id == business_id, BusinessDay.is_open == True)
         .order_by(BusinessDay.opened_at.desc())
-        .first()
+        .all()
     )
 
-def _create_business_day_session(db: Session, business_id: int, opener: Optional[User], auto: bool = False, commit: bool = True) -> BusinessDay:
+def _create_business_day_session(db: Session, business_id: int, opener: Optional[User], auto: bool = False, commit: bool = True, location_id: Optional[int] = None) -> BusinessDay:
     """Unconditionally creates and audits a brand-new Business Day
     session row. Callers MUST have already confirmed no other session is
     currently active (see get_active_business_day) — this never looks up or
@@ -4213,10 +4264,18 @@ def _create_business_day_session(db: Session, business_id: int, opener: Optional
     different things when reconstructing what happened, so they must not be
     logged under the same action code."""
     today = business_local_today(db, business_id)
-    default_location = get_default_location(db, business_id)
+    # An explicit location_id (passed by start_business_day once it has
+    # resolved/validated the target Location) always wins; only a caller
+    # that has no location context at all (e.g. the checkout auto-open path)
+    # falls back to the business's default location.
+    if location_id is not None:
+        resolved_location_id = location_id
+    else:
+        default_location = get_default_location(db, business_id)
+        resolved_location_id = default_location.id if default_location else None
     day = BusinessDay(
         business_id=business_id, date=today, is_open=True, status="OPEN",
-        location_id=default_location.id if default_location else None,
+        location_id=resolved_location_id,
         opened_by_id=opener.id if opener else None,
         opened_by_name=opener.username if opener else None,
         opened_by_role=opener.role if opener else None,
@@ -4240,24 +4299,43 @@ def _create_business_day_session(db: Session, business_id: int, opener: Optional
         db.flush()
     return day
 
-def start_business_day(db: Session, business_id: int, opener: Optional[User]) -> BusinessDay:
+def resolve_business_day_location(db: Session, business_id: int, location_id: Optional[int]) -> Optional["Location"]:
+    """Shared resolution used by every Business Day open/close/current-
+    summary entry point: an explicit location_id must be a real, active
+    Location belonging to THIS business (never trusted blindly — always
+    re-validated server-side, per section 12's "client selection is just UI
+    context" rule); omitted, it falls back to the business's default
+    location exactly as before this pass."""
+    if location_id is not None:
+        location = db.query(Location).filter(Location.id == location_id, Location.business_id == business_id, Location.is_active == True).first()
+        if not location:
+            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+        return location
+    return get_default_location(db, business_id)
+
+def start_business_day(db: Session, business_id: int, opener: Optional[User], location_id: Optional[int] = None) -> BusinessDay:
     """The explicit "Open Business Day" action (see /sales/start-business-
     day). ALWAYS creates a brand-new session — a closed session from earlier
     today (or any other date) is history, never something this reuses or
     "continues" (that would be a reopen, a completely separate, more
     privileged, audited workflow that only exists in Sales History). The
-    only thing that can block this is another Business Day currently being
-    active — raises the exact required conflict error in that case, never a
-    stale "already closed today" message.
+    only thing that can block this is another Business Day ALREADY ACTIVE AT
+    THE SAME LOCATION — a second, different Location opening its own session
+    at the same time is not a conflict at all (section 13); raises the exact
+    required conflict error only in the true per-location collision case,
+    never a stale "already closed today" message.
 
-    Race-safe via the partial unique index on (business_id) WHERE is_open
-    (see startup migrations): if two concurrent opens both pass the
-    active-day check, only one insert can succeed and the loser gets the
-    same conflict error a strictly-sequential second call would have gotten."""
-    if get_active_business_day(db, business_id):
+    Race-safe via the partial unique index on (business_id, location_id)
+    WHERE is_open (see migration 0025_business_day_per_location): if two
+    concurrent opens for the SAME location both pass the active-day check,
+    only one insert can succeed and the loser gets the same conflict error a
+    strictly-sequential second call would have gotten."""
+    target_location = resolve_business_day_location(db, business_id, location_id)
+    target_location_id = target_location.id if target_location else None
+    if get_active_business_day(db, business_id, location_id=target_location_id):
         raise HTTPException(status_code=409, detail=BUSINESS_DAY_ALREADY_ACTIVE_MSG)
     try:
-        return _create_business_day_session(db, business_id, opener)
+        return _create_business_day_session(db, business_id, opener, location_id=target_location_id)
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail=BUSINESS_DAY_ALREADY_ACTIVE_MSG)
@@ -4411,8 +4489,10 @@ def serialize_business_day(day: Optional[BusinessDay], db: Session) -> Optional[
         func.coalesce(func.sum(Expense.amount), 0.0),
     ).scalar()
     refund_total, refunded_units, refund_transaction_count = _business_day_refund_totals(db, day)
+    location = db.query(Location).filter(Location.id == day.location_id).first() if day.location_id else None
     return {
         "id": day.id, "date": day.date, "status": day.status, "is_open": day.is_open,
+        "location_id": day.location_id, "location_name": location.name if location else None,
         "opened_at": to_utc_iso(day.opened_at), "opened_by_name": day.opened_by_name, "opened_by_role": day.opened_by_role,
         "closed_at": to_utc_iso(day.closed_at), "closed_by_name": day.closed_by_name, "closed_by_role": day.closed_by_role,
         "reopen_count": day.reopen_count,
@@ -6525,9 +6605,17 @@ def create_location(data: LocationCreate, user: User = Depends(get_current_user)
     duplicate = db.query(Location).filter(Location.business_id == user.business_id, func.lower(Location.name) == name.casefold()).first()
     if duplicate:
         raise HTTPException(status_code=409, detail="A location with that name already exists.")
+    # Location contact phone follows the SAME country-aware, backend-
+    # authoritative rule as every other phone field in the app (Issue #1 /
+    # section 24): validated and canonicalized to strict E.164 via to_e164(),
+    # never stored as whatever free text the client happened to send. The
+    # location's OWN country_code drives this — never the caller's own
+    # business/profile country — since a Location can legitimately be in a
+    # different country from the business's registration country.
+    canonical_phone = to_e164(data.contact_phone, data.country_code or "") if data.contact_phone else None
     row = Location(
         business_id=user.business_id, name=name, country=data.country, country_code=data.country_code, city=data.city,
-        timezone=data.timezone, currency=data.currency, contact_phone=data.contact_phone,
+        timezone=data.timezone, currency=data.currency, contact_phone=canonical_phone,
         contact_email=str(data.contact_email) if data.contact_email else None, address=data.address, is_active=True, is_main=False,
     )
     db.add(row); db.flush()
@@ -6550,10 +6638,16 @@ def update_location(location_id: int, data: LocationUpdate, user: User = Depends
         if duplicate:
             raise HTTPException(status_code=409, detail="A location with that name already exists.")
         row.name = new_name
-    for field in ("country", "country_code", "city", "timezone", "currency", "contact_phone", "address"):
+    for field in ("country", "country_code", "city", "timezone", "currency", "address"):
         value = getattr(data, field)
         if value is not None:
             setattr(row, field, value)
+    if data.contact_phone is not None:
+        # Same phone-number rule as create_location() above — canonicalized
+        # against this Location's EFFECTIVE country_code (the value just set
+        # above if this same request changed it, otherwise whatever the
+        # Location already had), never trusted as raw client text.
+        row.contact_phone = to_e164(data.contact_phone, row.country_code or "")
     if data.contact_email is not None:
         row.contact_email = str(data.contact_email)
     if data.is_active is not None:
@@ -8588,7 +8682,6 @@ def get_purchase_orders(user: User = Depends(get_current_user), db: Session = De
         out.append({"id": po.id, "supplier_id": po.supplier_id, "vendor_name": supplier.name if supplier else "General Vendor", "status": po.status, "total_estimated_cost": po.total_estimated_cost, "items_summary": po.email_draft or "", "email_draft": po.email_draft or "", "created_at": to_utc_iso(po.created_at), "sent_at": to_utc_iso(po.sent_at), "created_by": owner_name(po.owner_id)})
     return out
 
-@app.post("/purchase-orders/generate")
 def resolve_purchase_order_requirements(db: Session, business_id: int, product_id: int) -> None:
     """Call this whenever a product's stock genuinely increases (manual
     stock adjustment, refund restock) — closes out any still-open
@@ -8607,6 +8700,7 @@ def resolve_purchase_order_requirements(db: Session, business_id: int, product_i
         PurchaseOrderRequirement.resolved_at.is_(None),
     ).update({PurchaseOrderRequirement.resolved_at: datetime.utcnow()}, synchronize_session=False)
 
+@app.post("/purchase-orders/generate")
 def generate_po(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "po.create")
     # No subscription/plan-limit check here, on purpose. A generated PO always
@@ -9359,7 +9453,7 @@ def create_refund(transaction_key: str, payload: RefundRequest, user: User = Dep
     }
 
 @app.get("/sales/current-day")
-def current_sales_day(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def current_sales_day(location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # Read-only: looks up the currently ACTIVE Business Day session, if any
     # — never date-based, never creates one. A session closed earlier today
     # (or any prior day) is history, not "the current day" — once nothing is
@@ -9367,13 +9461,28 @@ def current_sales_day(user: User = Depends(get_current_user), db: Session = Depe
     # null, so the dashboard/Today's Sales view has no way to render a
     # leftover "Reopen" affordance from a closed session's last state.
     # Opening this view must never, by itself, start a session.
-    day = get_active_business_day(db, user.business_id)
+    #
+    # location_id (section 12): an explicit choice from the Dashboard's
+    # location selector looks up exactly that location's session. Omitted,
+    # this uses the sole open session when there is exactly one (the
+    # original single-location behaviour, completely unchanged) — with
+    # zero or with MORE than one open session and no explicit choice, this
+    # correctly reports NOT_STARTED rather than guessing which one to show;
+    # requires_location_selection tells the frontend WHY, so it can offer
+    # the selector instead of silently looking closed.
+    if location_id is not None:
+        day = get_active_business_day(db, user.business_id, location_id=location_id)
+    else:
+        open_sessions = get_active_business_days(db, user.business_id)
+        if len(open_sessions) > 1:
+            return {"open": False, "status": "NOT_STARTED", "business_day": None, "requires_location_selection": True}
+        day = open_sessions[0] if open_sessions else None
     if not day:
         return {"open": False, "status": "NOT_STARTED", "business_day": None}
     return {"open": True, "status": day.status, "business_day": serialize_business_day(day, db)}
 
 @app.post("/sales/start-business-day")
-def start_business_day_endpoint(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def start_business_day_endpoint(location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # Business Day open/close is available to every operational role — Admin,
     # Manager, and Staff — since Staff are often the ones physically running
     # the counter (see the Business Day role-permission model). Reopening a
@@ -9387,27 +9496,33 @@ def start_business_day_endpoint(user: User = Depends(get_current_user), db: Sess
     # another session currently being active, in which case
     # start_business_day itself raises the required conflict message.
     require_permission(user, "business_day.manage")
-    day = start_business_day(db, user.business_id, opener=user)
+    day = start_business_day(db, user.business_id, opener=user, location_id=location_id)
     return {"message": "Business day started.", "business_day": serialize_business_day(day, db)}
 
 @app.post("/sales/open-business-day")
-def open_business_day_endpoint(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def open_business_day_endpoint(location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Idempotent "Open Business Day": returns the currently active session
     if one already exists rather than erroring, otherwise opens a fresh one.
     Deliberately distinct from /sales/start-business-day above, which is
     strict (409 if a session is already active) and is what the Dashboard
     control calls — the two exist because "make sure a day is open" and
     "start a new day, and tell me if that's not possible" are different
-    intents and must not silently collapse into one behaviour."""
+    intents and must not silently collapse into one behaviour.
+
+    location_id scopes both the "already open?" check and the open itself to
+    one specific Location (section 13) — omitted, it targets the business's
+    default location exactly as before this pass."""
     require_permission(user, "business_day.manage")
-    existing = get_active_business_day(db, user.business_id)
+    target_location = resolve_business_day_location(db, user.business_id, location_id)
+    target_location_id = target_location.id if target_location else None
+    existing = get_active_business_day(db, user.business_id, location_id=target_location_id)
     if existing:
         return {"message": "This Business Day is already open.", "business_day": serialize_business_day(existing, db), "already_open": True}
-    day = start_business_day(db, user.business_id, opener=user)
+    day = start_business_day(db, user.business_id, opener=user, location_id=target_location_id)
     return {"message": "Business day started.", "business_day": serialize_business_day(day, db), "already_open": False}
 
 @app.get("/business-days/current-summary")
-def current_business_day_summary(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def current_business_day_summary(location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """The live financial state of the CURRENTLY ACTIVE Business Day session
     — the operational "what has happened since we opened" view, which is a
     different question from the calendar-period "today" that
@@ -9423,7 +9538,16 @@ def current_business_day_summary(user: User = Depends(get_current_user), db: Ses
     the close snapshot and Sales History use — never a second, independently
     written formula."""
     require_permission(user, "business_day.manage")
-    day = get_active_business_day(db, user.business_id)
+    # No location_id given: use it if the business has exactly ONE currently
+    # open session (the common single-location case never needs a selector —
+    # section 12); with zero or with MORE THAN ONE open session and no
+    # explicit choice, this correctly reports closed/ambiguous rather than
+    # guessing which location's numbers to show.
+    if location_id is not None:
+        day = get_active_business_day(db, user.business_id, location_id=location_id)
+    else:
+        open_sessions = get_active_business_days(db, user.business_id)
+        day = open_sessions[0] if len(open_sessions) == 1 else None
     if not day:
         return {
             "open": False, "business_day": None,
@@ -9436,17 +9560,65 @@ def current_business_day_summary(user: User = Depends(get_current_user), db: Ses
         }
     return {"open": True, "business_day": serialize_business_day(day, db), **_business_day_financials(db, day)}
 
+@app.get("/business-days/active-sessions")
+def list_active_business_day_sessions(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Every Location that currently has an OPEN Business Day session, for
+    the Dashboard's location context (section 12): zero results means
+    nothing is open anywhere; exactly one means the Dashboard proceeds with
+    no selector at all; more than one means a compact Location selector is
+    shown and every open/close/current-summary call from then on must pass
+    the chosen location_id explicitly."""
+    require_permission(user, "business_day.manage")
+    rows = get_active_business_days(db, user.business_id)
+    out = []
+    for day in rows:
+        location = db.query(Location).filter(Location.id == day.location_id).first() if day.location_id else None
+        out.append({
+            "business_day_id": day.id, "location_id": day.location_id,
+            "location_name": location.name if location else "Main Location",
+            "opened_at": to_utc_iso(day.opened_at),
+        })
+    return out
+
 @app.get("/financial-summary")
-def financial_summary(period: str = Query("today"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def financial_summary(period: str = Query("today"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """The one endpoint behind every profit/revenue/expense figure shown
     anywhere in Cauldra — Dashboard, Sales History period totals, Expense
     History period totals, and the Profit page all call this exact endpoint
     rather than calculating anything independently, so they can never
-    disagree with each other."""
+    disagree with each other.
+
+    location_id is optional (section 20): omitted, this reports across the
+    WHOLE business exactly as before this pass; a business with only one
+    Location never needs it. Passed, every figure is scoped to that one
+    Location only — never a client-side filter of the same combined total."""
     require_permission(user, "reports.profit")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
-    return financial_summary_for_period(db, business, period, custom_start, custom_end)
+    validated_location_id = validate_location_for_business(db, user.business_id, location_id)
+    return financial_summary_for_period(db, business, period, custom_start, custom_end, location_id=validated_location_id)
+
+@app.get("/financial-summary/by-location")
+def financial_summary_by_location(period: str = Query("today"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The "All Locations" view's data source (section 21): one row per
+    active Location, each independently scoped exactly like /financial-
+    summary?location_id=<that location> would be. Deliberately NEVER sums
+    figures across different currencies itself — it only supplies the
+    correctly-scoped per-location numbers (each carrying its own currency);
+    the frontend groups these rows by currency and renders a separate
+    subtotal per currency group, never one fabricated combined total."""
+    require_permission(user, "reports.profit")
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    if not business: raise HTTPException(status_code=404, detail="Business not found.")
+    locations = db.query(Location).filter(Location.business_id == user.business_id, Location.is_active == True).order_by(Location.is_main.desc(), Location.name.asc()).all()
+    out = []
+    for loc in locations:
+        summary = financial_summary_for_period(db, business, period, custom_start, custom_end, location_id=loc.id)
+        summary["location_id"] = loc.id
+        summary["location_name"] = loc.name
+        summary["currency"] = loc.currency or business.currency
+        out.append(summary)
+    return out
 
 @app.get("/financial-summary/breakdown")
 def financial_summary_breakdown(period: str = Query("today"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -9489,10 +9661,13 @@ def financial_summary_breakdown(period: str = Query("today"), custom_start: Opti
     }
 
 @app.get("/sales/history")
-def sales_history(period: str = Query("all"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def sales_history(period: str = Query("all"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "sales.view_history")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
+    if location_id is not None:
+        loc_check = db.query(Location).filter(Location.id == location_id, Location.business_id == user.business_id).first()
+        if not loc_check: raise HTTPException(status_code=400, detail="That location could not be found for this business.")
     # Same shared period resolver every other date-range filter in the app
     # uses (Profit, Expense History's totals) — business-timezone-aware, and
     # period="all" (the default, preserving this endpoint's original
@@ -9507,6 +9682,8 @@ def sales_history(period: str = Query("all"), custom_start: Optional[str] = Quer
     days_query = db.query(BusinessDay).filter(BusinessDay.business_id == user.business_id, BusinessDay.closed_at.isnot(None))
     if start_utc is not None and end_utc is not None:
         days_query = days_query.filter(BusinessDay.opened_at >= start_utc, BusinessDay.opened_at < end_utc)
+    if location_id is not None:
+        days_query = days_query.filter(BusinessDay.location_id == location_id)
     # Ordered by opened_at, not date — a business can have multiple sessions
     # on the same calendar date (see the BusinessDay model docstring), and
     # `date` alone can't distinguish or order them, only opened_at can.
@@ -9565,6 +9742,13 @@ def sales_history(period: str = Query("all"), custom_start: Optional[str] = Quer
     else:
         refund_totals_map, refund_txn_map = {}, {}
 
+    # Location display names — batched (one query for every distinct id
+    # across this page of history) rather than one lookup per row.
+    location_ids = {d.location_id for d in days if d.location_id}
+    location_names = {}
+    if location_ids:
+        location_names = {l.id: l.name for l in db.query(Location).filter(Location.id.in_(location_ids)).all()}
+
     out = []
     for d in days:
         t = totals_map.get(d.id, {"gross_sales": 0.0, "items_sold": 0, "transactions": 0})
@@ -9578,6 +9762,7 @@ def sales_history(period: str = Query("all"), custom_start: Optional[str] = Quer
             "refund_total": round(r["refund_total"], 2), "refunded_units": r["refunded_units"],
             "refund_transaction_count": refund_txn_map.get(d.id, 0),
             "business_day_id": d.id, "status": d.status,
+            "location_id": d.location_id, "location_name": location_names.get(d.location_id, "Main Location" if not d.location_id else None),
             "opened_at": to_utc_iso(d.opened_at), "opened_by_name": d.opened_by_name, "opened_by_role": d.opened_by_role,
             "closed_at": to_utc_iso(d.closed_at), "closed_by_name": d.closed_by_name, "closed_by_role": d.closed_by_role,
             "reopen_count": d.reopen_count,
@@ -9715,19 +9900,28 @@ def _close_business_day(db: Session, day: BusinessDay, user: User) -> dict:
     return {"message": "Business day closed and recorded.", "business_day": serialize_business_day(day, db), "closing_snapshot": snapshot}
 
 @app.post("/sales/end-business-day")
-def end_business_day(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def end_business_day(location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # Business Day open/close is available to every operational role — Admin,
     # Manager, and Staff (see the Business Day role-permission model).
     # Reopening a CLOSED day remains a separate, more privileged workflow
     # that Staff are never part of — enforced in the dedicated reopen/
     # reopen-request endpoints, not here.
     #
-    # Close ALWAYS ends whatever session is currently ACTIVE — never
-    # "today's" row by date. If a previously-closed session from earlier
-    # today (or a reopened older one) isn't the active one, this correctly
-    # has nothing to do with it.
+    # Close ALWAYS ends whatever session is currently ACTIVE at the target
+    # LOCATION — never "today's" row by date, and (section 15) never any
+    # OTHER location's open session. An explicit location_id closes exactly
+    # that location. Omitted, this closes the sole open session if there is
+    # only one (the original single-location behaviour, unchanged); with
+    # more than one location open at once and no location_id given, this
+    # refuses rather than guessing which branch's day to close.
     require_permission(user, "business_day.manage")
-    day = get_active_business_day(db, user.business_id)
+    if location_id is not None:
+        day = get_active_business_day(db, user.business_id, location_id=location_id)
+    else:
+        open_sessions = get_active_business_days(db, user.business_id)
+        if len(open_sessions) > 1:
+            raise HTTPException(status_code=400, detail="More than one Business Day is currently open across your locations. Select which location to close.")
+        day = open_sessions[0] if open_sessions else None
     if not day: raise HTTPException(status_code=409, detail="No Business Day is currently open to close.")
     return _close_business_day(db, day, user)
 
@@ -9839,7 +10033,7 @@ def resolve_business_day_reopen_request(request_id: int, resolution: str, data: 
     # time). Checked BEFORE any mutation, so a blocked approval leaves the
     # request PENDING for a later retry instead of silently consuming it.
     if resolution == "approve" and not day.is_open:
-        active = get_active_business_day(db, user.business_id)
+        active = get_active_business_day(db, user.business_id, location_id=day.location_id)
         if active and active.id != day.id:
             raise HTTPException(status_code=409, detail=BUSINESS_DAY_ALREADY_ACTIVE_MSG)
 
@@ -9886,8 +10080,10 @@ def direct_reopen_business_day(business_day_id: int, data: BusinessDayReopenRequ
     if not day: raise HTTPException(status_code=404, detail="Business Day not found.")
     if day.is_open: raise HTTPException(status_code=409, detail="This Business Day is not closed.")
     # Reactivating this session must never collide with another Business Day
-    # that's already active (see the BusinessDay model docstring).
-    active = get_active_business_day(db, user.business_id)
+    # that's already active AT THE SAME LOCATION (see the BusinessDay model
+    # docstring and start_business_day) — a different location's own open
+    # session is not a conflict.
+    active = get_active_business_day(db, user.business_id, location_id=day.location_id)
     if active and active.id != day.id:
         raise HTTPException(status_code=409, detail=BUSINESS_DAY_ALREADY_ACTIVE_MSG)
     reason = (data.reason or "").strip()
