@@ -202,16 +202,32 @@
             return "op-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
         }
 
+        // Shared timeout wrapper for every boot-critical request (startup
+        // reachability check, /auth/refresh, /auth/me, initial core-data
+        // load — see PERMANENT_STARTUP_FIX notes). No boot request may hang
+        // forever just because fetch() itself has no application-level
+        // timeout. A timed-out request rejects the same way a genuinely
+        // unreachable backend does (fetch() throwing), so every existing
+        // catch block that already distinguishes "thrown exception" from
+        // "explicit HTTP response" keeps working unchanged. One helper here
+        // instead of a bespoke AbortController at each call site.
+        async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                return await fetch(url, { ...options, signal: controller.signal });
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
         // navigator.onLine only reflects whether the OS thinks a network
         // interface is up — it is NOT proof the backend is reachable. Every
         // sync attempt confirms with an actual short-timeout request first.
         async function isBackendReachable() {
             if (!navigator.onLine) return false;
             try {
-                const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 4000);
-                const res = await fetch(`${API_URL}/health`, { cache: "no-store", signal: controller.signal });
-                clearTimeout(timer);
+                const res = await fetchWithTimeout(`${API_URL}/health`, { cache: "no-store" }, 4000);
                 return res.ok;
             } catch (_) {
                 return false;
@@ -684,6 +700,49 @@
         // Bounds the automatic self-healing retry in runLoadData() below so a
         // backend that never comes back doesn't retry forever.
         let startupReconnectAttempts = 0;
+
+        // ---------------------------------------------------------------
+        // STARTUP / REACHABILITY STATE MACHINE
+        //
+        // "Loading" is never itself a terminal state — every boot attempt
+        // (a cold reload, or the user pressing Retry) must resolve into
+        // exactly one of these. setBootState() is the ONE place that turns
+        // the boot loading banner / server-unavailable panel on or off, so
+        // no other function has to independently guess whether the loader
+        // should still be visible. See runLoadData(), showStartupConnectionIssue(),
+        // enterServerUnavailableState(), and handleAuthenticationFailure().
+        // ---------------------------------------------------------------
+        const BOOT_STATE = Object.freeze({
+            BOOTING: "BOOTING",                       // an attempt is actively in flight (bounded — see fetchWithTimeout())
+            ONLINE: "ONLINE",                          // backend reached; authenticated (or guest) UI is showing real/cached data
+            UNAUTHENTICATED: "UNAUTHENTICATED",        // backend reached, no valid session — normal signed-out UI, not an error
+            SERVER_UNAVAILABLE: "SERVER_UNAVAILABLE",  // backend could not be reached after bounded retries — terminal until Retry/online/visibility
+        });
+        let currentBootState = BOOT_STATE.BOOTING;
+        // Guards the 'online'/visibilitychange auto-reconnect listeners so
+        // they're attached at most once, no matter how many times the app
+        // enters SERVER_UNAVAILABLE over its lifetime.
+        let serverUnavailableAutoRetryBound = false;
+
+        function setBootState(state) {
+            currentBootState = state;
+            const loadingBanner = document.getElementById("global-loading-banner");
+            const unavailablePanel = document.getElementById("server-unavailable-banner");
+            if (state === BOOT_STATE.BOOTING) {
+                loadingBanner?.classList.remove("hidden");
+                unavailablePanel?.classList.add("hidden");
+            } else if (state === BOOT_STATE.SERVER_UNAVAILABLE) {
+                loadingBanner?.classList.add("hidden");
+                unavailablePanel?.classList.remove("hidden");
+            } else {
+                // ONLINE or UNAUTHENTICATED — nothing is in flight and the
+                // backend has given (or been given, for guests) an explicit
+                // answer, so neither the loader nor the unavailable panel
+                // belongs on screen.
+                loadingBanner?.classList.add("hidden");
+                unavailablePanel?.classList.add("hidden");
+            }
+        }
         let currentUserProfile = null;
         // Effective permissions for the CURRENT signed-in user, as computed by
         // the backend's get_effective_permissions() and returned alongside the
@@ -18353,7 +18412,7 @@
             dashboardSalesToday = null;
             dashboardSubscriptionWarning = null;
             dashboardPendingReopenCount = 0;
-            document.getElementById("global-loading-banner")?.classList.add("hidden");
+            setBootState(BOOT_STATE.UNAUTHENTICATED);
 
             updateCompanyHeaderDisplay();
             updateWelcomeBanner();
@@ -25035,32 +25094,21 @@
             // Same chokepoint, same reasoning, for a business deletion in
             // flight — see businessDeletionInProgress's declaration.
             if (businessDeletionInProgress) return false;
-            // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) -----
-            // Never logs tokens/cookies/passwords — only caller, timing, and
-            // the true/false outcome. Logged to console AND sessionStorage
-            // (the latter survives a reload in case console output is missed
-            // or cleared). Search DevTools console for "auth-diag-frontend".
-            // Remove once the investigation is closed.
-            const __diagCallNum = (window.__refreshDiagCallCount = (window.__refreshDiagCallCount || 0) + 1);
-            const __diagCaller = (new Error().stack || "").split("\n").slice(1, 4).join(" | ");
-            const __diagAlreadyInFlight = !!authRefreshInFlight;
-            console.log(`[auth-diag-frontend] refreshAccessToken() call #${__diagCallNum} START alreadyInFlight=${__diagAlreadyInFlight} caller=${__diagCaller}`);
-            try {
-                const diagLog = JSON.parse(sessionStorage.getItem("__refreshDiag") || "[]");
-                diagLog.push({ n: __diagCallNum, t: Date.now(), phase: "start", alreadyInFlight: __diagAlreadyInFlight, stack: __diagCaller });
-                sessionStorage.setItem("__refreshDiag", JSON.stringify(diagLog));
-            } catch (_) {}
-            // --- END TEMPORARY DEV DIAGNOSTIC (continues at each return below) --
             if (authRefreshInFlight) return authRefreshInFlight;
             authRefreshInFlight = (async () => {
-                let __diagOutcome = "unknown";
                 refreshAccessTokenWasNetworkUnreachable = false;
                 try {
-                    const res = await fetch(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include", headers: { "Accept": "application/json" } });
-                    if (res.status === 204) { __diagOutcome = "204_no_content"; return false; }
-                    if (!res.ok) { __diagOutcome = `http_${res.status}`; return false; }
+                    // Boot-critical request — bounded so a hung connection
+                    // can never leave the caller (refreshAccessTokenAtStartup(),
+                    // the 10-minute heartbeat, the visibilitychange refresh)
+                    // waiting forever. A timeout throws, which the catch
+                    // block below already treats identically to any other
+                    // unreachable-backend failure.
+                    const res = await fetchWithTimeout(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include", headers: { "Accept": "application/json" } }, 10000);
+                    if (res.status === 204) { return false; }
+                    if (!res.ok) { return false; }
                     const data = await res.json();
-                    if (!data.access_token) { __diagOutcome = "200_but_no_access_token_in_body"; return false; }
+                    if (!data.access_token) { return false; }
                     authToken = data.access_token;
                     currentUserProfile = {
                         id: data.id, username: data.username, role: String(data.role || '').toLowerCase(),
@@ -25091,26 +25139,17 @@
                     startPresenceHeartbeat();
                     currentEffectivePermissions = data.permissions || {};
                     scheduleSyncSoon();
-                    __diagOutcome = "success";
                     return true;
                 } catch (e) {
                     // fetch() itself threw — the request never got a response
                     // from the backend at all (connection refused, DNS/reset,
-                    // offline, etc.). This is a reachability problem, not the
-                    // backend telling us the refresh session is invalid.
-                    __diagOutcome = "exception:" + (e && e.message);
+                    // offline, a fetchWithTimeout() abort, etc.). This is a
+                    // reachability problem, not the backend telling us the
+                    // refresh session is invalid.
                     refreshAccessTokenWasNetworkUnreachable = true;
                     return false;
                 }
                 finally {
-                    // --- TEMPORARY DEV DIAGNOSTIC (continued) ---
-                    console.log(`[auth-diag-frontend] refreshAccessToken() call #${__diagCallNum} RESOLVED outcome=${__diagOutcome} authTokenPresentNow=${!!authToken} currentUserProfilePresentNow=${!!currentUserProfile}`);
-                    try {
-                        const diagLog = JSON.parse(sessionStorage.getItem("__refreshDiag") || "[]");
-                        diagLog.push({ n: __diagCallNum, t: Date.now(), phase: "resolved", outcome: __diagOutcome, authTokenPresentNow: !!authToken, currentUserProfilePresentNow: !!currentUserProfile });
-                        sessionStorage.setItem("__refreshDiag", JSON.stringify(diagLog));
-                    } catch (_) {}
-                    // --- END TEMPORARY DEV DIAGNOSTIC ---
                     authRefreshInFlight = null;
                 }
             })();
@@ -25148,27 +25187,98 @@
 
         // Keeps the loading UI (banner + inventory skeleton) up and swaps in a
         // connection-specific message, instead of falling through to the
-        // guest/logged-out rendering, when the backend could not be reached
-        // during startup after refreshAccessTokenAtStartup()'s retries.
+        // guest/logged-out rendering, WHILE a bounded startup reconnect
+        // attempt is still in progress. This is deliberately NOT a terminal
+        // state — once MAX_STARTUP_RECONNECT_ATTEMPTS is used up,
+        // scheduleStartupReconnectRetry() below always moves on to the
+        // actual terminal state, enterServerUnavailableState().
         function showStartupConnectionIssue(loadingBanner) {
+            setBootState(BOOT_STATE.BOOTING);
             if (loadingBanner) {
                 const span = loadingBanner.querySelector("span");
-                if (span) span.textContent = "Still trying to reach the server… your session will resume automatically once it's back.";
+                if (span) span.textContent = "Still trying to reach the server…";
                 loadingBanner.classList.remove("hidden");
             }
             if (!inventoryEverLoaded) renderInventoryLoadingSkeleton();
         }
 
-        // Bounded self-healing retry: tries loadData() again shortly after an
-        // "unreachable backend" startup outcome, so the real session is
-        // restored automatically once the backend comes back — without
-        // requiring the user to manually reload, and without retrying
-        // forever if it never comes back.
+        // A handful of quick automatic attempts, then the app MUST hand
+        // control back to the user rather than spin forever. This is
+        // intentionally small — enterServerUnavailableState() below is the
+        // real safety net (with its own 'online'/visibilitychange listeners
+        // and a manual Retry button), not this counter.
+        const MAX_STARTUP_RECONNECT_ATTEMPTS = 3;
+
+        // THE root-cause fix: every path through the old version of this
+        // function either scheduled another retry or, once the retry count
+        // was used up, simply `return`ed — leaving the loading banner and
+        // inventory skeleton on screen forever with no active request and no
+        // scheduled retry behind them. That dead end is what produced the
+        // permanent "Still trying to reach the server…" state. Retry
+        // exhaustion now ALWAYS resolves into the explicit terminal state
+        // below instead.
         function scheduleStartupReconnectRetry() {
             startupReconnectAttempts++;
-            if (startupReconnectAttempts > 6) return;
+            if (startupReconnectAttempts > MAX_STARTUP_RECONNECT_ATTEMPTS) {
+                enterServerUnavailableState();
+                return;
+            }
             setTimeout(() => { if (!authToken) loadData(); }, 4000);
         }
+
+        // The terminal "backend could not be reached" state. Removes every
+        // spinner/skeleton that would otherwise imply work is still in
+        // progress (per the state-machine rule: loading must never be shown
+        // with no active request and no scheduled retry behind it), and
+        // hands control to the user via the Retry button rendered in
+        // index.html's #server-unavailable-banner — while still listening
+        // for the browser's own recovery signals so a real reconnect doesn't
+        // require the user to notice and click anything.
+        function enterServerUnavailableState() {
+            setBootState(BOOT_STATE.SERVER_UNAVAILABLE);
+            // A neutral empty state, not a loading skeleton — nothing here
+            // is "still loading". If cached inventory already exists this
+            // session, it stays on screen untouched (see runLoadData()'s
+            // "authToken && !validateAuthenticationSession()" fallthrough
+            // and its catch-block cached-data path) — this only applies to
+            // a genuine cold start with nothing to show yet.
+            if (!inventoryEverLoaded) {
+                inventoryEverLoaded = true;
+                renderInventoryTable([]);
+            }
+            bindAutomaticReconnectListeners();
+        }
+
+        // Wires the browser's own connectivity signals to a single
+        // controlled reconnect attempt each. loadData()'s existing
+        // loadDataInFlight guard (see there) is what actually prevents these
+        // from ever overlapping with each other, with a manual Retry click,
+        // or with the auth-refresh heartbeat — so this only ever needs to
+        // decide WHEN to try again, never whether it's safe to do so.
+        function bindAutomaticReconnectListeners() {
+            if (serverUnavailableAutoRetryBound) return;
+            serverUnavailableAutoRetryBound = true;
+            window.addEventListener("online", () => {
+                if (currentBootState === BOOT_STATE.SERVER_UNAVAILABLE) retryServerConnection();
+            });
+            document.addEventListener("visibilitychange", () => {
+                if (!document.hidden && currentBootState === BOOT_STATE.SERVER_UNAVAILABLE) retryServerConnection();
+            });
+        }
+
+        // The Retry button's click handler (see index.html) — and also what
+        // the automatic listeners above call. One controlled reconnect
+        // cycle: SERVER_UNAVAILABLE -> BOOTING -> (health/auth restore/data
+        // load, all inside loadData()) -> ONLINE, or back to
+        // SERVER_UNAVAILABLE if it's still down. No page reload, no stacked
+        // timers — loadDataInFlight already guarantees at most one of these
+        // is ever active at a time.
+        function retryServerConnection() {
+            startupReconnectAttempts = 0;
+            setBootState(BOOT_STATE.BOOTING);
+            loadData({ forceShowLoadingBanner: true });
+        }
+        window.retryServerConnection = retryServerConnection;
 
         function startAuthRefreshHeartbeat() {
             if (businessDeletionInProgress) return; // never (re)start while a deletion is underway
@@ -25185,20 +25295,22 @@
         }
 
         document.addEventListener('visibilitychange', () => {
-            // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) -----
-            console.log(`[auth-diag-frontend] visibilitychange fired hidden=${document.hidden} authTokenPresent=${!!authToken}`);
-            // --- END TEMPORARY DEV DIAGNOSTIC -------------------------------
+            // Returning to an already-authenticated tab: a lightweight
+            // session refresh only — NOT a full cold-start boot. If the
+            // network fails here, refreshAccessToken() just leaves authToken/
+            // currentUserProfile/the current UI untouched (see its catch
+            // block above); only an explicit backend rejection invalidates
+            // the session (see handleAuthenticationFailure()'s call sites).
             if (!document.hidden && authToken) refreshAccessToken();
         });
 
         function handleAuthenticationFailure(message = "") {
-            // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) -----
-            // This is the ONE function that forcibly clears a session client-side
-            // outside of an explicit sign-out. If the logout happens without any
-            // failed /auth/refresh, this line's caller= will show what actually
-            // triggered it.
-            console.log(`[auth-diag-frontend] handleAuthenticationFailure() CALLED message=${JSON.stringify(message)} caller=` + (new Error().stack || "").split("\n").slice(1, 6).join(" | "));
-            // --- END TEMPORARY DEV DIAGNOSTIC -------------------------------
+            // The one function that forcibly clears a session client-side
+            // outside of an explicit sign-out — always in response to an
+            // EXPLICIT backend rejection (a 401 after a failed refresh),
+            // never a network/reachability failure. See the callers of this
+            // function and refreshAccessTokenAtStartup()'s "unauthenticated"
+            // vs "unreachable" distinction.
             stopAuthRefreshHeartbeat();
             authToken = "";
             currentUserProfile = null;
@@ -25231,7 +25343,7 @@
             dashboardSalesToday = null;
             dashboardSubscriptionWarning = null;
             dashboardPendingReopenCount = 0;
-            document.getElementById("global-loading-banner")?.classList.add("hidden");
+            setBootState(BOOT_STATE.UNAUTHENTICATED);
             updateWarehouseUIElements();
             applyRoleRestrictions();
             updateCompanyHeaderDisplay();
@@ -25251,10 +25363,13 @@
             if (signOutInProgress) return false; // don't let a mid-flight validation repopulate the profile a sign-out just cleared
             if (!authToken) return false;
             try {
-                const res = await fetch(`${API_URL}/auth/me`, {
+                // Boot-critical request — bounded (see fetchWithTimeout()) so
+                // a hung connection can't leave runLoadData() waiting forever
+                // for this to settle.
+                const res = await fetchWithTimeout(`${API_URL}/auth/me`, {
                     credentials: "include",
                     headers: { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" }
-                });
+                }, 8000);
                 if (!res.ok) {
                     if (res.status === 401 && await refreshAccessToken()) return true;
                     if (res.status === 401) handleAuthenticationFailure("Your session has expired. Please sign in again.");
@@ -26718,7 +26833,7 @@
             const isColdStart = !coreDataEverLoaded || forceShowLoadingBanner;
             const loadingBanner = document.getElementById("global-loading-banner");
             if (isColdStart) {
-                loadingBanner?.classList.remove("hidden");
+                setBootState(BOOT_STATE.BOOTING);
                 // Restore the banner's normal reassuring text in case an
                 // earlier attempt on this same page load left it showing the
                 // "still trying to reach the server" message below — but only
@@ -26763,32 +26878,28 @@
                 }
                 if (authToken && !(await validateAuthenticationSession())) {
                     if (!authToken) {
-                        // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) --
-                        console.log(`[auth-diag-frontend] runLoadData() EARLY RETURN: authToken empty after failed validateAuthenticationSession()`);
-                        // --- END TEMPORARY DEV DIAGNOSTIC -----------------------------
                         updateDashboardMetrics();
                         renderInventoryTable([]);
                         return;
                     }
                 }
-                // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) ---------
-                // The state of the world right after auth is established/checked,
-                // before any business data is fetched — the key checkpoint for
-                // telling "auth never succeeded" apart from "auth succeeded, then
-                // something later cleared it".
-                console.log(`[auth-diag-frontend] runLoadData() POST-AUTH-CHECKPOINT authTokenPresent=${!!authToken} currentUserProfilePresent=${!!currentUserProfile} username=${currentUserProfile?.username}`);
-                // --- END TEMPORARY DEV DIAGNOSTIC ------------------------------------
                 const headers = authToken ? { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" } : {};
                 if (!authToken) {
                     globalProducts = []; globalSuppliers = []; warehouseRecords = []; customWarehouses = [];
                     productsSuppliersReady = true; warehousesReady = true; inventoryEverLoaded = true; coreDataEverLoaded = true;
+                    setBootState(BOOT_STATE.UNAUTHENTICATED);
                     updateDashboardMetrics(); updateWarehouseUIElements(); renderInventoryTable([]);
                     renderAuthButton(); updateGuestHeaderState(); renderMobileNav();
                     return;
                 }
+                // Boot-critical initial core-data load — bounded (see
+                // fetchWithTimeout()) so a hung connection can't leave the
+                // cold-start banner on screen indefinitely; a timeout here
+                // is caught by the same catch block as any other network
+                // failure below, which already falls back to cached data.
                 const [productRes, supplierRes] = await Promise.all([
-                    fetch(`${API_URL}/products/?limit=500&offset=0`, { credentials: "include", headers }),
-                    fetch(`${API_URL}/suppliers/?limit=500&offset=0`, { credentials: "include", headers })
+                    fetchWithTimeout(`${API_URL}/products/?limit=500&offset=0`, { credentials: "include", headers }, 15000),
+                    fetchWithTimeout(`${API_URL}/suppliers/?limit=500&offset=0`, { credentials: "include", headers }, 15000)
                 ]);
                 if (productRes.status === 401 || supplierRes.status === 401) { handleAuthenticationFailure(); return; }
                 globalProducts = productRes.ok ? await productRes.json() : [];
@@ -26854,7 +26965,7 @@
 
                 await Promise.all([coreBatch, readinessBatch]);
                 coreDataEverLoaded = true;
-                loadingBanner?.classList.add("hidden");
+                setBootState(BOOT_STATE.ONLINE);
 
                 updateWelcomeBanner();
                 updateCompanyHeaderDisplay();
@@ -26882,6 +26993,14 @@
                 updateWarehouseUIElements();
                 refreshInventoryViewFromLocalState();
                 setSyncStatus("offline");
+                // Authenticated (or guest) UI is still up, just showing
+                // cached data with an offline indicator (see
+                // setSyncStatus() above) — this is NOT the cold-start
+                // SERVER_UNAVAILABLE state, which only applies when there
+                // was nothing to show yet at all. Per invariant 4: an
+                // already-loaded app that loses connectivity stays usable,
+                // it does not fall back to a boot screen.
+                setBootState(BOOT_STATE.ONLINE);
             } finally {
                 // Unconditional safety net: whichever way this call ends —
                 // success, a guest/no-session early return, a mid-load 401,

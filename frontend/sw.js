@@ -10,7 +10,13 @@
 // data to whoever opens the browser next, so every request that isn't the
 // app shell or a known static asset is passed straight to the network.
 
-const SHELL_CACHE = "cauldra-shell-v6-payments";
+// Bumped for the permanent startup/reachability fix (state machine +
+// bounded timeouts in app.js). Every deploy that changes app shell code
+// (app.js, payments.js, base.css, etc.) MUST bump this string — activate()
+// below deletes every cache whose name doesn't match the current one, which
+// is the only thing standing between a fixed startup bug and a browser
+// silently keeping the old broken app.js around after the fix ships.
+const SHELL_CACHE = "cauldra-shell-v7-startup-fix";
 
 // Precached at install time. Kept small and static-only — anything dynamic
 // (products, sales, etc.) never belongs in this cache.
