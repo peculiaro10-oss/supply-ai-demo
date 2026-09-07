@@ -421,7 +421,17 @@
                             // server will never accept) — retrying forever would
                             // just fail forever. Preserve it and surface it
                             // instead of silently discarding the user's work.
-                            await updateOutboxOp(op.op_id, { status: "conflict", last_error: (data && data.detail) || `Server rejected this change (HTTP ${res.status}).` });
+                            // A structured detail (e.g. sales_checkout()'s own
+                            // requires_warehouse_selection 409 for a queued sale
+                            // whose warehouse choice is now ambiguous, or has
+                            // become invalid, since it was queued — never
+                            // silently re-routed to a different warehouse) is
+                            // unwrapped to plain text here via the same helper
+                            // every other error message in the app uses, so
+                            // last_error stays a plain string like every other
+                            // op's, not a raw object a future details view could
+                            // only render as "[object Object]".
+                            await updateOutboxOp(op.op_id, { status: "conflict", last_error: friendlyErrorMessage(data, `Server rejected this change (HTTP ${res.status}).`) });
                         } else {
                             await scheduleOutboxRetry(op, `Server error (HTTP ${res.status}).`);
                         }
@@ -727,6 +737,14 @@
         // null on sign-out (see the auth-restore/logout paths) so a stale
         // selection from a previous session/business is never reused.
         let selectedBusinessDayLocationId = null;
+        // Staff's own READ-ONLY operational Location list (FINAL 2-DEFECT
+        // CLOSURE PASS, defect #1) — from GET /locations/operational, a
+        // deliberately separate dataset from globalLocations (which Staff
+        // can never load — that backing endpoint is Admin/Manager-only).
+        // Both datasets feed the SAME selectedBusinessDayLocationId, so POS
+        // checkout never has to know or care which role resolved it. See
+        // loadOperationalLocationsForPOS().
+        let operationalLocations = [];
         let businessEmployees = [];
         let inventoryViewProducts = [];
         let inventoryStatusCounts = { healthy: 0, low: 0, out: 0 };
@@ -755,6 +773,19 @@
         // new ones replace them.
         let productsSuppliersReady = false;
         let warehousesReady = false;
+        // Set once loadLocations() has resolved at least once this session —
+        // gates Active Warehouses' loading state (below) for a multi-Location
+        // business, where the warehouse count can't be correctly scoped until
+        // selectedBusinessDayLocationId itself has settled.
+        let locationsReady = false;
+        // Low Stock (Dashboard Location scope table) is a SELECTED-LOCATION
+        // server aggregate (see /products/inventory-summary's location_id
+        // param) — never derivable from globalProducts client-side the way
+        // it used to be, since Product.quantity is the business-wide total,
+        // not a per-Location figure. See loadDashboardLowStockCount() /
+        // refreshDashboardLocationScopedCards().
+        let dashboardLowStockCount = null;
+        let dashboardLowStockReady = false;
         let inventoryEverLoaded = false;
         // Gates the one-time "Loading your Cauldra data…" banner — shown for
         // the genuine first load of a session only, never on subsequent
@@ -1658,6 +1689,13 @@
                     predictionOutcomes: "Prediction outcomes", cauldraImpact: "Cauldra Impact",
                     recommendationsActedOn: { one: "{count} recommendation acted on. ", other: "{count} recommendations acted on. " },
                     revenueAtRisk: "About {amount} in revenue is currently at risk from unmet expected demand.",
+                    // "All Locations" with genuinely different currencies among
+                    // the branches involved: never a single fabricated combined
+                    // total (see _brain_revenue_at_risk() on the backend) — this
+                    // lists each currency's own exposure instead. English only
+                    // (established convention this session): the i18n fallback
+                    // chain serves this to every other locale until translated.
+                    revenueAtRiskMixed: "Revenue at risk (by currency): {amounts}.",
                     forecastUnits: { one: "{name} · about {units} unit in 7 days", other: "{name} · about {units} units in 7 days" },
                     forecastBasis: { one: "{name} based on {days} completed business day.", other: "{name} based on {days} completed business days." },
                     needMoreHistory: "Cauldra needs more completed sales history before it can show reliable forecasts.",
@@ -17344,6 +17382,21 @@
             }
         }
 
+        // Same as formatCurrency() but for an EXPLICIT currency string (e.g. a
+        // Location's own "GBP (£)") rather than the business's default —
+        // needed for the Profit "All Locations" grouped-by-currency view
+        // (section 19/21), which must never format a London GBP figure using
+        // the business's own default currency symbol.
+        function formatCurrencyAs(amount, rawCurrency) {
+            const val = Number(amount || 0);
+            const { code } = deriveCurrencyDisplay(rawCurrency);
+            try {
+                return new Intl.NumberFormat(getBusinessLocale(), { style: "currency", currency: code, currencyDisplay: "symbol", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(val);
+            } catch (_) {
+                return `${code} ${val.toLocaleString(getBusinessLocale(), { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+            }
+        }
+
         function updateFormCurrencyLabels() {
             const sym = getCurrencySymbol();
             const costLabel = document.getElementById("label-p-cost");
@@ -18271,7 +18324,11 @@
             warehouseRecords = [];
             customWarehouses = [];
             globalLocations = [];
+            operationalLocations = [];
             selectedBusinessDayLocationId = null;
+            locationsReady = false;
+            dashboardLowStockCount = null;
+            dashboardLowStockReady = false;
             businessEmployees = [];
             employeeDirectoryUsers = [];
             posCart = [];
@@ -18360,7 +18417,11 @@
             warehouseRecords = [];
             customWarehouses = [];
             globalLocations = [];
+            operationalLocations = [];
             selectedBusinessDayLocationId = null;
+            locationsReady = false;
+            dashboardLowStockCount = null;
+            dashboardLowStockReady = false;
             businessEmployees = [];
             inventoryStatusCounts = { healthy: 0, low: 0, out: 0 };
             inventoryStatusFilter = null;
@@ -21049,6 +21110,7 @@
         // a hardcoded list, so it stays correct as new kinds of events appear.
         async function populateAuditLogFilterOptions() {
             if (!['admin','manager'].includes(getCurrentRole())) return;
+            populateAuditLogLocationFilter();
             try {
                 const res = await fetch(`${API_URL}/audit-logs/actions`, { headers: { 'Authorization': `Bearer ${authToken}` } });
                 if (!res.ok) return;
@@ -21270,6 +21332,7 @@
             const q = document.getElementById('audit-log-search-input')?.value.trim() || '';
             const actorFilter = document.getElementById('audit-log-actor-input')?.value.trim() || '';
             const actionFilter = document.getElementById('audit-log-action-input')?.value.trim() || '';
+            const locationFilter = document.getElementById('audit-log-location-filter')?.value || '';
             const dateFrom = auditLogAppliedDateRange.from;
             const dateTo = auditLogAppliedDateRange.to;
 
@@ -21277,11 +21340,26 @@
             if (q) params.set('q', q);
             if (actorFilter) params.set('actor_username', actorFilter);
             if (actionFilter) params.set('action', actionFilter);
+            if (locationFilter) params.set('location_id', locationFilter);
             const fromISO = businessDateBoundaryISO(dateFrom, false);
             const toISO = businessDateBoundaryISO(dateTo, true);
             if (fromISO) params.set('date_from', fromISO);
             if (toISO) params.set('date_to', toISO);
-            return { params, hasActiveFilters: !!(q || actorFilter || actionFilter || dateFrom || dateTo) };
+            return { params, hasActiveFilters: !!(q || actorFilter || actionFilter || locationFilter || dateFrom || dateTo) };
+        }
+
+        // History remains valid for a DEACTIVATED location too (section 14/47)
+        // — lists every location this business has ever had, not just active
+        // ones. Hidden entirely for a single-location business.
+        function populateAuditLogLocationFilter() {
+            const select = document.getElementById('audit-log-location-filter');
+            if (!select) return;
+            const all = Array.isArray(globalLocations) ? globalLocations : [];
+            if (all.length <= 1) { select.classList.add('hidden'); return; }
+            select.classList.remove('hidden');
+            const current = select.value;
+            select.innerHTML = `<option value="">All Locations</option>` + all.map(l => `<option value="${l.id}">${escapeHtml(l.name)}${l.is_active === false ? ' (inactive)' : ''}</option>`).join('');
+            if (current) select.value = current;
         }
 
         function exportAuditLogCsv(button) {
@@ -21323,7 +21401,7 @@
                                 <div class="flex items-start justify-between gap-2">
                                     <div class="min-w-0 flex-1">
                                         <div class="font-semibold text-textMain text-[11px]">${escapeEmployeeHtml(x.description)}</div>
-                                        <div class="text-[10px] text-textSec mt-1">${escapeEmployeeHtml(x.actor_username || t("team.systemFallback"))} · ${escapeEmployeeHtml(x.action || t("team.activityFallback"))}${x.target_username ? ' · ' + escapeEmployeeHtml(x.target_username) : ''} · ${formatBusinessDateTime(x.created_at)}</div>
+                                        <div class="text-[10px] text-textSec mt-1">${escapeEmployeeHtml(x.actor_username || t("team.systemFallback"))} · ${escapeEmployeeHtml(x.action || t("team.activityFallback"))}${x.target_username ? ' · ' + escapeEmployeeHtml(x.target_username) : ''} · ${formatBusinessDateTime(x.created_at)}${(Array.isArray(globalLocations) && globalLocations.length > 1 && x.location_name) ? ` · <i class="fa-solid fa-location-dot"></i> ${escapeEmployeeHtml(x.location_name)}` : ''}</div>
                                     </div>
                                     <i id="audit-log-caret-${i}" class="fa-solid fa-chevron-down text-[9px] text-textSec mt-0.5 shrink-0 transition-transform"></i>
                                 </div>
@@ -22715,6 +22793,13 @@
             document.getElementById("pos-autocomplete-dropdown").classList.add("hidden");
             renderPOSCart();
             keepPOSScannerFocused();
+            // Staff operating-Location selector (FINAL 2-DEFECT CLOSURE PASS,
+            // defect #1) — no-ops for Admin/Manager, who already resolved
+            // this from the Dashboard's own Business Day selector before
+            // POS ever opened (section 8: initialize from whatever
+            // operational Location context is already available, never a
+            // second/competing selector for those roles).
+            loadOperationalLocationsForPOS();
         }
 
         function closeSaleModal() { stopCameraScanner(); document.getElementById("sale-modal").classList.add("hidden"); }
@@ -23053,7 +23138,14 @@
                 quantity:item.qty,
                 price_mode:item.priceMode || posPricingMode,
                 unit_price:item.priceMode === 'negotiated' ? item.unitPrice : undefined,
-                negotiated_reason:item.priceMode === 'negotiated' ? item.negotiatedReason : undefined
+                negotiated_reason:item.priceMode === 'negotiated' ? item.negotiatedReason : undefined,
+                // A REQUESTED stock source (see SalesCheckoutItem.warehouse_id's
+                // own docstring) -- omitted unless the picker below (opened by
+                // a prior 409 requires_warehouse_selection response for THIS
+                // same cart) already recorded a choice on this line. The
+                // backend independently re-validates it either way; this is
+                // never trusted as authoritative on its own.
+                warehouse_id: item.warehouseId || undefined,
             }));
 
             // --- Double-submit protection -----------------------------------
@@ -23079,10 +23171,33 @@
             if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
             if (!posCheckoutClientRef) posCheckoutClientRef = `pos-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+            // The OPERATING Location context (never blindly trusted — the
+            // backend independently validates it belongs to this business
+            // and is active, exactly like warehouse_id). The same
+            // selectedBusinessDayLocationId the Business Day control
+            // already uses, so POS respects whichever branch the operator
+            // has actually selected BEFORE any warehouse is even
+            // considered, rather than a warehouse being auto-picked first
+            // and its Location discovered afterward.
+            const operatingLocationId = selectedBusinessDayLocationId || undefined;
+
             try {
                 const headers={"Content-Type":"application/json","Authorization":`Bearer ${authToken}`};
-                const res=await fetch(`${API_URL}/sales/checkout`,{method:'POST',headers,body:JSON.stringify({items, client_ref: posCheckoutClientRef})}); const data=await res.json();
-                if(!res.ok) throw new Error(showApiError(res,data,t("sales.saleFailed")));
+                const res=await fetch(`${API_URL}/sales/checkout`,{method:'POST',headers,body:JSON.stringify({items, client_ref: posCheckoutClientRef, location_id: operatingLocationId})}); const data=await res.json();
+                if(!res.ok){
+                    // A structured 409 naming exactly which cart line(s) are
+                    // ambiguous (see sales_checkout()'s own "never guess"
+                    // resolution rule) -- open the picker so the sale can
+                    // actually be completed, rather than just toasting an
+                    // error the cashier has no way to act on. client_ref is
+                    // deliberately NOT cleared here: the retry after picking
+                    // is the same checkout attempt, not a new one.
+                    if (res.status === 409 && data?.detail && typeof data.detail === 'object' && Array.isArray(data.detail.requires_warehouse_selection)) {
+                        openPosWarehouseSelectModal(data.detail.requires_warehouse_selection);
+                        return;
+                    }
+                    throw new Error(showApiError(res,data,t("sales.saleFailed")));
+                }
                 posCheckoutClientRef = null;
                 showToast(t("sales.saleCompletedToday", {total: formatCurrency(data.daily_total)}),"success"); posCart=[]; renderPOSCart(); closeSaleModal();
                 // Targeted update — patch local product quantities from the
@@ -23100,21 +23215,77 @@
                 cacheProductsLocally(globalProducts);
                 updateDashboardMetrics();
                 refreshInventoryViewFromLocalState();
+                // Net Profit / COGS / Gross Profit / Low Stock all move on
+                // every sale — loadBusinessDayControl() cascades into
+                // refreshDashboardLocationScopedCards(), which re-fetches
+                // both; updateDashboardMetrics() above only refreshes the
+                // inventory-derived counters it can compute locally
+                // (Total Products/Active Suppliers) and would otherwise
+                // leave the rest stale.
                 loadBusinessDayControl();
-                // Net Profit / COGS / Gross Profit move on every sale, so the
-                // profit figures must be re-fetched from the backend here —
-                // updateDashboardMetrics() above only refreshes inventory-
-                // derived counters and would otherwise leave a stale profit.
-                if (typeof loadProfitDashboardCards === 'function') loadProfitDashboardCards();
                 const salesModal = document.getElementById('daily-sales-modal');
                 if (salesModal && !salesModal.classList.contains('hidden')) await loadDailySales();
             }catch(err){
-                if (isNetworkFailure(err)) { await completePOSCheckoutOffline(items); return; }
+                if (isNetworkFailure(err)) { await completePOSCheckoutOffline(items, operatingLocationId); return; }
                 showToast(friendlyErrorMessage(err.message,t("sales.saleFailed")),'error');
             } finally {
                 posCheckoutInFlight = false;
                 if (btn) { btn.disabled = false; btn.textContent = btnLabel; }
             }
+        }
+
+        // --- POS multi-warehouse selection modal ----------------------------
+        // Opened only when the backend's own resolution genuinely can't pick
+        // a single warehouse for a cart line (sales_checkout()'s "never
+        // guess" rule — see its docstring): more than one WarehouseStock row
+        // has this product in real stock. Lists each ambiguous product with
+        // a dropdown of its actually-eligible warehouses (name, Location
+        // when it disambiguates, and available quantity) so the cashier
+        // makes an explicit, informed choice rather than the app silently
+        // picking one for them.
+        function closePosWarehouseSelectModal() {
+            document.getElementById('pos-warehouse-select-modal')?.classList.add('hidden');
+        }
+
+        function openPosWarehouseSelectModal(requirements) {
+            const container = document.getElementById('pos-warehouse-select-lines');
+            const modal = document.getElementById('pos-warehouse-select-modal');
+            if (!container || !modal) return;
+            container.innerHTML = requirements.map(req => `
+                <div class="space-y-1">
+                    <label class="block text-[10px] uppercase tracking-wide text-textSec">${escapeHtml(req.product_name || 'Item')}</label>
+                    <select data-product-id="${req.product_id}" class="pos-warehouse-select-input w-full bg-bgMain border border-borderCol rounded-lg px-2 py-1.5 text-textMain focus:outline-none focus:border-primary">
+                        <option value="">Choose a warehouse…</option>
+                        ${(req.eligible_warehouses || []).map(w => `<option value="${w.warehouse_id}">${escapeHtml(w.warehouse_name || 'Warehouse')}${w.location_name ? ' — ' + escapeHtml(w.location_name) : ''} (${w.available_quantity} in stock)</option>`).join('')}
+                    </select>
+                </div>
+            `).join('');
+            modal.classList.remove('hidden');
+        }
+
+        function confirmPosWarehouseSelection() {
+            const selects = document.querySelectorAll('#pos-warehouse-select-lines .pos-warehouse-select-input');
+            const chosen = [];
+            let missing = false;
+            selects.forEach(sel => {
+                const productId = parseInt(sel.dataset.productId, 10);
+                const warehouseId = sel.value ? parseInt(sel.value, 10) : null;
+                if (!warehouseId) missing = true;
+                chosen.push({ productId, warehouseId });
+            });
+            if (missing) { showToast("Please choose a warehouse for every listed item.", "error"); return; }
+            // Persist each choice onto its matching cart line so the retry
+            // (completePOSCheckout(), called below) sends it -- the backend
+            // still independently re-validates every one of these (never
+            // trusted client-side alone). A product with more than one cart
+            // line all share the same product_id key, so this correctly
+            // applies to every one of them.
+            chosen.forEach(({ productId, warehouseId }) => {
+                const item = posCart.find(i => i.id === productId);
+                if (item) item.warehouseId = warehouseId;
+            });
+            closePosWarehouseSelectModal();
+            completePOSCheckout();
         }
 
         // Offline fallback for completePOSCheckout: applies the same
@@ -23124,7 +23295,7 @@
         // operation for the whole cart with a single client_ref, and lets
         // /sales/checkout's own idempotency check (see main.py) guarantee a
         // retried sync can't decrement inventory or record the sale twice.
-        async function completePOSCheckoutOffline(items) {
+        async function completePOSCheckoutOffline(items, locationId) {
             // Dependency check (see resolveOutboxDependenciesOnProductSynced()):
             // an item can reference a product that only exists as a still-
             // unsynced offline create (negative local id). Real database ids
@@ -23166,7 +23337,16 @@
                 op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
                 auth_version: currentUserProfile?.auth_version ?? null,
                 type: "sale_checkout", endpoint: "/sales/checkout", method: "POST",
-                payload: { items, client_ref: opId }, client_ref: opId, meta: {},
+                // location_id travels with the queued payload too (FINAL
+                // 3-DEFECT CLOSURE PASS, defect #2/section 17) — replay
+                // re-validates it server-side exactly like every online
+                // checkout does; if the selected Location/warehouse
+                // relationship has gone stale by replay time, sales_
+                // checkout() rejects it and runSync()'s existing 409/400
+                // handling turns that into a status:"conflict" outbox row
+                // (see runSync()) rather than ever silently re-routing the
+                // sale to wherever the warehouse ended up.
+                payload: { items, client_ref: opId, location_id: locationId }, client_ref: opId, meta: {},
                 depends_on_op_ids: dependsOnOpIds,
                 label: `Sale (${items.length} item${items.length === 1 ? "" : "s"})`,
                 status: "pending", attempts: 0, next_retry_at: 0, created_at: Date.now(), last_error: null,
@@ -23280,14 +23460,17 @@
 
             // loadBusinessDayControl() is already the one function every
             // Business Day action (open, close, direct-reopen, reopen-
-            // request submit/approve/reject, close-historical) calls when it
-            // finishes — refreshing the dashboard's current-session Net
-            // Profit headline here, rather than re-adding a separate call to
-            // each of those handlers individually, guarantees none of them
-            // can ever leave it stale. Safe/cheap to call unconditionally:
-            // loadProfitDashboardCards() already no-ops for a signed-out/
-            // guest state or a role without Profit access.
-            if (typeof loadProfitDashboardCards === 'function') loadProfitDashboardCards();
+            // request submit/approve/reject, close-historical) AND the
+            // Location selector's own onChange call when they finish —
+            // refreshing every SELECTED-LOCATION dashboard card (Net
+            // Profit/Sales Today via loadProfitDashboardCards(), Low Stock
+            // via loadDashboardLowStockCount()) here, rather than re-adding
+            // separate calls to each of those handlers individually,
+            // guarantees none of them can ever leave one stale while another
+            // updates. Safe/cheap to call unconditionally: both no-op for a
+            // signed-out/guest state, and loadProfitDashboardCards() also
+            // no-ops for a role without Profit access.
+            if (typeof refreshDashboardLocationScopedCards === 'function') refreshDashboardLocationScopedCards();
 
             if (!wrap || !dot || !label || !actionBtn) return d;
             if (!hasAuthenticatedBusinessContext()) { wrap.classList.add('hidden'); wrap.classList.remove('flex'); return d; }
@@ -23543,7 +23726,11 @@
                 refundModalData = data;
                 refundLineQty = {}; refundLineRestock = {};
                 data.items.forEach(i => { refundLineQty[i.sale_id] = 0; refundLineRestock[i.sale_id] = true; });
-                document.getElementById('refund-modal-subtitle').textContent = `${formatBusinessDateTime(data.timestamp)} · Original ${formatCurrency(data.original_total)}`;
+                // Location shown only when it would actually disambiguate
+                // something (section 10/56) — a refund is always processed
+                // at this SAME location (see create_refund's server-side rule).
+                const locationSuffix = hasMultipleLocations() ? ` · ${data.location_name || 'Legacy / Unknown'}` : '';
+                document.getElementById('refund-modal-subtitle').textContent = `${formatBusinessDateTime(data.timestamp)} · Original ${formatCurrency(data.original_total)}${locationSuffix}`;
                 renderRefundModalLines();
             } catch (e) {
                 document.getElementById('refund-modal-lines').innerHTML = `<div class="text-center py-8 text-danger">${friendlyErrorMessage(e.message, "Could not load this transaction.")}</div>`;
@@ -23650,7 +23837,9 @@
                 if (salesModal && !salesModal.classList.contains('hidden')) await loadDailySales();
                 if (typeof loadSalesHistory === 'function') loadSalesHistory();
                 if (typeof loadSalesHistoryPeriodTotal === 'function') loadSalesHistoryPeriodTotal();
-                if (typeof loadProfitDashboardCards === 'function') loadProfitDashboardCards();
+                // loadBusinessDayControl() above already cascades into
+                // refreshDashboardLocationScopedCards() (Net Profit/Sales
+                // Today/Low Stock), which a refund moves just as a sale does.
             } catch (e) {
                 showToast(friendlyErrorMessage(e.message, "The refund could not be completed."), 'error');
             } finally {
@@ -24453,7 +24642,7 @@
         // =====================================================================
         let expenseCategoriesCache = null;
         let expenseSelectedCategory = null;
-        let expenseHistoryFilters = { search: "", category: "", user_id: "", date_from: "", date_to: "" };
+        let expenseHistoryFilters = { search: "", category: "", user_id: "", location_id: "", date_from: "", date_to: "" };
         let expenseHistoryActivePreset = "all";
         let expenseHistoryPage = 0;
         const EXPENSE_HISTORY_PAGE_SIZE = 20;
@@ -24489,6 +24678,7 @@
                 document.getElementById("expenses-view-category-picker").classList.add("hidden");
                 document.getElementById("expenses-view-entry").classList.add("hidden");
                 populateExpenseHistoryCategoryFilter();
+                populateExpenseHistoryLocationFilter();
                 setExpenseHistoryDateRange("all");
                 // Feature-visibility rule: the "view all users" filter and the
                 // export menu are both separate, more-privileged capabilities
@@ -24542,9 +24732,24 @@
             document.getElementById("expense-entry-amount").value = "";
             document.getElementById("expense-entry-source").value = "";
             document.getElementById("expense-entry-note").value = "";
+            updateExpenseEntryLocationDropdown();
             document.getElementById("expenses-view-category-picker").classList.add("hidden");
             document.getElementById("expenses-view-entry").classList.remove("hidden");
             setTimeout(() => document.getElementById("expense-entry-amount").focus(), 50);
+        }
+
+        // Hidden entirely for a single-location business (section 11 — never
+        // force a selector when there is only one, implicit, choice). Shown
+        // and REQUIRED once the business has more than one active Location.
+        function updateExpenseEntryLocationDropdown() {
+            const wrap = document.getElementById("expense-entry-location-wrap");
+            const select = document.getElementById("expense-entry-location");
+            if (!wrap || !select) return;
+            const active = activeLocations();
+            if (active.length <= 1) { wrap.classList.add("hidden"); select.removeAttribute("required"); select.innerHTML = ""; return; }
+            wrap.classList.remove("hidden");
+            select.setAttribute("required", "required");
+            select.innerHTML = `<option value="">Select a location…</option>` + active.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("");
         }
 
         async function handleRecordExpense(event) {
@@ -24552,12 +24757,20 @@
             if (!expenseSelectedCategory) { showToast(t("expenses.chooseCategoryFirst"), "error"); return; }
             const amount = parseFloat(document.getElementById("expense-entry-amount").value);
             if (!amount || amount <= 0) { showToast(t("expenses.enterAmountGreaterThanZero"), "error"); return; }
+            const locationWrap = document.getElementById("expense-entry-location-wrap");
+            const locationSelect = document.getElementById("expense-entry-location");
+            let expenseLocationId = null;
+            if (locationWrap && !locationWrap.classList.contains("hidden")) {
+                if (!locationSelect.value) { showToast("Select which location this expense belongs to.", "error"); return; }
+                expenseLocationId = parseInt(locationSelect.value, 10);
+            }
             const btn = document.getElementById("expense-entry-save-btn");
             const payload = {
                 category: expenseSelectedCategory,
                 amount: amount,
                 payment_source: document.getElementById("expense-entry-source").value.trim() || null,
                 note: document.getElementById("expense-entry-note").value.trim() || null,
+                location_id: expenseLocationId,
             };
             const mutationRef = generateOpId();
             const requestPayload = { ...payload, client_ref: mutationRef };
@@ -24575,9 +24788,10 @@
                 switchExpensesTab("history");
                 // An expense immediately changes Net Profit, and (since
                 // expenses now auto-open/attach to a Business Day) the
-                // current Business Day's totals too — so both must be
-                // re-fetched here rather than left stale until a reload.
-                if (typeof loadProfitDashboardCards === 'function') loadProfitDashboardCards();
+                // current Business Day's totals too — loadBusinessDayControl()
+                // cascades into refreshDashboardLocationScopedCards(), so
+                // both are re-fetched here rather than left stale until a
+                // reload.
                 if (typeof loadBusinessDayControl === 'function') loadBusinessDayControl();
                 const dailySalesModal = document.getElementById('daily-sales-modal');
                 if (dailySalesModal && !dailySalesModal.classList.contains('hidden') && typeof loadDailySales === 'function') await loadDailySales();
@@ -24795,16 +25009,33 @@
             loadExpenseHistory(false);
         }
 
+        // History remains valid for a DEACTIVATED location too (section 14) —
+        // lists every location this business has ever had, not just the
+        // currently active ones (unlike the create-form dropdown above).
+        // Hidden entirely when the business has never had more than one.
+        function populateExpenseHistoryLocationFilter() {
+            const select = document.getElementById("expense-history-location-filter");
+            if (!select) return;
+            const all = Array.isArray(globalLocations) ? globalLocations : [];
+            if (all.length <= 1) { select.classList.add("hidden"); return; }
+            select.classList.remove("hidden");
+            const current = select.value;
+            select.innerHTML = `<option value="">All Locations</option>` + all.map(l => `<option value="${l.id}">${escapeHtml(l.name)}${l.is_active === false ? ' (inactive)' : ''}</option>`).join("");
+            if (current) select.value = current;
+        }
+
         async function loadExpenseHistory(resetPage) {
             if (resetPage) expenseHistoryPage = 0;
             expenseHistoryFilters.search = document.getElementById("expense-history-search").value.trim();
             expenseHistoryFilters.category = document.getElementById("expense-history-category-filter").value;
             expenseHistoryFilters.user_id = document.getElementById("expense-history-user-filter").value;
+            expenseHistoryFilters.location_id = document.getElementById("expense-history-location-filter")?.value || "";
 
             const params = new URLSearchParams({ limit: EXPENSE_HISTORY_PAGE_SIZE, offset: expenseHistoryPage * EXPENSE_HISTORY_PAGE_SIZE });
             if (expenseHistoryFilters.search) params.set("search", expenseHistoryFilters.search);
             if (expenseHistoryFilters.category) params.set("category", expenseHistoryFilters.category);
             if (expenseHistoryFilters.user_id) params.set("user_id", expenseHistoryFilters.user_id);
+            if (expenseHistoryFilters.location_id) params.set("location_id", expenseHistoryFilters.location_id);
             if (expenseHistoryFilters.date_from) params.set("date_from", expenseHistoryFilters.date_from);
             if (expenseHistoryFilters.date_to) params.set("date_to", expenseHistoryFilters.date_to);
 
@@ -24819,12 +25050,13 @@
                 if (!d.expenses.length) {
                     listEl.innerHTML = `<div class="text-center py-8 text-textSec">No expenses found for this filter.</div>`;
                 } else {
+                    const showExpenseLocationBadge = (Array.isArray(globalLocations) ? globalLocations.length : 0) > 1;
                     listEl.innerHTML = d.expenses.map(e => `
                         <div class="py-2.5 flex items-center justify-between">
                             <div>
                                 <div class="font-semibold text-textMain">${escapeHtml(e.category)}</div>
                                 <div class="text-[10px] text-textSec">${e.payment_source ? escapeHtml(e.payment_source) + " · " : ""}Recorded by ${escapeHtml(e.recorded_by)}</div>
-                                <div class="text-[10px] text-textSec">${formatBusinessDateTime(e.created_at)}</div>
+                                <div class="text-[10px] text-textSec">${formatBusinessDateTime(e.created_at)}${showExpenseLocationBadge ? ` · <i class="fa-solid fa-location-dot"></i> ${escapeHtml(e.location_name || 'Unknown / Legacy')}` : ''}</div>
                                 ${e.note ? `<div class="text-[10px] text-textSec italic mt-0.5">${escapeHtml(e.note)}</div>` : ""}
                             </div>
                             <div class="font-mono font-bold text-danger shrink-0 ml-3">${formatCurrency(e.amount)}</div>
@@ -24862,6 +25094,7 @@
             if (expenseHistoryFilters.search) params.set("search", expenseHistoryFilters.search);
             if (expenseHistoryFilters.category) params.set("category", expenseHistoryFilters.category);
             if (expenseHistoryFilters.user_id) params.set("user_id", expenseHistoryFilters.user_id);
+            if (expenseHistoryFilters.location_id) params.set("location_id", expenseHistoryFilters.location_id);
             if (expenseHistoryFilters.date_from) params.set("date_from", expenseHistoryFilters.date_from);
             if (expenseHistoryFilters.date_to) params.set("date_to", expenseHistoryFilters.date_to);
             return params;
@@ -24905,18 +25138,42 @@
             // business figures for a visitor who isn't authenticated.
             if (!hasAuthenticatedBusinessContext()) return;
 
+            // Total Products and Active Suppliers are BUSINESS-WIDE (Dashboard
+            // Location scope table) — an owner needs their whole catalog/
+            // vendor count regardless of which branch is selected, so these
+            // two never filter by selectedBusinessDayLocationId.
             const totalProducts = globalProducts.length;
-            const lowStockProducts = globalProducts.filter(p => p.quantity <= p.min_stock_level).length;
             const activeSuppliersCount = globalSuppliers.length;
-            const warehouseCount = customWarehouses.length;
+
+            // Low Stock and Active Warehouses are SELECTED-LOCATION metrics
+            // (same table) — a real shortage in one branch must never hide
+            // behind healthy stock in another, and "how many warehouses"
+            // means "in the branch being viewed", not the whole business. A
+            // business with 0 or 1 active Location has nothing to scope BY
+            // (every warehouse already belongs to "the" location), so it
+            // just shows everything; with 2+, selectedBusinessDayLocationId
+            // — the SAME selection the Business Day control uses, so one
+            // switch moves every scoped card together — decides which
+            // warehouses count. Low Stock itself is a server aggregate (see
+            // loadDashboardLowStockCount()), never derived from
+            // globalProducts here — Product.quantity is the business-wide
+            // total, not a per-Location figure, so a client-side filter of
+            // it could not answer "low stock AT THIS BRANCH" correctly.
+            const multiLocation = activeLocations().length > 1;
+            const scopedWarehouses = (multiLocation && selectedBusinessDayLocationId)
+                ? warehouseRecords.filter(w => w.location_id === selectedBusinessDayLocationId)
+                : warehouseRecords;
+            const warehouseCount = scopedWarehouses.length;
 
             // Only during this session's first load, before each figure's own
             // data has actually arrived, show a neutral "—" instead of "0" —
             // a real zero and "hasn't loaded yet" must never look identical.
             // Products/suppliers share one flag (they load together);
-            // warehouses load separately and may resolve at a different time.
+            // warehouses, the Location selection, and Low Stock each resolve
+            // separately and may settle at different times.
             const productsPending = !productsSuppliersReady;
-            const warehousesPending = !warehousesReady;
+            const warehousesPending = !warehousesReady || (multiLocation && !locationsReady);
+            const lowStockPending = !dashboardLowStockReady;
 
             const totalSkusEl = document.getElementById("metric-total-skus");
             if (totalSkusEl) totalSkusEl.innerText = productsPending ? "—" : totalProducts;
@@ -24924,9 +25181,9 @@
             if (totalDescEl) totalDescEl.innerText = productsPending ? "Loading…" : (totalProducts === 1 ? "1 product cataloged" : (totalProducts === 0 ? "No products" : `${totalProducts} products cataloged`));
 
             const lowSkusEl = document.getElementById("metric-low-skus");
-            if (lowSkusEl) lowSkusEl.innerText = productsPending ? "—" : lowStockProducts;
+            if (lowSkusEl) lowSkusEl.innerText = lowStockPending ? "—" : dashboardLowStockCount;
             const lowDescEl = document.getElementById("metric-low-desc");
-            if (lowDescEl) lowDescEl.innerText = productsPending ? "Loading…" : (lowStockProducts === 1 ? "1 item needs attention" : (lowStockProducts === 0 ? "No items" : `${lowStockProducts} items need attention`));
+            if (lowDescEl) lowDescEl.innerText = lowStockPending ? "Loading…" : (dashboardLowStockCount === 1 ? "1 item needs attention" : (dashboardLowStockCount === 0 ? "No items" : `${dashboardLowStockCount} items need attention`));
 
             const supEl = document.getElementById("metric-suppliers");
             if (supEl) supEl.innerText = productsPending ? "—" : activeSuppliersCount;
@@ -25133,6 +25390,9 @@
             // reuse whatever this session already considered "loaded".
             productsSuppliersReady = false;
             warehousesReady = false;
+            locationsReady = false;
+            dashboardLowStockCount = null;
+            dashboardLowStockReady = false;
             inventoryEverLoaded = false;
             coreDataEverLoaded = false;
             // Clear the prior business's Brief before rendering signed-out UI.
@@ -25246,6 +25506,13 @@
                 renderLocationsPanel();
                 renderBusinessDayLocationSelector();
                 updateWarehouseLocationDropdown();
+                // Staff never sees the Location selector (Admin/Manager-only,
+                // same as this endpoint) so selectedBusinessDayLocationId
+                // stays null for them — the scoped cards fall back to their
+                // business-wide/no-selector behavior above rather than
+                // hanging on a "—" that can never resolve.
+                locationsReady = true;
+                refreshDashboardLocationScopedCards();
                 return;
             }
             try {
@@ -25259,6 +25526,13 @@
             renderLocationsPanel();
             renderBusinessDayLocationSelector();
             updateWarehouseLocationDropdown();
+            locationsReady = true;
+            // The Location selection (used for Sales Today/Net Profit/Low
+            // Stock/Active Warehouses) has just been (re)resolved above —
+            // refresh those four together now rather than leaving them
+            // showing whatever they last showed under a possibly-different
+            // selection.
+            refreshDashboardLocationScopedCards();
         }
 
         function renderLocationsPanel() {
@@ -25453,6 +25727,116 @@
             loadBusinessDayControl();
         }
 
+        // --- Staff POS operating-Location selector (FINAL 2-DEFECT CLOSURE
+        // PASS, defect #1) ---------------------------------------------------
+        // Admin/Manager already resolve selectedBusinessDayLocationId from
+        // the Dashboard's own Business Day selector (loadLocations() /
+        // renderBusinessDayLocationSelector(), backed by the Admin/Manager-
+        // only GET /locations/) — that flow is untouched, and this function
+        // deliberately no-ops for those roles so it can never show a second,
+        // redundant selector or double-resolve the same state. Staff never
+        // loads globalLocations at all (that endpoint 403s for them), so
+        // without this, a Staff cashier in a multi-Location business had NO
+        // UI path to ever set selectedBusinessDayLocationId — checkout would
+        // dead-end on "select which location this sale is operating in"
+        // with nothing on screen to fix it. READ-ONLY: this only ever reads
+        // GET /locations/operational (no create/edit/deactivate capability
+        // reachable from here, and that endpoint has no such counterpart to
+        // call even if this code tried).
+        async function loadOperationalLocationsForPOS() {
+            if (!authToken || ['admin', 'manager'].includes(getCurrentRole())) return;
+            try {
+                const res = await fetch(`${API_URL}/locations/operational`, { credentials: "include", headers: { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" } });
+                operationalLocations = res.ok ? await res.json() : [];
+            } catch (_) {
+                operationalLocations = [];
+            }
+            if (operationalLocations.length === 1) {
+                // Single active Location — no selector ever needed (same rule
+                // renderBusinessDayLocationSelector() already follows).
+                selectedBusinessDayLocationId = operationalLocations[0].id;
+            } else if (operationalLocations.length > 1) {
+                const stillValid = selectedBusinessDayLocationId && operationalLocations.some(l => l.id === selectedBusinessDayLocationId);
+                if (!stillValid) selectedBusinessDayLocationId = (operationalLocations.find(l => l.is_main) || operationalLocations[0]).id;
+            } else {
+                selectedBusinessDayLocationId = null;
+            }
+            renderPOSLocationSelector();
+        }
+
+        // Hidden entirely for a single-active-Location business (nothing to
+        // pick — section 7's "only show when it would actually disambiguate"
+        // rule, same as every other Location selector in this app).
+        function renderPOSLocationSelector() {
+            const wrap = document.getElementById('pos-location-select-wrap');
+            const select = document.getElementById('pos-location-select');
+            if (!wrap || !select) return;
+            if (operationalLocations.length <= 1) { wrap.classList.add('hidden'); return; }
+            wrap.classList.remove('hidden');
+            select.innerHTML = operationalLocations.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join('');
+            if (selectedBusinessDayLocationId) select.value = selectedBusinessDayLocationId;
+        }
+
+        function handlePOSLocationChange() {
+            const select = document.getElementById('pos-location-select');
+            selectedBusinessDayLocationId = select ? parseInt(select.value, 10) || null : null;
+        }
+
+        // --- Dashboard Location-scope refresh ------------------------------
+        // Sales Today, Net Profit, Low Stock, and Active Warehouses are all
+        // SELECTED-LOCATION metrics (Dashboard Location scope table — see
+        // updateDashboardMetrics() for Total Products/Active Suppliers,
+        // which stay business-wide) sharing the ONE selection
+        // selectedBusinessDayLocationId already used by the Business Day
+        // control. Every place that can change or first resolve that
+        // selection — loadLocations() finishing, the selector's own
+        // onChange (via loadBusinessDayControl(), which every Business Day
+        // action already funnels through) — calls this one function so all
+        // four move together, never some cards on the old Location's
+        // numbers while others already show the new one.
+        async function refreshDashboardLocationScopedCards() {
+            // Neutral "—"/"Loading…" the instant the selection changes,
+            // rather than leaving the OLD Location's Low Stock figure on
+            // screen while the new one is still in flight. Net Profit/Sales
+            // Today already get the same treatment inside
+            // loadProfitDashboardCards() (dashboardTodayProfit/
+            // dashboardSalesToday reset to null at its top); Active
+            // Warehouses' own pending state is derived live in
+            // updateDashboardMetrics() from locationsReady/warehousesReady,
+            // so it needs no separate reset here.
+            dashboardLowStockReady = false;
+            updateDashboardMetrics();
+            await Promise.all([
+                loadProfitDashboardCards(),
+                loadDashboardLowStockCount(),
+            ]);
+        }
+
+        async function loadDashboardLowStockCount() {
+            dashboardLowStockReady = false;
+            if (!hasAuthenticatedBusinessContext()) {
+                dashboardLowStockCount = null;
+                dashboardLowStockReady = true;
+                updateDashboardMetrics();
+                return;
+            }
+            try {
+                const params = new URLSearchParams();
+                // No selection (single-Location business, or Staff who
+                // never gets the selector) -> omit location_id entirely,
+                // which /products/inventory-summary already treats as the
+                // whole-business aggregate (identical to today's behavior
+                // for those businesses).
+                if (selectedBusinessDayLocationId) params.set("location_id", selectedBusinessDayLocationId);
+                const res = await fetch(`${API_URL}/products/inventory-summary?${params.toString()}`, { credentials: "include", headers: { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" } });
+                dashboardLowStockCount = res.ok ? (await res.json()).low : 0;
+            } catch (_) {
+                dashboardLowStockCount = 0;
+            }
+            dashboardLowStockReady = true;
+            updateDashboardMetrics();
+        }
+
         async function loadInventoryView() {
             if (!authToken) {
                 inventoryViewProducts = [];
@@ -25632,7 +26016,13 @@
             dashboardSalesToday = null;
             if (!hasAuthenticatedBusinessContext() || !hasFeaturePermission('profit')) { renderBusinessInsights(); return; }
             try {
-                const res = await fetch(`${API_URL}/business-days/current-summary`, { headers: { "Authorization": `Bearer ${authToken}` } });
+                // SELECTED-LOCATION scope (Dashboard Location scope table):
+                // the same selectedBusinessDayLocationId the Business Day
+                // control uses. No selection (single-Location business, or a
+                // role without the selector) -> the endpoint's own "exactly
+                // one open session" fallback, unchanged from before this.
+                const qs = selectedBusinessDayLocationId ? `?location_id=${selectedBusinessDayLocationId}` : "";
+                const res = await fetch(`${API_URL}/business-days/current-summary${qs}`, { headers: { "Authorization": `Bearer ${authToken}` } });
                 // `open: false` (no active session right now — e.g. between
                 // closing one and opening the next) is not a fetch failure;
                 // the endpoint still returns a real net_profit/sales of
@@ -25645,6 +26035,12 @@
         }
 
         let profitActivePeriod = "month";
+        // Which Location the Profit modal is currently scoped to — "" (All
+        // Locations, the default) or a specific Location id. UI CONTEXT ONLY
+        // (section 12/17): every fetch below still asks the backend, which
+        // independently validates the id against the signed-in business.
+        let selectedProfitLocationId = "";
+
         function openProfitModal(period) {
             if (!hasAuthenticatedBusinessContext()) {
                 showToast(t("common.signInOrRegister"), "info");
@@ -25652,9 +26048,29 @@
                 return;
             }
             document.getElementById("profit-modal").classList.remove("hidden");
+            renderProfitLocationSelector();
             switchProfitPeriod(period || profitActivePeriod || "month");
         }
         function closeProfitModal() { document.getElementById("profit-modal").classList.add("hidden"); }
+
+        // Hidden entirely for a single-location business (section 17 — never
+        // force a selector when "combined" and "the one location" are the
+        // same thing). Shown once the business has more than one active
+        // Location, defaulting to "All Locations".
+        function renderProfitLocationSelector() {
+            const wrap = document.getElementById("profit-location-select-wrap");
+            const select = document.getElementById("profit-location-select");
+            if (!wrap || !select) return;
+            const active = activeLocations();
+            if (active.length <= 1) { wrap.classList.add("hidden"); selectedProfitLocationId = ""; return; }
+            wrap.classList.remove("hidden");
+            select.innerHTML = `<option value="">All Locations</option>` + active.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("");
+            select.value = selectedProfitLocationId || "";
+        }
+        function handleProfitLocationChange() {
+            selectedProfitLocationId = document.getElementById("profit-location-select")?.value || "";
+            loadProfitData(profitActivePeriod);
+        }
 
         let profitCustomFilters = { date_from: "", date_to: "" };
 
@@ -25746,12 +26162,34 @@
         // silently offer a stale previous period's figures.
         let lastProfitData = null;
 
+        // True only when "All Locations" is selected AND the business's
+        // active Locations actually use more than one currency — section 19:
+        // never combine unlike currencies into one fake total. A same-
+        // currency multi-location business (or a single-location one) keeps
+        // the original combined-total behavior unchanged.
+        function profitLocationsHaveMixedCurrencies() {
+            const active = activeLocations();
+            if (active.length <= 1) return false;
+            const codes = new Set(active.map(l => deriveCurrencyDisplay(l.currency).code));
+            return codes.size > 1;
+        }
+
         async function loadProfitData(period, customFrom, customTo) {
             const body = document.getElementById("profit-modal-body");
             body.innerHTML = `<div class="text-center py-10 text-textSec">Loading...</div>`;
             lastProfitData = null;
+
+            // "All Locations" with genuinely different currencies among them:
+            // route to the grouped-by-currency view instead (section 19/20) —
+            // never a fabricated single cross-currency total.
+            if (!selectedProfitLocationId && profitLocationsHaveMixedCurrencies()) {
+                await renderProfitAllLocationsGrouped(period, customFrom, customTo);
+                return;
+            }
+
             try {
-                const params = period === "custom" ? `period=custom&custom_start=${customFrom}&custom_end=${customTo}` : `period=${period}`;
+                let params = period === "custom" ? `period=custom&custom_start=${customFrom}&custom_end=${customTo}` : `period=${period}`;
+                if (selectedProfitLocationId) params += `&location_id=${selectedProfitLocationId}`;
                 const [summaryRes, breakdownRes] = await Promise.all([
                     fetch(`${API_URL}/financial-summary?${params}`, { headers: { "Authorization": `Bearer ${authToken}` } }),
                     fetch(`${API_URL}/financial-summary/breakdown?${params}`, { headers: { "Authorization": `Bearer ${authToken}` } }),
@@ -25762,11 +26200,15 @@
 
                 // Deterministic (non-AI) comparison against the previous comparable
                 // period — plain arithmetic on the same shared endpoint, per the
-                // "no external AI for basic arithmetic" requirement.
+                // "no external AI for basic arithmetic" requirement. Section 18:
+                // the SAME Location as the headline figures, never a business-
+                // wide previous period compared against a location-scoped current one.
                 let previous = null;
                 const prevKey = PROFIT_PREVIOUS_PERIOD[period];
                 if (prevKey) {
-                    const prevRes = await fetch(`${API_URL}/financial-summary?period=${prevKey}`, { headers: { "Authorization": `Bearer ${authToken}` } });
+                    let prevParams = `period=${prevKey}`;
+                    if (selectedProfitLocationId) prevParams += `&location_id=${selectedProfitLocationId}`;
+                    const prevRes = await fetch(`${API_URL}/financial-summary?${prevParams}`, { headers: { "Authorization": `Bearer ${authToken}` } });
                     if (prevRes.ok) previous = await prevRes.json();
                 }
 
@@ -25825,6 +26267,76 @@
                             <h4 class="text-[10px] uppercase tracking-wider text-textSec mb-1.5">Best-Performing Products</h4>
                             ${breakdown.top_products.map(p => `<div class="flex items-center justify-between py-1 text-[11px]"><span class="text-textMain">${escapeHtml(p.name)}</span><span class="font-mono text-textSec">${p.units_sold} sold · ${formatCurrency(p.revenue)}</span></div>`).join("")}
                         </div>` : ""}
+                `;
+            } catch (e) {
+                body.innerHTML = `<div class="text-center py-10 text-danger">${friendlyErrorMessage(e.message, "Unable to load profit data.")}</div>`;
+            }
+        }
+
+        // "All Locations" view when active Locations use more than one
+        // currency (section 19/20). Deliberately the SIMPLER of the two
+        // spec-sanctioned options: group each Location's own already-
+        // correctly-scoped /financial-summary/by-location row by currency
+        // and show a subtotal per currency group — NEVER one combined
+        // cross-currency total, and no invented FX conversion anywhere.
+        // Detailed breakdown/previous-period comparison are intentionally
+        // NOT shown here (they would otherwise mix currencies in one
+        // category/product list) — the empty-state note below tells the
+        // user to pick a specific Location for those, exactly like section
+        // 20 option B recommends.
+        async function renderProfitAllLocationsGrouped(period, customFrom, customTo) {
+            const body = document.getElementById("profit-modal-body");
+            try {
+                const params = period === "custom" ? `period=custom&custom_start=${customFrom}&custom_end=${customTo}` : `period=${period}`;
+                const res = await fetch(`${API_URL}/financial-summary/by-location?${params}`, { headers: { "Authorization": `Bearer ${authToken}` } });
+                if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(showApiError(res, d, "Unable to load profit data.")); }
+                const rows = await res.json();
+                lastProfitData = null; // this grouped view has no single-table export shape yet — export stays disabled for it (see exportProfitCsv/Excel below)
+
+                const withActivity = rows.filter(r => (r.transaction_count || 0) > 0 || (r.expense_count || 0) > 0);
+                if (!withActivity.length) {
+                    body.innerHTML = `<div class="text-center py-10 text-textSec">No sales or expenses recorded yet for this period, at any location.</div>`;
+                    return;
+                }
+                // Group by currency code — never by raw currency string, so
+                // "NGN (₦)" from two different locations groups together.
+                const groups = new Map();
+                for (const r of withActivity) {
+                    const code = deriveCurrencyDisplay(r.currency).code;
+                    if (!groups.has(code)) groups.set(code, { currency: r.currency, rows: [] });
+                    groups.get(code).rows.push(r);
+                }
+
+                body.innerHTML = `
+                    <div class="mb-3 rounded-xl border border-primary/30 bg-primary/10 p-3 text-[11px] text-textSec">
+                        <span class="font-semibold text-primary">Multiple currencies across your locations.</span>
+                        Figures are grouped by currency and never combined into one total. Select a specific location above for a detailed breakdown and period comparison.
+                    </div>
+                    ${[...groups.values()].map(group => {
+                        const totalSales = group.rows.reduce((s, r) => s + (r.sales || 0), 0);
+                        const totalExpenses = group.rows.reduce((s, r) => s + (r.expenses || 0), 0);
+                        const knownProfit = group.rows.every(r => r.net_profit !== null);
+                        const totalNetProfit = knownProfit ? group.rows.reduce((s, r) => s + (r.net_profit || 0), 0) : null;
+                        return `
+                        <div class="mb-4 rounded-xl border border-borderCol overflow-hidden">
+                            <div class="bg-bgMain px-3 py-2 font-bold text-textMain text-xs">${escapeHtml(deriveCurrencyDisplay(group.currency).display)}</div>
+                            <div class="p-3 space-y-1.5">
+                                ${group.rows.map(r => `
+                                    <div class="flex items-center justify-between py-1 border-b border-borderCol/40 last:border-0">
+                                        <span class="text-textMain font-medium">${escapeHtml(r.location_name)}</span>
+                                        <span class="font-mono text-[11px] text-textSec">Sales ${formatCurrencyAs(r.sales, group.currency)} · Net ${r.net_profit === null ? 'Unknown' : formatCurrencyAs(r.net_profit, group.currency)}</span>
+                                    </div>`).join("")}
+                                <div class="flex items-center justify-between pt-2 mt-1 border-t border-borderCol">
+                                    <span class="font-bold text-textMain">Subtotal (${deriveCurrencyDisplay(group.currency).code})</span>
+                                    <span class="font-mono font-bold ${totalNetProfit !== null && totalNetProfit >= 0 ? 'text-success' : 'text-danger'}">${totalNetProfit === null ? 'Unknown' : formatCurrencyAs(totalNetProfit, group.currency)} <span class="text-textSec font-normal text-[10px]">net</span></span>
+                                </div>
+                                <div class="flex items-center justify-between text-[10px] text-textSec">
+                                    <span>Sales ${formatCurrencyAs(totalSales, group.currency)}</span>
+                                    <span>Expenses ${formatCurrencyAs(totalExpenses, group.currency)}</span>
+                                </div>
+                            </div>
+                        </div>`;
+                    }).join("")}
                 `;
             } catch (e) {
                 body.innerHTML = `<div class="text-center py-10 text-danger">${friendlyErrorMessage(e.message, "Unable to load profit data.")}</div>`;
@@ -26163,7 +26675,19 @@
             const forecastText = o.accuracy == null ? (o.message || t("businessBrain.noForecastPeriods")) : tPlural("businessBrain.forecastSummary", o.evaluated_predictions, {accuracy:o.accuracy, trend:trendText ? ` · ${trendText}` : ''});
             const impact = [];
             if (o.actions_taken > 0) impact.push(tPlural("businessBrain.recommendationsActedOn", o.actions_taken));
-            if (o.revenue_at_risk != null && o.revenue_at_risk > 0) impact.push(t("businessBrain.revenueAtRisk", {amount:formatCurrency(o.revenue_at_risk)}));
+            if (o.revenue_at_risk_mixed_currency && Array.isArray(o.revenue_at_risk_by_currency) && o.revenue_at_risk_by_currency.length) {
+                // All Locations, genuinely mixed currencies among the branches
+                // involved: never a fabricated combined total (mirrors the
+                // Profit dashboard's own mixed-currency policy — see
+                // profitLocationsHaveMixedCurrencies()) — list each currency's
+                // own exposure instead, using formatCurrencyAs() (an EXPLICIT
+                // currency) rather than the business's default symbol.
+                const amounts = o.revenue_at_risk_by_currency.map(c => formatCurrencyAs(c.value, c.currency)).join(', ');
+                impact.push(t("businessBrain.revenueAtRiskMixed", {amounts}));
+            } else if (o.revenue_at_risk != null && o.revenue_at_risk > 0) {
+                const amount = o.revenue_at_risk_currency ? formatCurrencyAs(o.revenue_at_risk, o.revenue_at_risk_currency) : formatCurrency(o.revenue_at_risk);
+                impact.push(t("businessBrain.revenueAtRisk", {amount}));
+            }
             return `<section class="business-brief-outcomes"><h4><i class="fa-solid fa-bullseye text-primary"></i>${brainEsc(t("businessBrain.tabOutcomes"))}</h4><p>${brainEsc(forecastText)}</p>${impact.length ? `<p>${brainEsc(impact.join(' '))}</p>` : ''}</section>`;
         }
 
@@ -26570,7 +27094,14 @@
             if(hc) hc.textContent=inventoryStatusCounts.healthy ?? 0;
             if(lc) lc.textContent=inventoryStatusCounts.low ?? 0;
             if(oc) oc.textContent=inventoryStatusCounts.out ?? 0;
-            document.querySelectorAll('.inventory-status-filter').forEach(btn=>btn.classList.toggle('is-active', btn.dataset.status===inventoryStatusFilter));
+            document.querySelectorAll('.inventory-status-filter').forEach(btn=>{
+                const selected = btn.dataset.status === inventoryStatusFilter;
+                btn.classList.toggle('is-active', selected);
+                // Section F: aria-pressed must reflect actual selection state,
+                // not just the visual CSS class — a screen reader has no way
+                // to know a button is "pressed" from color/border alone.
+                btn.setAttribute('aria-pressed', selected ? 'true' : 'false');
+            });
             const chip=document.getElementById('inventory-status-chip');
             if(chip){
                 const label={healthy:'Healthy',low:'Low Stock',out:'Out of Stock'}[inventoryStatusFilter];
@@ -27347,7 +27878,19 @@
                 });
                 if (res.ok) {
                     const data = await res.json();
-                    showToast(t("purchaseOrders.generatedSuccess", {id: data.id || ''}), "success");
+                    // Multi-location generation (section 68): the backend may
+                    // now return several separate location-scoped drafts in
+                    // one call — surface that clearly rather than only
+                    // mentioning the first one's id.
+                    const drafts = Array.isArray(data.purchase_orders) ? data.purchase_orders : null;
+                    if (drafts && drafts.length > 1) {
+                        showToast(data.message || t("purchaseOrders.generatedSuccess", {id: data.id || ''}), "success");
+                    } else {
+                        showToast(t("purchaseOrders.generatedSuccess", {id: data.id || ''}), "success");
+                    }
+                    if (data.unresolved_products && data.unresolved_products.length) {
+                        showToast(`Skipped (no location assigned): ${data.unresolved_products.join(', ')}`, "info");
+                    }
                     openPOModal();
                 } else {
                     const data = await res.json();
@@ -27420,6 +27963,7 @@
                         { key: "created_at", label: "Generated", type: "datetime", format: v => v ? formatBusinessDate(v) : "" },
                         { key: "sent_at", label: "Sent", type: "datetime", format: v => v ? formatBusinessDate(v) : "" },
                         { key: "vendor_name", label: "Supplier", type: "text" },
+                        { key: "location_name", label: "Location", type: "text", format: v => v || "Legacy / Unknown" },
                         { key: "status", label: "Status", type: "text" },
                         { key: "total_estimated_cost", label: "Total Estimated Cost", type: "currency" },
                         { key: "created_by", label: "Created By", type: "text", format: v => v || "" },
@@ -27444,6 +27988,15 @@
             return none + options;
         }
 
+        // Same "only show when it would actually disambiguate something"
+        // rule as the Expense/Warehouse location badges — a single-location
+        // business never needs a location tag on every PO. Uses the full
+        // (not just active) location list, since History remains valid for
+        // a deactivated branch too.
+        function hasMultipleLocations() {
+            return (Array.isArray(globalLocations) ? globalLocations.length : 0) > 1;
+        }
+
         function renderPurchaseOrderDrafts(pos) {
             const container = document.getElementById("po-draft-container");
             if (!pos.length) {
@@ -27462,7 +28015,7 @@
                         <div class="flex items-center justify-between">
                             <div>
                                 <span class="font-bold text-textMain text-xs">${t("purchaseOrders.poHeader", {id: po.id})} — <span class="text-primary">${escapeHtml(po.vendor_name) || t("purchaseOrders.generalVendor")}</span></span>
-                                <div class="text-[10px] text-textSec">${po.created_at ? t("purchaseOrders.createdOn", {date: formatBusinessDate(po.created_at)}) : t("purchaseOrders.recent")}</div>
+                                <div class="text-[10px] text-textSec">${po.created_at ? t("purchaseOrders.createdOn", {date: formatBusinessDate(po.created_at)}) : t("purchaseOrders.recent")}${hasMultipleLocations() ? ` · <i class="fa-solid fa-location-dot"></i> ${escapeHtml(po.location_name || 'Legacy / Unknown')}` : ''}</div>
                             </div>
                             <span class="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-warning/15 text-warning border border-warning/30">${t("purchaseOrders.draft")}</span>
                         </div>
@@ -27509,7 +28062,7 @@
                     <div class="flex items-center justify-between">
                         <div>
                             <span class="font-bold text-textMain text-xs">${t("purchaseOrders.poHeader", {id: po.id})} — <span class="text-primary">${escapeHtml(po.vendor_name) || t("purchaseOrders.generalVendor")}</span></span>
-                            <div class="text-[10px] text-textSec">${po.sent_at ? t("purchaseOrders.sentOn", {date: formatBusinessDate(po.sent_at)}) : (po.created_at ? t("purchaseOrders.createdOn", {date: formatBusinessDate(po.created_at)}) : t("purchaseOrders.recent"))}</div>
+                            <div class="text-[10px] text-textSec">${po.sent_at ? t("purchaseOrders.sentOn", {date: formatBusinessDate(po.sent_at)}) : (po.created_at ? t("purchaseOrders.createdOn", {date: formatBusinessDate(po.created_at)}) : t("purchaseOrders.recent"))}${hasMultipleLocations() ? ` · <i class="fa-solid fa-location-dot"></i> ${escapeHtml(po.location_name || 'Legacy / Unknown')}` : ''}</div>
                         </div>
                         <span class="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-success/15 text-success border border-success/30"><i class="fa-solid fa-lock mr-1"></i>${t("purchaseOrders.sent")}</span>
                     </div>

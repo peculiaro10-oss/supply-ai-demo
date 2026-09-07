@@ -711,6 +711,19 @@ class Product(Base):
     wholesale_price = Column(Float, default=0.0)
     retail_price = Column(Float, nullable=False, default=0.0)
     warehouse = Column(String, default="Main Central Warehouse")
+    # Authoritative PRIMARY/DEFAULT warehouse identity (migration 0031) — see
+    # the "inventory source of truth" note above WarehouseStock below for the
+    # full contract. `warehouse` (the string above) is kept as a synchronized
+    # compatibility/display snapshot: create_product()/update_product() set
+    # both together and never let them drift for a NEW write. IMPORTANT: this
+    # is the product's PRIMARY warehouse, not necessarily its ONLY one — once
+    # transfer_stock() has moved partial quantity elsewhere, real stock can
+    # exist in other WarehouseStock rows too (see WarehouseStock.warehouse_id
+    # docstring). Never read this column to mean "all of this product's
+    # stock is here". Nullable only for a legacy row whose warehouse name
+    # could not be unambiguously resolved to one real Warehouse at migration
+    # time — never guessed.
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id", ondelete="SET NULL"), nullable=True, index=True)
     initial_stock = Column(Integer, default=0)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     expiry_date = Column(SQLDateTime, nullable=True)
@@ -762,6 +775,23 @@ class PurchaseOrder(Base):
     total_estimated_cost = Column(Float, default=0.0)
     email_draft = Column(Text)
     business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False)
+    # Which branch this PO restocks (migration 0029). A restock requirement
+    # belongs to the Location whose Warehouse needs stock — generate_po()
+    # derives this from each low-stock product's OWN warehouse and NEVER
+    # combines two Locations' requirements into one PO (see generate_po()'s
+    # per-Location grouping). NULL only for POs generated before this column
+    # existed, or for the rare product whose warehouse has no Location
+    # assigned — never backfilled/guessed.
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Canonical currency CODE (e.g. "NGN", "USD" — never a formatted symbol)
+    # this PO's total_estimated_cost was denominated in AT GENERATION TIME
+    # (migration 0034) — this Location's OWN currency, set once by
+    # generate_po() and never re-derived later. Historical integrity
+    # (section 15-21): if this Location's currency is ever changed in the
+    # future, an OLD PurchaseOrder must keep reading as what it actually
+    # was quoted in, never silently reinterpreted under the new currency.
+    # NULL only for a PO generated before this column existed.
+    currency_snapshot = Column(String, nullable=True)
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     # When this PO was actually SENT (email accepted by the provider, or the
@@ -805,6 +835,17 @@ class PurchaseOrderRequirement(Base):
     business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False, index=True)
     purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id", ondelete="CASCADE"), nullable=False, index=True)
     product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    # WHICH warehouse's shortage this requirement covers (migration 0032) —
+    # the true uniqueness key is (business, product, warehouse), not product
+    # alone, once a product can hold stock in more than one warehouse (see
+    # WarehouseStock.warehouse_id docstring): the same product can genuinely
+    # be low in one branch and healthy in another at the same time, and each
+    # is its own independent requirement. NULL only for a legacy row created
+    # before this column existed — a partial unique index (migration 0032)
+    # keeps those safely deduplicated on product alone, never mixed with the
+    # new per-warehouse rows. See generate_po()/resolve_purchase_order_
+    # requirements() for how this is populated and resolved going forward.
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     resolved_at = Column(SQLDateTime, nullable=True)
 
@@ -843,13 +884,57 @@ class Expense(Base):
     # no value here — reporting falls back to the existing timestamp-window
     # matching for those, exactly as it already did for every row before).
     business_day_id = Column(Integer, ForeignKey("business_days.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Which branch this expense belongs to (migration 0026). NULL means
+    # genuinely unknown/pre-location-architecture history — NEVER backfilled
+    # to Main Location or inferred from creator/date (see create_expense():
+    # every NEW expense always resolves and stores a real location_id, or
+    # the business genuinely has zero locations, which migration 0024
+    # guarantees never happens for a real tenant). Enforced consistent with
+    # business_day_id: create_expense() only ever opens/reuses a Business
+    # Day AT THIS SAME LOCATION, so the two columns can never disagree for
+    # any row this app itself wrote.
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Canonical currency CODE this expense's amount was recorded in
+    # (migration 0034) — that Location's OWN currency at the moment of
+    # creation, set once by create_expense() and never re-derived from
+    # Location.currency afterward. NULL only for an expense recorded before
+    # this column existed (or genuinely before Locations existed at all).
+    currency_snapshot = Column(String, nullable=True)
 
 class WarehouseStock(Base):
+    """--- INVENTORY SOURCE OF TRUTH (Location Backbone closure pass) --------
+    Product.quantity      = business-wide AGGREGATE, always kept equal to
+                             SUM(WarehouseStock.quantity) for that product
+                             (every mutation path — sale, restock, refund,
+                             manual adjustment, transfer — recomputes it from
+                             this table; never written independently).
+    WarehouseStock.quantity = the per-warehouse AUTHORITATIVE distribution.
+                             A product can hold real stock in more than one
+                             warehouse at once (see transfer_stock()) — this
+                             table, not Product.quantity, is what "how much
+                             is actually in Lagos vs. London" must read.
+    WarehouseStock.warehouse_id = warehouse IDENTITY (migration 0032... see
+                             below — 0031 for this column). Authoritative.
+    WarehouseStock.warehouse    = a synchronized compatibility/display name
+                             snapshot, kept in sync with warehouse_id by
+                             every write path — never the identity itself
+                             once warehouse_id is set.
+    Product.warehouse_id  = the product's PRIMARY/DEFAULT warehouse only —
+                             see Product.warehouse_id's own docstring for why
+                             this must never be read as "the only warehouse
+                             holding this product's stock".
+    ------------------------------------------------------------------------
+    """
     __tablename__ = "warehouse_stocks"
     id = Column(Integer, primary_key=True, index=True)
     business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False, index=True)
     product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
     warehouse = Column(String, nullable=False)
+    # Authoritative warehouse identity (migration 0031) — see the class
+    # docstring above. Nullable only for a legacy row whose warehouse name
+    # could not be unambiguously resolved to one real Warehouse at migration
+    # time (never guessed); every new write sets this alongside `warehouse`.
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id", ondelete="SET NULL"), nullable=True, index=True)
     quantity = Column(Integer, nullable=False, default=0)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(SQLDateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -910,6 +995,33 @@ class SaleModel(Base):
     # for sales recorded before this column existed.
     pricing_type = Column(String, nullable=True)
     product_name_snapshot = Column(String, nullable=True)
+    # Which warehouse this line's stock was actually decremented from AT THE
+    # MOMENT OF SALE (migration 0030) — same snapshot principle as
+    # unit_cost_at_sale/product_name_snapshot above, just for warehouse
+    # identity. Product.warehouse is a mutable "current" pointer (a transfer
+    # or reassignment can change it later); this column is what a refund's
+    # restock destination and any durable historical Location lookup must
+    # use instead, so a later warehouse change can never retroactively alter
+    # where history says a sale/refund happened (section 27/28). NULL for
+    # sales recorded before this column existed — refund restock falls back
+    # to the product's CURRENT warehouse for those, exactly as it always has.
+    warehouse_name_snapshot = Column(String, nullable=True)
+    # The IDENTITY counterpart to warehouse_name_snapshot (migration 0032) —
+    # preferred over the name snapshot when present (immune to a later
+    # warehouse RENAME, which the name snapshot alone is not). ON DELETE SET
+    # NULL: if the warehouse row itself is later deleted, this becomes NULL
+    # and callers (refund restock) fall back to warehouse_name_snapshot,
+    # which remains the durable historical record either way — this column
+    # is an optimization for exact identity, never the only source of truth.
+    warehouse_id_at_sale = Column(Integer, ForeignKey("warehouses.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Canonical currency CODE this line's unit_price/total_price were
+    # denominated in AT THE MOMENT OF SALE (migration 0034) — the selling
+    # Location's own currency, resolved the same way its warehouse/location
+    # was and stamped once by sales_checkout(), never re-derived from
+    # Location.currency afterward (a later currency change at that Location
+    # must never reinterpret this row's historical amount). NULL only for a
+    # sale recorded before this column existed.
+    currency_snapshot = Column(String, nullable=True)
     timestamp = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     # client_ref: THE CHECKOUT/TRANSACTION GROUPING KEY. Every SaleModel row
     # created by one /sales/checkout submission shares this exact value, so
@@ -983,16 +1095,21 @@ class MutationIdempotency(Base):
 
 class BusinessDay(Base):
     """One row per Business Day SESSION — NOT one row per business per
-    calendar date. A business may open, close, and open again multiple
-    independent sessions on the same business-local date (e.g. #41 opened
-    8:00 AM/closed 1:30 PM, then #42 opened 2:15 PM the same day) — each is
-    its own row with its own id, never merged or reused. `date` records
-    which business-local calendar date a session was opened on for display/
-    filtering purposes only; it carries no uniqueness constraint. The one
-    real constraint is that at most one session per business can be ACTIVE
-    (is_open=True) at any moment — enforced by a partial unique index on
-    (business_id) WHERE is_open (see startup migrations) and by
-    get_active_business_day()/start_business_day() below, never by date.
+    calendar date, and NOT one row per business at all: a Business Day is
+    the operational session for one specific LOCATION (section: "Business
+    Day is the operational session for a Location"). A business may open,
+    close, and open again multiple independent sessions on the same
+    location-local date (e.g. #41 opened 8:00 AM/closed 1:30 PM, then #42
+    opened 2:15 PM the same day) — each is its own row with its own id,
+    never merged or reused. `date` records which location-local calendar
+    date a session was opened on for display/filtering purposes only; it
+    carries no uniqueness constraint. The one real constraint is that at
+    most one session PER LOCATION can be ACTIVE (is_open=True) at any
+    moment — enforced by a partial unique index on (business_id,
+    location_id) WHERE is_open (migration 0025_business_day_per_location)
+    and by get_active_business_day()/start_business_day() below, never by
+    date. Two DIFFERENT locations may both be open at the same time —
+    that is normal multi-branch operation, not a conflict.
 
     A row's identity never changes across its whole lifecycle (open ->
     closed -> reopened -> closed again) — the intermediate transitions are
@@ -1014,15 +1131,22 @@ class BusinessDay(Base):
     __tablename__ = "business_days"
     id = Column(Integer, primary_key=True, index=True)
     business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False, index=True)
-    # Additive, nullable location-compatibility column (section 4's "minimum
-    # acceptable safe implementation" — NOT a rearchitecture of Business Day
-    # into genuinely separate per-location sessions/dashboards, which stays
-    # future work). NULL means "this business's Main Location" for a
-    # single-location business or a pre-existing session — every existing
-    # query that filters purely on business_id is completely unaffected.
-    # start_business_day() stamps the caller's business's current default
-    # location going forward; nothing currently combines two locations'
-    # figures into one total (see location-scoped reporting notes).
+    # Which Location this session belongs to — the operational branch
+    # context for every Sale/Expense recorded under it (see resolve_
+    # warehouse_location()/resolve_expense_location() and the Business Day
+    # Consistency Rule: a Sale/Expense's own location_id must always equal
+    # its Business Day's location_id, enforced by construction — both are
+    # always opened/resolved against the SAME Location, never independently).
+    # start_business_day()/ensure_open_business_day() always stamp a real,
+    # resolved location_id for every NEW session (see resolve_business_day_
+    # location()/resolve_warehouse_location()) — this is per-location
+    # genuine multi-branch operation, not a placeholder. NULL is reserved
+    # for sessions that predate this column (migration 0024/0025); by this
+    # app's established convention a NULL location_id here means "this
+    # business's Main Location" for display purposes (see serialize_
+    # business_day()) — every existing query that filters purely on
+    # business_id (with no location_id) remains completely unaffected and
+    # continues to see every location's activity combined, as before.
     location_id = Column(Integer, ForeignKey("locations.id", ondelete="SET NULL"), nullable=True, index=True)
     date = Column(String, nullable=False, index=True)
     opened_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
@@ -1119,6 +1243,20 @@ class RefundTransaction(Base):
     id = Column(Integer, primary_key=True, index=True)
     business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False, index=True)
     business_day_id = Column(Integer, ForeignKey("business_days.id", ondelete="SET NULL"), nullable=True, index=True)
+    # The ORIGINAL sale's Location (migration 0028) — a refund is processed
+    # at the SAME Location the sale happened at, never wherever the
+    # currently-open Business Day happens to be (see create_refund(), which
+    # resolves this from the original sale's own BusinessDay.location_id
+    # BEFORE opening/reusing a Business Day for the refund itself, so the two
+    # can never disagree). NULL only for a refund of a genuinely legacy sale
+    # that predates BusinessDay.location_id — never guessed.
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Canonical currency CODE refund_total/refund_cost_total are denominated
+    # in (migration 0034) — the processing Location's own currency (same
+    # Location as location_id above, by construction), stamped once by
+    # create_refund() and never re-derived later. NULL only for a refund of
+    # a legacy sale with no resolvable Location.
+    currency_snapshot = Column(String, nullable=True)
     original_client_ref = Column(String, nullable=True, index=True)
     reason = Column(String, nullable=True)
     note = Column(Text, nullable=True)
@@ -1222,6 +1360,13 @@ class AuditLog(Base):
     action_category = Column(String, nullable=True, index=True)
     resource_type = Column(String, nullable=True)
     resource_id = Column(Integer, nullable=True)
+    # Structured Location context for Activity History filtering (migration
+    # 0033) — a real indexed column rather than parsing metadata_json (Text,
+    # not efficiently queryable in PostgreSQL without a JSON column type this
+    # table doesn't have). NULL means genuinely business-wide/unscoped —
+    # never guessed; add_audit() callers that know a real Location pass it,
+    # everything else leaves this NULL exactly as before this column existed.
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="SET NULL"), nullable=True, index=True)
 
 class AccountActionRequest(Base):
     __tablename__ = "account_action_requests"
@@ -2373,6 +2518,70 @@ def canonical_business_country_values(country: Optional[str], country_code: Opti
         "locale": f"{lang}-{iso2}",
     }
 
+# A currency CODE per ISO 4217 is always exactly 3 letters (NGN, USD, GBP,
+# ...) — this is what currency_snapshot (migration 0034) is documented as
+# storing, and never a decorated display string. COUNTRY_CONTEXTS' own
+# "currency" values (e.g. "NGN (₦)") are display-formatted, so anything
+# that reads a currency FROM there (or from a Location/BusinessProfile row
+# that predates this rule, or a client-submitted value) must be reduced to
+# the bare code through this one normalizer before it is stored or
+# snapshotted — never trusted as already-clean.
+_CURRENCY_CODE_RE = re.compile(r"^([A-Za-z]{3})(?![A-Za-z])")
+
+def _extract_currency_code_shape(value: Optional[str]) -> Optional[str]:
+    """The pure SHAPE rule, no allowlist: leading run of letters,
+    uppercased, accepted only if EXACTLY 3 letters (not immediately
+    followed by a 4th) — the one shape every real ISO 4217 code shares.
+    Used both to build the known-code set below (from COUNTRY_CONTEXTS'
+    own decorated values) and, keeping it available separately, is
+    intentionally NOT exported as the public normalizer — see
+    normalize_currency_code(), which also checks the result is a
+    currency this app actually recognizes, so an unrelated 3-letter word
+    ("Not A Currency" -> "Not") is never mistaken for a code."""
+    if not value:
+        return None
+    match = _CURRENCY_CODE_RE.match(value.strip())
+    return match.group(1).upper() if match else None
+
+# The real, existing set of currency codes this app already recognizes —
+# derived from COUNTRY_CONTEXTS (190+ countries), never hardcoded to a
+# handful of examples (section 21: "use existing country/currency
+# conventions in the app... do not overfit only these three currencies").
+_KNOWN_CURRENCY_CODES = {
+    code for code in (_extract_currency_code_shape(ctx["currency"]) for ctx in COUNTRY_CONTEXTS.values())
+    if code
+}
+
+def normalize_currency_code(value: Optional[str]) -> Optional[str]:
+    """Reduces a currency value to its bare ISO-4217 code: "NGN (₦)" ->
+    "NGN", "usd ($)" -> "USD", "GBP" -> "GBP". Extracts the leading
+    3-letter shape (see _extract_currency_code_shape()) AND requires the
+    result to be a currency this app actually recognizes
+    (_KNOWN_CURRENCY_CODES) — shape alone is not enough, since arbitrary
+    text can coincidentally start with a real 3-letter word ("Not A
+    Currency" -> "Not" would otherwise shape-match). Anything that
+    doesn't clear both checks (blank, garbage, a fragment of the wrong
+    length, or a 3-letter word that isn't a real currency this app knows)
+    returns None rather than ever inventing or guessing a code."""
+    code = _extract_currency_code_shape(value)
+    return code if code and code in _KNOWN_CURRENCY_CODES else None
+
+def validate_location_timezone(value: Optional[str]) -> Optional[str]:
+    """Validates a timezone against the real IANA tz database via
+    ZoneInfo — never accepted as an unchecked string going forward. None/
+    blank passes through unchanged (a Location's timezone has always been
+    optional at the schema level — this only tightens what a GIVEN value
+    must look like, not whether one is required). Raises HTTPException
+    (400) for a name ZoneInfo cannot resolve (e.g. "Mars/Olympus"), naming
+    real examples so the caller can self-correct."""
+    if not value:
+        return value
+    try:
+        ZoneInfo(value)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"'{value}' is not a valid timezone. Use a real IANA timezone name, e.g. Africa/Lagos, Europe/London, Asia/Tokyo.")
+    return value
+
 # -----------------------------------------------------------------------------
 # PROVIDERS
 # -----------------------------------------------------------------------------
@@ -2908,18 +3117,38 @@ def build_xlsx_response(filename: str, report_title: Optional[str], sheets: List
         headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
     )
 
-def resolve_financial_period(business: "BusinessProfile", period: str, custom_start: Optional[str] = None, custom_end: Optional[str] = None) -> Tuple[Optional[datetime], Optional[datetime]]:
+def resolve_period_zoneinfo(business: "BusinessProfile", location: Optional["Location"] = None) -> tzinfo:
+    """The authoritative timezone for period resolution ('today', 'this
+    week', a custom range...). A Location's OWN timezone is authoritative
+    for anything scoped to that Location (true multi-country operation —
+    Lagos and London must never share one clock); BusinessProfile.timezone
+    remains the fallback for a legacy/no-location-selected/business-wide
+    caller, exactly as before this pass. Same safe-fallback behavior as
+    business_local_zoneinfo() if the stored zone string is invalid."""
+    if location and location.timezone:
+        try:
+            return ZoneInfo(location.timezone)
+        except Exception:
+            pass
+    return business_local_zoneinfo(business)
+
+def resolve_financial_period(business: "BusinessProfile", period: str, custom_start: Optional[str] = None, custom_end: Optional[str] = None, location: Optional["Location"] = None) -> Tuple[Optional[datetime], Optional[datetime]]:
     """Returns (start_utc, end_utc) as naive UTC datetimes — matching how
     every timestamp in this app is already stored (datetime.utcnow(), no
-    tzinfo) — bounding the requested period in the BUSINESS'S OWN local
-    timezone. 'Today' means the business's calendar day, not whatever day it
-    happens to be in UTC, per the business's stored BusinessProfile.timezone.
-    period="all" returns (None, None), meaning "no date filter at all"."""
+    tzinfo) — bounding the requested period in the OPERATING TIMEZONE for
+    this call. 'Today' means that timezone's calendar day, not whatever day
+    it happens to be in UTC. See resolve_period_zoneinfo(): a caller scoped
+    to one Location gets THAT Location's own timezone (never blindly
+    BusinessProfile.timezone once Locations exist — Lagos's "today" and
+    London's "today" are genuinely different moments); a business-wide/
+    legacy caller keeps the original BusinessProfile.timezone behavior
+    unchanged. period="all" returns (None, None), meaning "no date filter
+    at all"."""
     if period not in FINANCIAL_PERIODS:
         raise HTTPException(status_code=400, detail=f"Unknown period '{period}'. Use one of: {', '.join(sorted(FINANCIAL_PERIODS))}.")
     if period == "all":
         return None, None
-    tz = business_local_zoneinfo(business)
+    tz = resolve_period_zoneinfo(business, location)
     now_local = datetime.utcnow().replace(tzinfo=timezone.utc).astimezone(tz)
     today_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -3207,7 +3436,12 @@ def compute_financial_summary(db: Session, business_id: int, start_utc: Optional
     }
 
 def financial_summary_for_period(db: Session, business: "BusinessProfile", period: str, custom_start: Optional[str] = None, custom_end: Optional[str] = None, location_id: Optional[int] = None) -> Dict[str, Any]:
-    start_utc, end_utc = resolve_financial_period(business, period, custom_start, custom_end)
+    # The Location's OWN timezone drives period boundaries once a specific
+    # Location is selected (section 22/23) — resolved here, once, so every
+    # caller (headline summary, breakdown, by-location) gets it consistently
+    # rather than each re-deriving it independently.
+    location = db.query(Location).filter(Location.id == location_id, Location.business_id == business.id).first() if location_id is not None else None
+    start_utc, end_utc = resolve_financial_period(business, period, custom_start, custom_end, location=location)
     summary = compute_financial_summary(db, business.id, start_utc, end_utc, location_id=location_id)
     summary["period"] = period
     return summary
@@ -3351,18 +3585,60 @@ ACTIVITY_CATEGORIES = {
     "SUBSCRIPTION", "SECURITY",
 }
 
-def add_audit(db: Session, user: Optional[User], action: str, description: str, target: Optional[User] = None, business_id: Optional[int] = None, business_day_id: Optional[int] = None, metadata: Optional[dict] = None, action_category: Optional[str] = None, resource_type: Optional[str] = None, resource_id: Optional[int] = None):
+# Which of the categories above describe something that actually happens
+# AT a physical branch (used only to label a NULL AuditLog.location_id in
+# the Activity History export — see _audit_log_location_label()). Mirrors
+# decisions already made elsewhere in the Location architecture: Suppliers
+# are a business-wide vendor relationship (same as "Active Suppliers =
+# BUSINESS-WIDE" on the Dashboard), Team/Permissions/Approvals/Subscription/
+# Security are account- and business-level concerns with no branch of their
+# own, and most BUSINESS_SETTINGS actions (profile/currency/tax settings)
+# apply to the whole business — so none of those belong here even when a
+# specific row happens to carry no location_id.
+LOCATION_RELEVANT_ACTIVITY_CATEGORIES = {"INVENTORY", "SALES", "EXPENSES", "WAREHOUSE", "PURCHASE_ORDERS", "BUSINESS_DAY"}
+
+def _audit_log_location_label(location_id: Optional[int], location_name: Optional[str], action_category: Optional[str]) -> str:
+    """The Activity History export's LOCATION column needs a value for
+    EVERY row (unlike the on-screen list, which just omits its location
+    badge for a NULL row — see renderAuditLog()) — so a plain blank cell
+    would be genuinely ambiguous in a spreadsheet. Two different NULLs get
+    two different, non-fabricated labels rather than one blanket fallback:
+
+    - A row whose action_category is inherently location-relevant
+      (LOCATION_RELEVANT_ACTIVITY_CATEGORIES) but still has no location_id
+      is "Legacy / Unknown" — this action type IS something that happens at
+      a branch, so the missing value is a genuine historical data gap (the
+      row predates location attribution for that call site/table, per
+      migration 0033's own narrow backfill), consistent with the same
+      "Legacy / Unknown" label Sales/Purchase Orders/Warehouses already use
+      for their own genuinely-unknown historical rows.
+    - Every other NULL row (TEAM, PERMISSIONS, SUBSCRIPTION, SECURITY, a
+      business-wide BUSINESS_SETTINGS change, an uncategorized action, etc.)
+      is "Business-wide / Unscoped" — no location ever applied to it, by
+      the nature of the action itself, not because the data is missing."""
+    if location_id is not None:
+        return location_name or "Legacy / Unknown"
+    if action_category in LOCATION_RELEVANT_ACTIVITY_CATEGORIES:
+        return "Legacy / Unknown"
+    return "Business-wide / Unscoped"
+
+def add_audit(db: Session, user: Optional[User], action: str, description: str, target: Optional[User] = None, business_id: Optional[int] = None, business_day_id: Optional[int] = None, metadata: Optional[dict] = None, action_category: Optional[str] = None, resource_type: Optional[str] = None, resource_id: Optional[int] = None, location_id: Optional[int] = None):
     """The single immutable audit trail for the whole app. business_day_id,
-    metadata, action_category, resource_type and resource_id are all
-    additive/optional — every pre-existing call site (written before any of
-    these existed) is unaffected. metadata is stored as JSON text (never as
-    arbitrary client input — every caller builds it server-side from values
-    it already computed) so structured details (closing snapshots,
-    correction old/new values) survive without needing a new table per event
-    type. action_category must be one of ACTIVITY_CATEGORIES when given —
-    kept loose (not enforced with an exception) so a bad category value from
-    a future call site degrades to "uncategorized" in the UI rather than
-    ever blocking the write of the underlying audit fact."""
+    metadata, action_category, resource_type, resource_id and location_id
+    are all additive/optional — every pre-existing call site (written before
+    any of these existed) is unaffected. metadata is stored as JSON text
+    (never as arbitrary client input — every caller builds it server-side
+    from values it already computed) so structured details (closing
+    snapshots, correction old/new values) survive without needing a new
+    table per event type. action_category must be one of ACTIVITY_CATEGORIES
+    when given — kept loose (not enforced with an exception) so a bad
+    category value from a future call site degrades to "uncategorized" in
+    the UI rather than ever blocking the write of the underlying audit fact.
+    location_id (migration 0033) is a real indexed column for Activity
+    History filtering — NULL means genuinely business-wide/unscoped, never
+    guessed; a caller that resolved a real Location for this event passes
+    it, everything else leaves it NULL exactly as before this column
+    existed."""
     actor_role = user.role if user else None
     actor_username = user.username if user else None
     bid = business_id or (user.business_id if user else None)
@@ -3382,6 +3658,7 @@ def add_audit(db: Session, user: Optional[User], action: str, description: str, 
         action_category=action_category if action_category in ACTIVITY_CATEGORIES else None,
         resource_type=resource_type,
         resource_id=resource_id,
+        location_id=location_id,
     ))
 
 # =============================================================================
@@ -4263,16 +4540,28 @@ def _create_business_day_session(db: Session, business_id: int, opener: Optional
     day and none was active). Both are real, both are audited — but they mean
     different things when reconstructing what happened, so they must not be
     logged under the same action code."""
-    today = business_local_today(db, business_id)
-    # An explicit location_id (passed by start_business_day once it has
-    # resolved/validated the target Location) always wins; only a caller
-    # that has no location context at all (e.g. the checkout auto-open path)
-    # falls back to the business's default location.
+    # An explicit location_id (passed by start_business_day/checkout once it
+    # has resolved/validated the target Location) always wins; only a caller
+    # that has no location context at all falls back to the business's
+    # default location.
     if location_id is not None:
         resolved_location_id = location_id
     else:
         default_location = get_default_location(db, business_id)
         resolved_location_id = default_location.id if default_location else None
+    # This session's calendar `date` is computed in the RESOLVED Location's
+    # OWN timezone (section 34) — a Lagos session opened at 11pm UTC is
+    # still "today" in Lagos even when it is already tomorrow in London;
+    # business_local_today() (BusinessProfile.timezone) remains the fallback
+    # only for the rare case of a business with no resolvable Location at
+    # all, which migration 0024 guarantees never happens for a real tenant.
+    resolved_location_row = db.query(Location).filter(Location.id == resolved_location_id).first() if resolved_location_id else None
+    if resolved_location_row and resolved_location_row.timezone:
+        business_for_tz = db.query(BusinessProfile).filter(BusinessProfile.id == business_id).first()
+        tz = resolve_period_zoneinfo(business_for_tz, resolved_location_row)
+        today = datetime.utcnow().replace(tzinfo=timezone.utc).astimezone(tz).date().isoformat()
+    else:
+        today = business_local_today(db, business_id)
     day = BusinessDay(
         business_id=business_id, date=today, is_open=True, status="OPEN",
         location_id=resolved_location_id,
@@ -4290,7 +4579,7 @@ def _create_business_day_session(db: Session, business_id: int, opener: Optional
         db, opener,
         "BUSINESS_DAY_AUTO_OPENED" if auto else "BUSINESS_DAY_STARTED",
         f"Business day {today} {'auto-opened for an operational action' if auto else 'started'}.",
-        business_id=business_id, business_day_id=day.id,
+        business_id=business_id, business_day_id=day.id, location_id=day.location_id,
         metadata={"date": today, "opened_by": day.opened_by_name, "role": day.opened_by_role, "auto": auto},
     )
     if commit:
@@ -4298,6 +4587,40 @@ def _create_business_day_session(db: Session, business_id: int, opener: Optional
     else:
         db.flush()
     return day
+
+def resolve_warehouse_location(db: Session, business_id: int, warehouse_name: str) -> Optional["Location"]:
+    """The ONE authoritative path from a product's stock to the operational
+    Location it belongs to: product.warehouse (a name) -> the real Warehouse
+    row with that name in this business -> Warehouse.location_id -> Location.
+    Never guessed, never defaulted to Main Location here — a warehouse that
+    doesn't exist as a real row, or exists but has no location_id assigned
+    yet, returns None and the CALLER decides what "unresolvable" means for
+    it (checkout rejects with a clear message; see sales_checkout)."""
+    warehouse = db.query(Warehouse).filter(Warehouse.business_id == business_id, Warehouse.name == warehouse_name).first()
+    if not warehouse or not warehouse.location_id:
+        return None
+    return db.query(Location).filter(Location.id == warehouse.location_id, Location.business_id == business_id).first()
+
+def resolve_expense_location(db: Session, business_id: int, location_id: Optional[int]) -> Optional["Location"]:
+    """Resolution for a NEW Expense's Location (section 11) — deliberately
+    STRICTER than resolve_business_day_location: an omitted location_id is
+    only ever auto-filled when the business has EXACTLY ONE active Location
+    (the common single-branch case, which must never be forced through a
+    selector). With more than one active Location and no explicit choice,
+    this refuses rather than silently defaulting to Main Location — the
+    caller must ask the user to choose (never guess which branch actually
+    incurred the cost)."""
+    if location_id is not None:
+        location = db.query(Location).filter(Location.id == location_id, Location.business_id == business_id, Location.is_active == True).first()
+        if not location:
+            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+        return location
+    active = db.query(Location).filter(Location.business_id == business_id, Location.is_active == True).order_by(Location.id.asc()).all()
+    if len(active) == 1:
+        return active[0]
+    if len(active) == 0:
+        return None  # a real tenant always has one (migration 0024) — never crash on this edge
+    raise HTTPException(status_code=400, detail="Select which location this expense belongs to.")
 
 def resolve_business_day_location(db: Session, business_id: int, location_id: Optional[int]) -> Optional["Location"]:
     """Shared resolution used by every Business Day open/close/current-
@@ -4340,35 +4663,48 @@ def start_business_day(db: Session, business_id: int, opener: Optional[User], lo
         db.rollback()
         raise HTTPException(status_code=409, detail=BUSINESS_DAY_ALREADY_ACTIVE_MSG)
 
-def ensure_open_business_day(db: Session, business_id: int, opener: Optional[User] = None, commit: bool = True) -> BusinessDay:
+def ensure_open_business_day(db: Session, business_id: int, opener: Optional[User] = None, commit: bool = True, location_id: Optional[int] = None) -> BusinessDay:
     """Fallback used only by write operations that need an active session to
-    attribute themselves to (currently: sales checkout) — never by a
-    read-only endpoint. Reuses whichever Business Day is currently active,
-    exactly as new sales/expenses must (see get_active_business_day); only
-    creates a brand-new session if none is active at all — this is the one
-    path allowed to auto-open a session without the user pressing "Open
-    Business Day" first. Race-safe: if two concurrent sales both find no
-    active session and both try to create one, the partial unique index lets
-    only one succeed — the loser simply re-reads and reuses the winner's new
-    row instead of erroring."""
-    active = get_active_business_day(db, business_id)
+    attribute themselves to (sales checkout, expense creation) — never by a
+    read-only endpoint. Reuses whichever Business Day is currently active
+    AT THE GIVEN LOCATION, exactly as new sales/expenses must (see
+    get_active_business_day); only creates a brand-new session if none is
+    active at that location — this is the one path allowed to auto-open a
+    session without the user pressing "Open Business Day" first.
+
+    location_id is optional for backward compatibility with any caller that
+    genuinely has no location context (there are none left after this pass —
+    sales_checkout and create_expense both now always resolve one first) —
+    omitted, this falls back to "whichever session is active anywhere in the
+    business", the original pre-multi-location behavior. Passed, this can
+    NEVER reuse a different location's active session (section 6/8: a London
+    sale must never silently attach to Lagos's open day just because it's
+    the only one open).
+
+    Race-safe via the partial unique index on (business_id, location_id)
+    WHERE is_open (migration 0025): if two concurrent writes for the SAME
+    location both find no active session and both try to create one, only
+    one insert succeeds — the loser simply re-reads and reuses the winner's
+    new row instead of erroring."""
+    active = get_active_business_day(db, business_id, location_id=location_id)
     if active:
         return active
     if not commit:
-        # Checkout must keep auto-open, stock, sale lines, and both audits in
-        # one transaction. Lock this tenant only while creating the missing
-        # day, then re-check after acquiring the lock so two checkouts for
-        # different products cannot race the partial unique active-day index.
+        # Checkout/expense-create must keep auto-open, the write, and audits
+        # in one transaction. Lock this tenant only while creating the
+        # missing day, then re-check after acquiring the lock so two writes
+        # for different products/locations cannot race the partial unique
+        # active-day index.
         db.query(BusinessProfile).filter(BusinessProfile.id == business_id).with_for_update().one()
-        active = get_active_business_day(db, business_id)
+        active = get_active_business_day(db, business_id, location_id=location_id)
         if active:
             return active
-        return _create_business_day_session(db, business_id, opener, auto=True, commit=False)
+        return _create_business_day_session(db, business_id, opener, auto=True, commit=False, location_id=location_id)
     try:
-        return _create_business_day_session(db, business_id, opener, auto=True)
+        return _create_business_day_session(db, business_id, opener, auto=True, location_id=location_id)
     except IntegrityError:
         db.rollback()
-        active = get_active_business_day(db, business_id)
+        active = get_active_business_day(db, business_id, location_id=location_id)
         if active:
             return active
         raise
@@ -4535,7 +4871,7 @@ def is_high_priority_product(db: Session, product: "Product") -> bool:
     average = sum(per_product.values()) / catalog_size
     return this_product_units >= average * 2
 
-def check_inventory_notifications(db: Session, business_id: int, product: "Product") -> None:
+def check_inventory_notifications(db: Session, business_id: int, product: "Product", warehouse_id: Optional[int] = None, quantity: Optional[int] = None) -> None:
     """Fires/resolves the two quantity-driven inventory notification types
     for one product — called after every write that changes
     Product.quantity (sale checkout, stock adjustment/restock, transfer).
@@ -4545,28 +4881,79 @@ def check_inventory_notifications(db: Session, business_id: int, product: "Produ
     business's own sales data marks high-priority — see
     is_high_priority_product(). Either condition resolves itself the moment
     it's no longer true, so a restock frees the dedup key for a future
-    recurrence instead of leaving it permanently silenced."""
-    low_key, stockout_key = f"low_stock:{product.id}", f"stockout:{product.id}"
-    if product.quantity <= 0:
+    recurrence instead of leaving it permanently silenced.
+
+    Dedup key is deliberately keyed on product.id ALONE, not product+
+    location: one Product row already belongs to exactly one primary
+    warehouse (Product.warehouse), which belongs to exactly one Location —
+    "the same item low in two branches at once" is two separate Product
+    rows (two SKUs) in this app's actual data model, never one row spanning
+    two branches, so there is no cross-location dedup collision to guard
+    against here (see the Location Backbone audit in this pass's report for
+    the full reasoning). The branch NAME is still surfaced in the message
+    text below (section 38) purely for clarity in a multi-location business."""
+    # Dedup key includes warehouse_id when known (section 31) — never
+    # product alone once a product can hold stock in more than one
+    # warehouse (see WarehouseStock's docstring): the SAME product low in
+    # Lagos and healthy in London must fire, and independently resolve, two
+    # distinct notifications, never share one dedup slot. warehouse_id/
+    # quantity omitted (a caller with no specific warehouse context) falls
+    # back to the aggregate Product.quantity and the original product-only
+    # dedup key, preserving exact pre-hardening behavior for any such
+    # caller — see check_inventory_notifications_for_product() below for
+    # the per-warehouse sweep every write path now prefers.
+    effective_qty = product.quantity if quantity is None else quantity
+    scope = f"{warehouse_id}:" if warehouse_id is not None else ""
+    low_key, stockout_key = f"low_stock:{scope}{product.id}", f"stockout:{scope}{product.id}"
+    # Only named when it would actually disambiguate something (section 38)
+    # — a single-location business never needs "at Main Location" noise on
+    # every inventory notification.
+    location_suffix = ""
+    if warehouse_id is not None and db.query(Location).filter(Location.business_id == business_id, Location.is_active == True).count() > 1:
+        warehouse_row = db.query(Warehouse).filter(Warehouse.id == warehouse_id, Warehouse.business_id == business_id).first()
+        if warehouse_row and warehouse_row.location_id:
+            location = db.query(Location).filter(Location.id == warehouse_row.location_id).first()
+            if location:
+                location_suffix = f" at {location.name}"
+    if effective_qty <= 0:
         resolve_notifications(db, low_key, business_id)  # superseded by the more severe condition below
         if is_high_priority_product(db, product):
             create_notification(
                 db, business_id=business_id, category="inventory", severity="critical", type="CRITICAL_STOCKOUT",
-                title="Critical stockout", message=f"{product.name} is now out of stock.",
+                title="Critical stockout", message=f"{product.name} is now out of stock{location_suffix}.",
                 related_entity_type="product", related_entity_id=product.id,
                 deep_link=f"inventory:{product.id}", dedup_key=stockout_key, stage="out_of_stock",
             )
-    elif product.quantity <= product.min_stock_level:
+    elif effective_qty <= product.min_stock_level:
         resolve_notifications(db, stockout_key, business_id)
         create_notification(
             db, business_id=business_id, category="inventory", severity="important", type="LOW_STOCK",
-            title="Low stock", message=f"{product.name} has fallen below its reorder level ({product.quantity} remaining, minimum {product.min_stock_level}).",
+            title="Low stock", message=f"{product.name} has fallen below its reorder level{location_suffix} ({effective_qty} remaining, minimum {product.min_stock_level}).",
             related_entity_type="product", related_entity_id=product.id,
             deep_link=f"inventory:{product.id}", dedup_key=low_key, stage="low",
         )
     else:
         resolve_notifications(db, low_key, business_id)
         resolve_notifications(db, stockout_key, business_id)
+
+def check_inventory_notifications_for_product(db: Session, business_id: int, product: "Product") -> None:
+    """Evaluates EVERY warehouse this product actually holds a stock row in,
+    INDEPENDENTLY — the correct replacement for a single aggregate check now
+    that a product can hold stock in more than one warehouse at once (see
+    WarehouseStock's docstring / transfer_stock()). For the common
+    single-warehouse product this produces exactly the same outcome as
+    before, just through a warehouse-scoped dedup key and (in a
+    multi-location business) a branch-named message. Prefer this over
+    calling check_inventory_notifications() directly for any write that
+    changed a product's stock."""
+    rows = db.query(WarehouseStock).filter(WarehouseStock.business_id == business_id, WarehouseStock.product_id == product.id).all()
+    if not rows:
+        # No WarehouseStock row at all (very old legacy data with no ledger
+        # ever created) — fall back to the aggregate, exactly as before.
+        check_inventory_notifications(db, business_id, product)
+        return
+    for row in rows:
+        check_inventory_notifications(db, business_id, product, warehouse_id=row.warehouse_id, quantity=row.quantity)
 
 def check_expiry_notifications(db: Session, business_id: int) -> None:
     """Product-expiry warnings (Important/in-app — never pushed; a slower-
@@ -4960,6 +5347,11 @@ class ExpenseCreate(BaseModel):
     # the sync-retry lookup in create_expense()) purely so that feature can be
     # added later without a request-schema change; today every caller omits it.
     client_ref: Optional[str] = None
+    # Which branch this expense belongs to — see resolve_expense_location().
+    # Omitted is only safe for a business with exactly one active Location;
+    # with more than one, the backend refuses the request rather than
+    # guessing (section 11).
+    location_id: Optional[int] = None
 
 class PODraftUpdate(BaseModel):
     details: Optional[str] = None
@@ -5053,6 +5445,15 @@ class ManualPriceUpdate(BaseModel):
 class SalesCheckoutItem(BaseModel):
     product_id: int
     quantity: int
+    # A REQUESTED stock source, never trusted as authoritative on its own
+    # (section 10) — sales_checkout() independently re-validates it belongs
+    # to this business, actually holds this product, and has enough stock,
+    # exactly like every other client-supplied id in this app. Omitted when
+    # the product's stock is unambiguous (held in exactly one warehouse);
+    # required when it is genuinely ambiguous (see sales_checkout()'s
+    # per-line warehouse resolution) — the backend never guesses which of
+    # several eligible warehouses to sell from.
+    warehouse_id: Optional[int] = None
     # Catalog modes are authoritative server choices: the browser names the
     # mode, then checkout reads the price from the locked Product row. A
     # submitted unit_price is considered only for the explicit negotiated
@@ -5082,6 +5483,23 @@ class SalesCheckoutRequest(BaseModel):
     # Retrying the same checkout (same client_ref) returns the original result
     # instead of decrementing inventory and creating sale rows a second time.
     client_ref: Optional[str] = None
+    # The OPERATING Location context (FINAL 3-DEFECT CLOSURE PASS, defect
+    # #2) — an AUTHORITATIVE-CONTEXT field, not blindly trusted: sales_
+    # checkout() independently validates it belongs to this business and
+    # is active before using it for anything, exactly like warehouse_id
+    # above. This is what makes warehouse resolution respect the
+    # operator's selected branch BEFORE picking a warehouse, rather than
+    # picking a warehouse first and discovering its Location afterward
+    # (the architectural weakness this closes — a product stocked only in
+    # a DIFFERENT Location than the one the cashier is actually operating
+    # in must never be auto-sold from there). Omitted is still accepted:
+    # a single-active-Location business needs no selector at all
+    # (auto-derived), and a business with exactly one currently-open
+    # Business Day session falls back to that session's own Location
+    # (mirrors current_business_day_summary's identical "exactly one open
+    # session" convention) — otherwise the request is rejected as
+    # genuinely ambiguous rather than guessed.
+    location_id: Optional[int] = None
 
 class RefundLineRequest(BaseModel):
     sale_id: int
@@ -5247,11 +5665,12 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
         # address values just resolved for BusinessProfile itself, so the
         # two start out consistent (they are not kept in sync afterward —
         # see the Location model docstring).
-        db.add(Location(
+        main_location = Location(
             business_id=new_biz.id, name="Main Location", country=new_biz.country, country_code=new_biz.country_code,
             timezone=new_biz.timezone, currency=new_biz.currency, contact_phone=new_biz.phone, contact_email=new_biz.email,
             address=new_biz.address, is_active=True, is_main=True,
-        ))
+        )
+        db.add(main_location)
         db.flush()
 
         admin = User(
@@ -5270,7 +5689,11 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
         )
         db.add(admin)
         db.flush()
-        db.add(Warehouse(business_id=new_biz.id, name="Main Central Warehouse", is_active=True))
+        # Assigned to the business's own new Main Location immediately —
+        # never left NULL — so POS location-derivation (product -> Warehouse
+        # -> Location, see resolve_warehouse_location()) is resolvable from
+        # the very first sale a brand-new business ever records.
+        db.add(Warehouse(business_id=new_biz.id, name="Main Central Warehouse", is_active=True, location_id=main_location.id))
 
         # The already-verified card starts the selected trial in the same
         # transaction as the business. No partial tenant can exist without its
@@ -6415,7 +6838,7 @@ def resolve_account_action_request(request_id: int, resolution: str, actor: User
     db.commit()
     return {"message": f"Request {row.status.lower()}."}
 
-def _build_audit_log_query(db: Session, actor: User, q, actor_username, action, date_from, date_to, action_category: Optional[str] = None, action_exact: Optional[str] = None):
+def _build_audit_log_query(db: Session, actor: User, q, actor_username, action, date_from, date_to, action_category: Optional[str] = None, action_exact: Optional[str] = None, location_id: Optional[int] = None):
     """Shared filter-building for /audit-logs and /audit-logs/export — kept
     in one place so the CSV/XLSX export can never show a different result
     set than what the same filters display on screen. Every filter here
@@ -6426,8 +6849,19 @@ def _build_audit_log_query(db: Session, actor: User, q, actor_username, action, 
     action_category and action_exact are EXACT-match filters (added
     alongside the pre-existing partial-match `action` and free-text `q`,
     both left untouched for backward compatibility) — category/exact-action
-    filtering must not accidentally include a merely-similar action code."""
+    filtering must not accidentally include a merely-similar action code.
+
+    location_id (section 41/43) filters on the real AuditLog.location_id
+    column (migration 0033) — a real indexed FK, not a JSON scan. History
+    remains valid for a deactivated Location too (same rule as every other
+    location history filter in this app), so this is validated same-
+    business only, never restricted to active locations."""
     query = db.query(AuditLog).filter(AuditLog.business_id == actor.business_id, AuditLog.action.notin_(PRESENCE_SESSION_AUDIT_ACTIONS))
+    if location_id is not None:
+        loc_check = db.query(Location).filter(Location.id == location_id, Location.business_id == actor.business_id).first()
+        if not loc_check:
+            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+        query = query.filter(AuditLog.location_id == location_id)
     if q and q.strip():
         like = f"%{q.strip()}%"
         query = query.filter(or_(
@@ -6465,14 +6899,19 @@ def list_audit_logs(
     action_exact: Optional[str] = Query(None, description="Exact-match action code, e.g. STOCK_TRANSFERRED"),
     date_from: Optional[str] = Query(None, description="Only entries on/after this date (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="Only entries on/before this date (YYYY-MM-DD)"),
+    location_id: Optional[int] = Query(None, description="Filter to events attributed to one Location"),
     actor: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     require_permission(actor, "activity_history.view")
-    query = _build_audit_log_query(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact)
+    query = _build_audit_log_query(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact, location_id)
     total = query.count()
     rows = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+    # Batched (section 54/86: no N+1) — one query for every distinct
+    # location referenced on this page, not one lookup per row.
+    loc_ids = {r.location_id for r in rows if r.location_id}
+    loc_names = {l.id: l.name for l in db.query(Location).filter(Location.id.in_(loc_ids)).all()} if loc_ids else {}
     return {
-        "items": [{"id": r.id, "actor_username": r.actor_username, "actor_role": r.actor_role, "action": r.action, "action_category": r.action_category, "resource_type": r.resource_type, "resource_id": r.resource_id, "target_username": r.target_username, "description": r.description, "created_at": to_utc_iso(r.created_at)} for r in rows],
+        "items": [{"id": r.id, "actor_username": r.actor_username, "actor_role": r.actor_role, "action": r.action, "action_category": r.action_category, "resource_type": r.resource_type, "resource_id": r.resource_id, "target_username": r.target_username, "description": r.description, "created_at": to_utc_iso(r.created_at), "location_id": r.location_id, "location_name": loc_names.get(r.location_id)} for r in rows],
         "total": total,
     }
 
@@ -6484,22 +6923,38 @@ AUDIT_LOG_EXPORT_COLUMNS = [
     {"key": "action", "label": "ACTION", "type": "text"},
     {"key": "target", "label": "TARGET", "type": "text"},
     {"key": "description", "label": "DESCRIPTION", "type": "text"},
+    {"key": "location", "label": "LOCATION", "type": "text"},
 ]
 
-def _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to, action_category: Optional[str] = None, action_exact: Optional[str] = None):
+def _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to, action_category: Optional[str] = None, action_exact: Optional[str] = None, location_id: Optional[int] = None):
     """Shared by the CSV and Excel Activity History exports. Capped at the
     same 300-row ceiling the JSON endpoint already enforces (`le=300`);
     Activity History is a live, fast-growing table, so this export is a
-    bounded, filtered slice, not a full historical dump."""
-    query = _build_audit_log_query(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact)
+    bounded, filtered slice, not a full historical dump.
+
+    location_id (closes the export/list parity gap — the on-screen list
+    already filtered by it): threaded through the SAME
+    _build_audit_log_query() the JSON endpoint uses, so the export can
+    never show a different result set than the same filter would on
+    screen. See _audit_log_location_label() for the LOCATION column's
+    "Business-wide / Unscoped" vs "Legacy / Unknown" NULL handling."""
+    query = _build_audit_log_query(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact, location_id)
     rows = query.order_by(AuditLog.created_at.desc()).limit(300).all()
-    return [[r.id, to_utc_iso(r.created_at), r.actor_username or "", r.actor_role or "", r.action or "", r.target_username or "", r.description or ""] for r in rows]
+    # Batched (section 54/86: no N+1) — same pattern GET /audit-logs already
+    # uses for its own location_name lookup.
+    loc_ids = {r.location_id for r in rows if r.location_id}
+    loc_names = {l.id: l.name for l in db.query(Location).filter(Location.id.in_(loc_ids)).all()} if loc_ids else {}
+    return [[
+        r.id, to_utc_iso(r.created_at), r.actor_username or "", r.actor_role or "", r.action or "", r.target_username or "", r.description or "",
+        _audit_log_location_label(r.location_id, loc_names.get(r.location_id), r.action_category),
+    ] for r in rows]
 
 @app.get("/audit-logs/export")
 def export_audit_logs_csv(
     q: Optional[str] = Query(None), actor_username: Optional[str] = Query(None), action: Optional[str] = Query(None),
     action_category: Optional[str] = Query(None), action_exact: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
+    location_id: Optional[int] = Query(None, description="Filter to events attributed to one Location — same as GET /audit-logs"),
     actor: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """CSV export of Activity History. Same permission check, same business
@@ -6507,7 +6962,7 @@ def export_audit_logs_csv(
     /audit-logs — this can never expose a row the JSON endpoint wouldn't
     also show for the same filters."""
     require_permission(actor, "activity_history.view")
-    out_rows = _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact)
+    out_rows = _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact, location_id)
     if not out_rows:
         return Response(status_code=204)
     header = [c["label"] for c in AUDIT_LOG_EXPORT_COLUMNS]
@@ -6518,15 +6973,20 @@ def export_audit_logs_xlsx(
     q: Optional[str] = Query(None), actor_username: Optional[str] = Query(None), action: Optional[str] = Query(None),
     action_category: Optional[str] = Query(None), action_exact: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
+    location_id: Optional[int] = Query(None, description="Filter to events attributed to one Location — same as GET /audit-logs"),
     actor: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """Same authorization, tenant scoping, filters, and row data as the CSV
     export above — only the presentation differs."""
     require_permission(actor, "activity_history.view")
-    out_rows = _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact)
+    out_rows = _audit_log_export_rows(db, actor, q, actor_username, action, date_from, date_to, action_category, action_exact, location_id)
     if not out_rows:
         return Response(status_code=204)
-    filters_desc = ", ".join(f"{k}={v}" for k, v in [("Search", q), ("Actor", actor_username), ("Action", action), ("From", date_from), ("To", date_to)] if v) or "None"
+    location_filter_label = None
+    if location_id is not None:
+        loc = db.query(Location).filter(Location.id == location_id, Location.business_id == actor.business_id).first()
+        location_filter_label = loc.name if loc else str(location_id)
+    filters_desc = ", ".join(f"{k}={v}" for k, v in [("Search", q), ("Actor", actor_username), ("Action", action), ("Location", location_filter_label), ("From", date_from), ("To", date_to)] if v) or "None"
     metadata = [["Generated", datetime.utcnow().strftime("%d %B %Y %H:%M UTC")], ["Filters", filters_desc]]
     sheets = [{"name": "Activity History", "title": "CAULDRA ACTIVITY HISTORY", "metadata": metadata, "columns": AUDIT_LOG_EXPORT_COLUMNS, "rows": out_rows}]
     return build_xlsx_response(f"cauldra_activity_history_{business_local_today(db, actor.business_id)}.xlsx", "Cauldra Activity History", sheets)
@@ -6553,7 +7013,15 @@ def get_warehouse_for_business(db: Session, business_id: int, name: str, active_
     return q.first()
 
 def serialize_warehouse(w: Warehouse, db: Session) -> dict:
-    sku_count = db.query(WarehouseStock.product_id).filter(WarehouseStock.business_id == w.business_id, WarehouseStock.warehouse == w.name).distinct().count()
+    # ID-first (migration 0031's real FK), name-match only as the fallback
+    # for a genuinely legacy WarehouseStock row that predates warehouse_id
+    # — never name-matched when a real warehouse_id is already on the row,
+    # so this can't miscount a row whose display-snapshot name has (for any
+    # reason) drifted from this warehouse's current name.
+    sku_count = db.query(WarehouseStock.product_id).filter(
+        WarehouseStock.business_id == w.business_id,
+        or_(WarehouseStock.warehouse_id == w.id, and_(WarehouseStock.warehouse_id.is_(None), WarehouseStock.warehouse == w.name)),
+    ).distinct().count()
     location = db.query(Location).filter(Location.id == w.location_id).first() if w.location_id else None
     return {"id": w.id, "name": w.name, "is_active": w.is_active, "sku_count": sku_count, "created_at": to_utc_iso(w.created_at),
             "location_id": w.location_id, "location_name": location.name if location else None}
@@ -6575,7 +7043,15 @@ def serialize_location(l: "Location", db: Session) -> dict:
     warehouse_count = db.query(Warehouse).filter(Warehouse.location_id == l.id, Warehouse.is_active == True).count()
     return {
         "id": l.id, "name": l.name, "country": l.country, "country_code": l.country_code, "city": l.city,
-        "timezone": l.timezone, "currency": l.currency, "contact_phone": l.contact_phone, "contact_email": l.contact_email,
+        # Normalized on read (section 24) — create_location()/update_location()
+        # already store a clean code going forward, but a row that predates
+        # this rule could still carry a decorated string like "NGN (₦)"; this
+        # is a display-only correction (never rewrites the row), and every
+        # currency-grouping consumer (Profit's mixed-currency check,
+        # Business Brain's revenue-at-risk breakdown) reads currency through
+        # this same serializer, so "NGN" and "NGN (₦)" can never be treated
+        # as two different currencies.
+        "timezone": l.timezone, "currency": normalize_currency_code(l.currency) or l.currency, "contact_phone": l.contact_phone, "contact_email": l.contact_email,
         "address": l.address, "is_active": l.is_active, "is_main": l.is_main, "warehouse_count": warehouse_count,
         "created_at": to_utc_iso(l.created_at),
     }
@@ -6589,11 +7065,41 @@ def serialize_location(l: "Location", db: Session) -> dict:
 def list_locations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # Read access matches Business Profile's own existing rule (Admin/Manager
     # read; see get_business_profile) — Locations are business-identity-
-    # adjacent information, not a Staff-facing operational screen.
+    # adjacent information, not a Staff-facing operational screen. Staff's
+    # own, separate, READ-ONLY operational need (picking which branch a
+    # sale is happening at) is served by GET /locations/operational below
+    # — deliberately NOT this endpoint, which stays Admin/Manager-only and
+    # keeps returning full Location-administration fields (warehouse
+    # counts, contact info, etc.) exactly as before.
     if user.role not in ("admin", "manager"):
         raise HTTPException(status_code=403, detail="Business location information is managed by an Admin.")
     rows = db.query(Location).filter(Location.business_id == user.business_id).order_by(Location.is_main.desc(), Location.name.asc()).all()
     return [serialize_location(l, db) for l in rows]
+
+@app.get("/locations/operational")
+def list_operational_locations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """READ-ONLY operational Location context (FINAL 2-DEFECT CLOSURE PASS,
+    defect #1) — deliberately separate from GET /locations/ above (Admin/
+    Manager-only Location ADMINISTRATION). This exists so any user who can
+    actually create a sale — Staff included, once granted sales.create,
+    exactly like every other Staff-grantable permission — can learn which
+    active Locations exist and pick one to operate POS in, WITHOUT gaining
+    any Location administration capability: only the minimum display
+    fields needed for a selector, and this endpoint has no create/update/
+    deactivate counterpart of its own (LOCATION ADMINISTRATION stays
+    entirely on GET/POST/PATCH /locations/, still Admin/Manager-only,
+    completely unchanged by this endpoint's existence).
+
+    Permission-gated on sales.create rather than role (section 5) — the
+    permission that actually needs this context, not a role string, so a
+    future Staff-grantable permission that also needs it can reuse this
+    same endpoint without a code change. Business-scoped like every other
+    endpoint here (never cross-tenant). Active Locations only — this is
+    for choosing where a NEW operation happens, never a historical/
+    administrative listing (that remains GET /locations/'s job)."""
+    require_permission(user, "sales.create")
+    rows = db.query(Location).filter(Location.business_id == user.business_id, Location.is_active == True).order_by(Location.is_main.desc(), Location.name.asc()).all()
+    return [{"id": l.id, "name": l.name, "is_active": l.is_active, "is_main": l.is_main, "city": l.city, "timezone": l.timezone, "currency": normalize_currency_code(l.currency) or l.currency} for l in rows]
 
 @app.post("/locations/")
 def create_location(data: LocationCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -6613,13 +7119,28 @@ def create_location(data: LocationCreate, user: User = Depends(get_current_user)
     # business/profile country — since a Location can legitimately be in a
     # different country from the business's registration country.
     canonical_phone = to_e164(data.contact_phone, data.country_code or "") if data.contact_phone else None
+    # Country code: uppercase ISO2, matching COUNTRY_CONTEXTS' own keying —
+    # never trusted in whatever case the client happened to send.
+    normalized_country_code = data.country_code.strip().upper() if data.country_code else data.country_code
+    # Currency and timezone: still OPTIONAL at this field's own level (no
+    # change to that — see LocationCreate's schema), but a GIVEN value must
+    # normalize/validate successfully or the request is rejected outright,
+    # never silently stored as a decorated string or an unchecked timezone
+    # name (section 21/29 — this is what makes currency_snapshot's own
+    # canonical-code contract actually hold at the source).
+    normalized_currency = None
+    if data.currency is not None:
+        normalized_currency = normalize_currency_code(data.currency)
+        if not normalized_currency:
+            raise HTTPException(status_code=400, detail=f"'{data.currency}' is not a valid currency code. Use a 3-letter ISO 4217 code, e.g. NGN, USD, GBP.")
+    normalized_timezone = validate_location_timezone(data.timezone)
     row = Location(
-        business_id=user.business_id, name=name, country=data.country, country_code=data.country_code, city=data.city,
-        timezone=data.timezone, currency=data.currency, contact_phone=canonical_phone,
+        business_id=user.business_id, name=name, country=data.country, country_code=normalized_country_code, city=data.city,
+        timezone=normalized_timezone, currency=normalized_currency, contact_phone=canonical_phone,
         contact_email=str(data.contact_email) if data.contact_email else None, address=data.address, is_active=True, is_main=False,
     )
     db.add(row); db.flush()
-    add_audit(db, user, "LOCATION_CREATED", f"Created location {name}.", action_category="BUSINESS_SETTINGS", resource_type="location", resource_id=row.id)
+    add_audit(db, user, "LOCATION_CREATED", f"Created location {name}.", action_category="BUSINESS_SETTINGS", resource_type="location", resource_id=row.id, location_id=row.id)
     db.commit(); db.refresh(row)
     return serialize_location(row, db)
 
@@ -6638,10 +7159,43 @@ def update_location(location_id: int, data: LocationUpdate, user: User = Depends
         if duplicate:
             raise HTTPException(status_code=409, detail="A location with that name already exists.")
         row.name = new_name
-    for field in ("country", "country_code", "city", "timezone", "currency", "address"):
+    normalized_currency = row.currency
+    if data.currency is not None:
+        normalized_currency = normalize_currency_code(data.currency)
+        if not normalized_currency:
+            raise HTTPException(status_code=400, detail=f"'{data.currency}' is not a valid currency code. Use a 3-letter ISO 4217 code, e.g. NGN, USD, GBP.")
+        if normalized_currency != row.currency:
+            # Financial records now DO snapshot their own currency
+            # independently of Location at creation time (currency_snapshot,
+            # migration 0034) — a historical Sale/Expense/Refund/PO always
+            # reads back under the currency it actually recorded, never
+            # reinterpreted if this Location's currency changes later.
+            # Despite that, changing an ACTIVE Location's currency is still
+            # blocked once it has financial activity: this guard is about
+            # LIVE/open-in-progress workflows (an open Business Day, a
+            # DRAFT PurchaseOrder still being priced, a currency selector
+            # already showing the OLD currency to a cashier mid-session),
+            # not about protecting historical figures — snapshots already
+            # do that. Intentionally conservative rather than assuming
+            # every in-flight workflow would handle a live currency swap
+            # correctly.
+            has_activity = (
+                db.query(BusinessDay.id).filter(BusinessDay.location_id == row.id).first()
+                or db.query(Expense.id).filter(Expense.location_id == row.id).first()
+                or db.query(RefundTransaction.id).filter(RefundTransaction.location_id == row.id).first()
+                or db.query(PurchaseOrder.id).filter(PurchaseOrder.location_id == row.id).first()
+            )
+            if has_activity:
+                raise HTTPException(status_code=409, detail="This location already has recorded financial activity and its currency can no longer be changed — historical figures would otherwise be misread under a different currency. Create a new location instead if the currency has genuinely changed.")
+    normalized_timezone = validate_location_timezone(data.timezone) if data.timezone is not None else row.timezone
+    for field in ("country", "city", "address"):
         value = getattr(data, field)
         if value is not None:
             setattr(row, field, value)
+    if data.country_code is not None:
+        row.country_code = data.country_code.strip().upper()
+    row.timezone = normalized_timezone
+    row.currency = normalized_currency
     if data.contact_phone is not None:
         # Same phone-number rule as create_location() above — canonicalized
         # against this Location's EFFECTIVE country_code (the value just set
@@ -6658,7 +7212,7 @@ def update_location(location_id: int, data: LocationUpdate, user: User = Depends
             raise HTTPException(status_code=400, detail="Reassign or deactivate this location's warehouses before deactivating it.")
         row.is_active = bool(data.is_active)
     row.updated_at = datetime.utcnow()
-    add_audit(db, user, "LOCATION_UPDATED", f"Updated location {row.name}.", action_category="BUSINESS_SETTINGS", resource_type="location", resource_id=row.id)
+    add_audit(db, user, "LOCATION_UPDATED", f"Updated location {row.name}.", action_category="BUSINESS_SETTINGS", resource_type="location", resource_id=row.id, location_id=row.id)
     db.commit(); db.refresh(row)
     return serialize_location(row, db)
 
@@ -6714,15 +7268,39 @@ def update_warehouse(warehouse_id: int, data: WarehouseUpdate, user: User = Depe
     duplicate = db.query(Warehouse).filter(Warehouse.business_id == user.business_id, Warehouse.id != row.id, func.lower(Warehouse.name) == new_name.casefold()).first()
     if duplicate:
         raise HTTPException(status_code=409, detail="That warehouse already exists in this business.")
-    if data.location_id is not None:
+    if data.location_id is not None and data.location_id != row.location_id:
+        # Reassigning an EXISTING warehouse's Location is a major operational
+        # action, not harmless metadata (section 51) — history (stock,
+        # Business Days, sales) already assumes the OLD branch. Blocked once
+        # the warehouse actually holds stock; a genuinely empty warehouse
+        # (never stocked, or fully emptied) may still be reassigned freely.
+        # ID-first (migration 0031's real FK) — a name match alone would
+        # miss a row whose display-snapshot name has drifted from row.name
+        # (letting a reassignment through that should be blocked), and
+        # could equally over-match if another row's snapshot happened to
+        # still read the same string. Name is kept only as the fallback
+        # for a genuinely legacy row that predates warehouse_id.
+        has_stock = (
+            db.query(WarehouseStock.id).filter(WarehouseStock.business_id == user.business_id, or_(WarehouseStock.warehouse_id == row.id, and_(WarehouseStock.warehouse_id.is_(None), WarehouseStock.warehouse == row.name)), WarehouseStock.quantity > 0).first()
+            or db.query(Product.id).filter(Product.business_id == user.business_id, or_(Product.warehouse_id == row.id, and_(Product.warehouse_id.is_(None), Product.warehouse == row.name)), Product.quantity > 0).first()
+        )
+        if has_stock:
+            raise HTTPException(status_code=409, detail="This warehouse currently holds stock and cannot be reassigned to a different location. Transfer or clear its stock first, or create a new warehouse at the target location instead.")
         location = db.query(Location).filter(Location.id == data.location_id, Location.business_id == user.business_id, Location.is_active == True).first()
         if not location:
             raise HTTPException(status_code=400, detail="That location could not be found for this business.")
         row.location_id = location.id
     old_name = row.name
     if old_name != new_name:
-        db.query(Product).filter(Product.business_id == user.business_id, Product.warehouse == old_name).update({Product.warehouse: new_name}, synchronize_session=False)
-        db.query(WarehouseStock).filter(WarehouseStock.business_id == user.business_id, WarehouseStock.warehouse == old_name).update({WarehouseStock.warehouse: new_name}, synchronize_session=False)
+        # Propagate the rename to the display-snapshot string columns for
+        # every row that ACTUALLY belongs to this warehouse — matched by
+        # the real warehouse_id (migration 0031) wherever a row has one,
+        # so this is self-healing even if a snapshot had already drifted
+        # from old_name, and can't touch an unrelated row that happens to
+        # share the same name string. Name matching remains only for a
+        # genuinely legacy row that predates warehouse_id.
+        db.query(Product).filter(Product.business_id == user.business_id, or_(Product.warehouse_id == row.id, and_(Product.warehouse_id.is_(None), Product.warehouse == old_name))).update({Product.warehouse: new_name}, synchronize_session=False)
+        db.query(WarehouseStock).filter(WarehouseStock.business_id == user.business_id, or_(WarehouseStock.warehouse_id == row.id, and_(WarehouseStock.warehouse_id.is_(None), WarehouseStock.warehouse == old_name))).update({WarehouseStock.warehouse: new_name}, synchronize_session=False)
         row.name = new_name
     if data.is_active is not None:
         row.is_active = bool(data.is_active)
@@ -6759,19 +7337,24 @@ def generate_unique_sku(db: Session, business_id: int) -> str:
 @app.get("/products/")
 def list_products(limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0), warehouse: Optional[str] = Query(None), stock_status: Optional[str] = Query(None, alias="status"), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     warehouse_name = None
+    warehouse_id_filter = None
     if warehouse and warehouse.upper() != "ALL":
         wh = get_warehouse_for_business(db, user.business_id, warehouse)
         if not wh:
             raise HTTPException(status_code=404, detail="The selected warehouse is unavailable.")
         warehouse_name = wh.name
+        warehouse_id_filter = wh.id
 
     status_value = (stock_status or "").strip().lower()
     if status_value not in {"", "healthy", "low", "out"}:
         raise HTTPException(status_code=400, detail="Invalid stock status filter.")
 
     if warehouse_name:
+        # ID-first (migration 0031's real FK) now that the warehouse row is
+        # already resolved above — name matched only as the fallback for a
+        # genuinely legacy WarehouseStock row that predates warehouse_id.
         q = (db.query(Product, WarehouseStock.quantity.label("warehouse_quantity"))
-             .join(WarehouseStock, and_(WarehouseStock.product_id == Product.id, WarehouseStock.business_id == user.business_id, WarehouseStock.warehouse == warehouse_name))
+             .join(WarehouseStock, and_(WarehouseStock.product_id == Product.id, WarehouseStock.business_id == user.business_id, or_(WarehouseStock.warehouse_id == warehouse_id_filter, and_(WarehouseStock.warehouse_id.is_(None), WarehouseStock.warehouse == warehouse_name))))
              .filter(Product.business_id == user.business_id))
         effective_qty = WarehouseStock.quantity
     else:
@@ -6808,18 +7391,35 @@ def list_products(limit: int = Query(200, ge=1, le=500), offset: int = Query(0, 
     return rows
 
 @app.get("/products/inventory-summary")
-def inventory_summary(warehouse: Optional[str] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def inventory_summary(warehouse: Optional[str] = Query(None), location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     warehouse_name = None
+    warehouse_id_filter = None
     if warehouse and warehouse.upper() != "ALL":
         wh = get_warehouse_for_business(db, user.business_id, warehouse)
         if not wh:
             raise HTTPException(status_code=404, detail="The selected warehouse is unavailable.")
         warehouse_name = wh.name
+        warehouse_id_filter = wh.id
 
     if warehouse_name:
+        # ID-first (migration 0031), name fallback only for a legacy row
+        # that predates warehouse_id — same reasoning as list_products().
         rows = (db.query(Product.min_stock_level, WarehouseStock.quantity)
-                .join(WarehouseStock, and_(WarehouseStock.product_id == Product.id, WarehouseStock.business_id == user.business_id, WarehouseStock.warehouse == warehouse_name))
+                .join(WarehouseStock, and_(WarehouseStock.product_id == Product.id, WarehouseStock.business_id == user.business_id, or_(WarehouseStock.warehouse_id == warehouse_id_filter, and_(WarehouseStock.warehouse_id.is_(None), WarehouseStock.warehouse == warehouse_name))))
                 .filter(Product.business_id == user.business_id).all())
+        quantities = [(int(qty or 0), int(min_level or 0)) for min_level, qty in rows]
+    elif location_id is not None:
+        # SELECTED-LOCATION scope (section 36/49/71): every warehouse that
+        # belongs to this Location, summed via WarehouseStock — never the
+        # business-wide Product.quantity aggregate, which could hide a real
+        # shortage in this specific branch behind healthy stock elsewhere.
+        loc_check = db.query(Location).filter(Location.id == location_id, Location.business_id == user.business_id).first()
+        if not loc_check:
+            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+        warehouse_ids_in_location = [w.id for w in db.query(Warehouse.id).filter(Warehouse.business_id == user.business_id, Warehouse.location_id == location_id).all()]
+        rows = (db.query(Product.min_stock_level, WarehouseStock.quantity)
+                .join(WarehouseStock, and_(WarehouseStock.product_id == Product.id, WarehouseStock.business_id == user.business_id, WarehouseStock.warehouse_id.in_(warehouse_ids_in_location)))
+                .filter(Product.business_id == user.business_id).all()) if warehouse_ids_in_location else []
         quantities = [(int(qty or 0), int(min_level or 0)) for min_level, qty in rows]
     else:
         rows = db.query(Product.quantity, Product.min_stock_level).filter(Product.business_id == user.business_id).all()
@@ -7147,7 +7747,8 @@ def create_product(data: ProductCreate, request: Request, user: User = Depends(g
     elif db.query(Product).filter(Product.business_id==user.business_id, Product.sku==sku).first():
         raise HTTPException(status_code=409, detail="That SKU is already used in this business.")
     warehouse_name = (data.warehouse or "Main Central Warehouse").strip()
-    if not get_warehouse_for_business(db, user.business_id, warehouse_name):
+    warehouse_row = get_warehouse_for_business(db, user.business_id, warehouse_name)
+    if not warehouse_row:
         raise HTTPException(status_code=400, detail="The selected warehouse does not exist in this business.")
     barcode = normalize_barcode(data.barcode) if data.barcode else None
     # V25: business-scoped smart duplicate detection. Runs before the row is
@@ -7162,8 +7763,13 @@ def create_product(data: ProductCreate, request: Request, user: User = Depends(g
         retail_price=data.retail_price,
         override_id=data.duplicate_override_candidate_id, exclude_id=None,
     )
-    p=Product(sku=sku, barcode=barcode, name=data.name, category=data.category, size=data.size, quantity=data.quantity, min_stock_level=data.min_stock_level, cost_price=data.cost_price, wholesale_price=data.wholesale_price or data.retail_price*0.85, retail_price=data.retail_price, warehouse=warehouse_name, initial_stock=data.quantity, expiry_date=data.expiry_date, business_id=user.business_id, owner_id=user.id, client_ref=client_ref, synced_at=(datetime.utcnow() if client_ref else None))
-    db.add(p); db.flush(); db.add(WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=p.warehouse,quantity=p.quantity)); auto_upsert_general_catalog(db,p); add_audit(db,user,"PRODUCT_CREATED",f"Added product {p.name}."); mark_business_brain_dirty(db, user.business_id)
+    # warehouse_id is the authoritative primary-warehouse identity
+    # (migration 0031); `warehouse` (the name) stays a synchronized
+    # compatibility/display snapshot — the two are set together here and
+    # must never be allowed to drift for a new write (see Product.
+    # warehouse_id's docstring).
+    p=Product(sku=sku, barcode=barcode, name=data.name, category=data.category, size=data.size, quantity=data.quantity, min_stock_level=data.min_stock_level, cost_price=data.cost_price, wholesale_price=data.wholesale_price or data.retail_price*0.85, retail_price=data.retail_price, warehouse=warehouse_name, warehouse_id=warehouse_row.id, initial_stock=data.quantity, expiry_date=data.expiry_date, business_id=user.business_id, owner_id=user.id, client_ref=client_ref, synced_at=(datetime.utcnow() if client_ref else None))
+    db.add(p); db.flush(); db.add(WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=p.warehouse,warehouse_id=warehouse_row.id,quantity=p.quantity)); auto_upsert_general_catalog(db,p); add_audit(db,user,"PRODUCT_CREATED",f"Added product {p.name}."); mark_business_brain_dirty(db, user.business_id)
     response = {"id":p.id,"sku":p.sku,"barcode":p.barcode,"name":p.name,"updated_at":to_utc_iso(p.updated_at)}
     complete_idempotent_mutation(claim, response)
     try:
@@ -7225,34 +7831,56 @@ def update_product(product_id: int, data: ProductUpdate, request: Request, user:
         override_id=_dup_override_id, exclude_id=p.id,
     )
     if "warehouse" in changes:
+        # This only ever changes the product's PRIMARY/default warehouse
+        # pointer (section 28) — it never moves existing WarehouseStock
+        # between warehouses; a genuine stock move is transfer_stock()'s
+        # job. warehouse_id is kept synchronized with the name here so the
+        # two can never drift (see Product.warehouse_id's docstring).
         requested_warehouse = (changes["warehouse"] or "").strip()
         warehouse = get_warehouse_for_business(db, user.business_id, requested_warehouse)
         if not warehouse:
             raise HTTPException(status_code=400, detail="The selected warehouse does not exist in this business.")
         changes["warehouse"] = warehouse.name
+        changes["warehouse_id"] = warehouse.id
 
     # Product.quantity is the total of its warehouse ledger. Keep direct edits
     # compatible with the existing form while applying the difference to the
     # selected warehouse row, so inventory cannot silently drift out of sync.
     if "quantity" in changes:
         target_warehouse = changes.get("warehouse") or p.warehouse or "Main Central Warehouse"
+        target_warehouse_id = changes.get("warehouse_id", p.warehouse_id)
+        # ID-first (migration 0031) whenever a real target_warehouse_id is
+        # known; name matching remains only as the fallback for a
+        # genuinely legacy product that predates warehouse_id entirely.
+        # other_total below uses the EXACT COMPLEMENT of this same
+        # condition (~target_row_match) rather than its own separate
+        # name-based "!=" check, so "is the target row" and "is some
+        # other row" can never drift apart or double-count/undercount.
+        target_row_match = (
+            or_(WarehouseStock.warehouse_id == target_warehouse_id, and_(WarehouseStock.warehouse_id.is_(None), WarehouseStock.warehouse == target_warehouse))
+            if target_warehouse_id is not None else WarehouseStock.warehouse == target_warehouse
+        )
         stock = db.query(WarehouseStock).filter(
             WarehouseStock.business_id == user.business_id,
             WarehouseStock.product_id == p.id,
-            WarehouseStock.warehouse == target_warehouse,
+            target_row_match,
         ).first()
         if not stock:
             stock = WarehouseStock(
                 business_id=user.business_id, product_id=p.id,
-                warehouse=target_warehouse, quantity=0,
+                warehouse=target_warehouse, warehouse_id=target_warehouse_id, quantity=0,
             )
             db.add(stock)
             db.flush()
+        elif stock.warehouse_id is None and target_warehouse_id is not None:
+            # Opportunistically backfill identity on an existing legacy row
+            # this write already touches — never a separate bulk pass.
+            stock.warehouse_id = target_warehouse_id
         other_total = sum(
             int(row.quantity or 0) for row in db.query(WarehouseStock).filter(
                 WarehouseStock.business_id == user.business_id,
                 WarehouseStock.product_id == p.id,
-                WarehouseStock.warehouse != target_warehouse,
+                ~target_row_match,
             ).all()
         )
         new_stock_quantity = changes["quantity"] - other_total
@@ -7342,15 +7970,20 @@ def update_stock(product_id: int, data: StockUpdate, user: User = Depends(get_cu
     p = db.query(Product).filter(Product.id == product_id, Product.business_id == user.business_id).first()
     if not p: raise HTTPException(status_code=404, detail="The product could not be found in this inventory.")
     warehouse_name = p.warehouse or "Main Central Warehouse"
+    # ID-first (migration 0031) via the product's own primary warehouse_id;
+    # name matching remains only as the fallback for a genuinely legacy
+    # product that predates warehouse_id.
     stock = db.query(WarehouseStock).filter(
         WarehouseStock.business_id == user.business_id,
         WarehouseStock.product_id == p.id,
-        WarehouseStock.warehouse == warehouse_name,
+        or_(WarehouseStock.warehouse_id == p.warehouse_id, and_(WarehouseStock.warehouse_id.is_(None), WarehouseStock.warehouse == warehouse_name)) if p.warehouse_id is not None else WarehouseStock.warehouse == warehouse_name,
     ).first()
     if not stock:
-        stock = WarehouseStock(business_id=user.business_id, product_id=p.id, warehouse=warehouse_name, quantity=0)
+        stock = WarehouseStock(business_id=user.business_id, product_id=p.id, warehouse=warehouse_name, warehouse_id=p.warehouse_id, quantity=0)
         db.add(stock)
         db.flush()
+    elif stock.warehouse_id is None and p.warehouse_id is not None:
+        stock.warehouse_id = p.warehouse_id  # opportunistic legacy backfill
     if stock.quantity + data.quantity_change < 0:
         raise HTTPException(status_code=400, detail=f"Stock in {warehouse_name} cannot become negative.")
     stock.quantity += data.quantity_change
@@ -7360,9 +7993,9 @@ def update_stock(product_id: int, data: StockUpdate, user: User = Depends(get_cu
         ).all()
     )
     mark_business_brain_dirty(db, user.business_id)
-    check_inventory_notifications(db, user.business_id, p)
+    check_inventory_notifications_for_product(db, user.business_id, p)
     if data.quantity_change > 0:
-        resolve_purchase_order_requirements(db, user.business_id, p.id)
+        resolve_purchase_order_requirements(db, user.business_id, p.id, warehouse_id=stock.warehouse_id)
     add_audit(
         db, user, "STOCK_ADJUSTED", f"Adjusted stock for {p.name} in {warehouse_name} by {data.quantity_change:+d}.",
         action_category="INVENTORY", resource_type="product", resource_id=p.id,
@@ -7376,19 +8009,54 @@ def transfer_stock(product_id: int, data: StockTransfer, user: User = Depends(ge
     if data.quantity<1 or data.from_warehouse==data.to_warehouse: raise HTTPException(status_code=400, detail="Choose different warehouses and enter a positive quantity.")
     p=db.query(Product).filter(Product.id==product_id,Product.business_id==user.business_id).first()
     if not p: raise HTTPException(status_code=404, detail="The selected product is unavailable.")
-    if not get_warehouse_for_business(db, user.business_id, data.from_warehouse) or not get_warehouse_for_business(db, user.business_id, data.to_warehouse):
+    # Resolved by IDENTITY (warehouse_id), not the name string, from here on
+    # (section 5/25) — the name is still what the request carries (existing
+    # UI contract), but everything written below uses the real row.
+    from_warehouse_row = get_warehouse_for_business(db, user.business_id, data.from_warehouse)
+    to_warehouse_row = get_warehouse_for_business(db, user.business_id, data.to_warehouse)
+    if not from_warehouse_row or not to_warehouse_row:
         raise HTTPException(status_code=400, detail="Both selected warehouses must be active warehouses in this business.")
     source=db.query(WarehouseStock).filter(WarehouseStock.product_id==p.id,WarehouseStock.warehouse==data.from_warehouse).first()
     if not source:
         if p.warehouse==data.from_warehouse:
-            source=WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=data.from_warehouse,quantity=p.quantity); db.add(source); db.flush()
+            source=WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=data.from_warehouse,warehouse_id=from_warehouse_row.id,quantity=p.quantity); db.add(source); db.flush()
         else: raise HTTPException(status_code=400, detail="There is no stock recorded in the selected source warehouse.")
+    elif source.warehouse_id is None:
+        source.warehouse_id = from_warehouse_row.id  # opportunistic legacy backfill
     if source.quantity<data.quantity: raise HTTPException(status_code=400, detail=f"Only {source.quantity} units are recorded in {data.from_warehouse}.")
     target=db.query(WarehouseStock).filter(WarehouseStock.product_id==p.id,WarehouseStock.warehouse==data.to_warehouse).first()
-    if not target: target=WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=data.to_warehouse,quantity=0); db.add(target); db.flush()
+    if not target: target=WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=data.to_warehouse,warehouse_id=to_warehouse_row.id,quantity=0); db.add(target); db.flush()
+    elif target.warehouse_id is None:
+        target.warehouse_id = to_warehouse_row.id
     source.quantity-=data.quantity; target.quantity+=data.quantity
     p.quantity=sum(w.quantity for w in db.query(WarehouseStock).filter(WarehouseStock.product_id==p.id).all())
-    add_audit(db,user,"STOCK_TRANSFER",f"Transferred {data.quantity} units of {p.name} from {data.from_warehouse} to {data.to_warehouse}.", action_category="INVENTORY", resource_type="product", resource_id=p.id)
+    # NOTE (section 26): a transfer NEVER changes Product.warehouse/
+    # warehouse_id (the product's primary/default pointer) — that would
+    # silently redefine the product's default allocation as a side effect of
+    # a stock MOVEMENT, which is a deliberately separate, explicit edit
+    # (see update_product()'s own "warehouse" field handling).
+    #
+    # Branch context in the audit description whenever the two warehouses
+    # belong to different Locations (section 25/60) — never left branch-blind
+    # for a genuine cross-location move.
+    from_location = db.query(Location).filter(Location.id == from_warehouse_row.location_id).first() if from_warehouse_row.location_id else None
+    to_location = db.query(Location).filter(Location.id == to_warehouse_row.location_id).first() if to_warehouse_row.location_id else None
+    cross_location_note = ""
+    if from_location and to_location and from_location.id != to_location.id:
+        cross_location_note = f" (cross-branch: {from_location.name} → {to_location.name})"
+    add_audit(
+        db, user, "STOCK_TRANSFER",
+        f"Transferred {data.quantity} units of {p.name} from {data.from_warehouse} to {data.to_warehouse}{cross_location_note}.",
+        action_category="INVENTORY", resource_type="product", resource_id=p.id,
+        metadata={
+            "product_id": p.id, "product_name": p.name, "quantity": data.quantity,
+            "source_warehouse_id": from_warehouse_row.id, "source_warehouse_name": from_warehouse_row.name,
+            "source_location_id": from_location.id if from_location else None, "source_location_name": from_location.name if from_location else None,
+            "destination_warehouse_id": to_warehouse_row.id, "destination_warehouse_name": to_warehouse_row.name,
+            "destination_location_id": to_location.id if to_location else None, "destination_location_name": to_location.name if to_location else None,
+        },
+    )
+    check_inventory_notifications_for_product(db, user.business_id, p)
     db.commit(); return {"message":"Stock transfer completed successfully.","quantity_transferred":data.quantity,"from_warehouse":data.from_warehouse,"to_warehouse":data.to_warehouse,"total_quantity":p.quantity}
 
 @app.get("/products/{product_id}/warehouse-stocks")
@@ -7833,6 +8501,13 @@ def _apply_seasonal_pattern(db: Session, business_id: int, product: Product, now
         open_prediction.evidence_json = json.dumps(evidence)
 
     if -3 <= days_until <= SEASONAL_LOOKAHEAD_DAYS and product.quantity < calibrated_units:
+        # seasonal_demand is, and stays, genuinely BUSINESS-WIDE — same
+        # reasoning as forecast_stockout above (FINAL 2-DEFECT CLOSURE
+        # PASS, defect #2, Option B): pattern.avg_units_in_week (from
+        # _recompute_seasonal_pattern) and product.quantity here are both
+        # summed/read across every Location at once, so this
+        # recommendation is never given a Location-specific fingerprint
+        # or attributed via Product.primary warehouse.
         shortfall_ratio = (product.quantity / calibrated_units) if calibrated_units else 0
         priority = "critical" if shortfall_ratio < 0.5 else "important"
         when_text = "around now" if days_until <= 0 else f"in about {days_until} day{'s' if days_until != 1 else ''}"
@@ -8054,20 +8729,63 @@ def _brain_accuracy_trend(evaluated_predictions: List["BusinessBrainPrediction"]
     if delta < -0.03: return "declining"
     return "stable"
 
-def _brain_revenue_at_risk(db: Session, business_id: int) -> Optional[float]:
+def _brain_revenue_at_risk(db: Session, business_id: int, location_id: Optional[int] = None) -> Dict[str, Any]:
     """Sums the revenue exposed by currently open (non-dismissed) demand-
     shortfall recommendations, using only the expected-demand figure and
     live product price already computed elsewhere — never an invented or
     historical 'savings' number. When a product has both a 7-day forecast
     and a seasonal forecast open at once, only the larger shortfall counts,
-    so the same units are never priced twice."""
+    so the same units are never priced twice.
+
+    location_id: RE-AUDITED for the FINAL 2-DEFECT CLOSURE PASS's defect
+    #2 (Option B — see refresh_business_brain()'s own note on why
+    forecast_stockout/seasonal_demand stay genuinely business-wide rather
+    than being made per-Location). Both recommendation kinds this
+    function reads are computed from a product's sales/seasonal pattern
+    across EVERY Location's activity at once — there is no single
+    Location either one actually belongs to — so location_id is no
+    longer used to INCLUDE or EXCLUDE a row: this function now returns
+    the exact same business-wide total (or currency breakdown) for every
+    value of location_id, including None. A business-wide risk figure is
+    never transformed into a fake, shrunken "this Location's" amount
+    (section 24) — it stays visible, and honestly labeled business-wide,
+    under any Location filter, exactly like every other business-wide
+    Brain insight. The parameter is kept (rather than removed) only to
+    preserve a stable call signature for business_brain(), which still
+    passes its own location_id through unconditionally.
+
+    Currency: never combine unlike currencies into one number. Each
+    product's amount is attributed to its own resolved Location's CURRENCY
+    (via _resolve_products_locations()) — this is a currency-INFERENCE
+    signal only, never a Location-ATTRIBUTION claim: Product has no
+    currency field of its own, so a Location's currency remains the best
+    available signal for which currency that product's retail_price is
+    actually denominated in, but the resulting dollar amount is still
+    reported as business-wide, never as "this Location's revenue". Falls
+    back to the business's BusinessProfile.currency for a product with no
+    resolvable Location — the same convention the currency-snapshot
+    migration's backfill uses. When every involved product resolves to
+    one currency, this returns the single combined float callers have
+    always gotten (value=<float>, mixed_currency=False). Only when more
+    than one currency is actually present does this switch to a
+    per-currency breakdown instead of a fabricated cross-currency total
+    (value=None, mixed_currency=True, by_currency=[...]) — mirroring the
+    Profit dashboard's own mixed-currency policy
+    (profitLocationsHaveMixedCurrencies()/renderProfitAllLocationsGrouped()
+    on the frontend) rather than the backend inventing an exchange rate."""
+    empty = {"value": None, "currency": None, "mixed_currency": False, "by_currency": None}
     rows = db.query(BusinessBrainRecommendation).filter(
         BusinessBrainRecommendation.business_id == business_id,
         BusinessBrainRecommendation.kind.in_(["forecast_stockout", "seasonal_demand"]),
         BusinessBrainRecommendation.status.in_(RECOMMENDATION_ACTIVE_STATUSES),
     ).all()
     if not rows:
-        return None
+        return empty
+
+    # Currency inference only (see the docstring above) — never used to
+    # filter rows in/out by location_id any more.
+    rec_locations = _resolve_products_locations(db, business_id, [row.product_id for row in rows if row.product_id is not None])
+
     per_product: Dict[int, float] = {}
     for row in rows:
         if row.product_id is None:
@@ -8086,8 +8804,32 @@ def _brain_revenue_at_risk(db: Session, business_id: int) -> Optional[float]:
         risk_value = shortfall * product.retail_price
         per_product[row.product_id] = max(per_product.get(row.product_id, 0.0), risk_value)
     if not per_product:
-        return None
-    return round(sum(per_product.values()), 2)
+        return empty
+
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == business_id).first()
+    fallback_currency = normalize_currency_code(business.currency if business else None) or (business.currency if business and business.currency else "—")
+    loc_ids_involved = {loc_id for pid in per_product for loc_id, _ in [rec_locations.get(pid, (None, None))] if loc_id}
+    # Normalized here (never the raw stored string) — a Location row that
+    # predates currency normalization (e.g. "NGN (₦)") must group under the
+    # exact same key as an already-clean "NGN" Location, or the two would
+    # be miscounted as two different currencies (section 27: never let
+    # "NGN" and "NGN (₦)" appear as separate currencies in a grouping).
+    loc_currency = {l.id: (normalize_currency_code(l.currency) or l.currency) for l in db.query(Location).filter(Location.id.in_(loc_ids_involved)).all()} if loc_ids_involved else {}
+
+    by_currency: Dict[str, float] = {}
+    for pid, value in per_product.items():
+        loc_id = rec_locations.get(pid, (None, None))[0]
+        currency = (loc_currency.get(loc_id) if loc_id else None) or fallback_currency
+        by_currency[currency] = round(by_currency.get(currency, 0.0) + value, 2)
+
+    total = round(sum(per_product.values()), 2)
+    if len(by_currency) <= 1:
+        single_currency = next(iter(by_currency), fallback_currency)
+        return {"value": total, "currency": single_currency, "mixed_currency": False, "by_currency": None}
+    return {
+        "value": None, "currency": None, "mixed_currency": True,
+        "by_currency": [{"currency": c, "value": v} for c, v in sorted(by_currency.items(), key=lambda kv: -kv[1])],
+    }
 
 # --- Business Brain invalidation (performance) ------------------------------
 # GET /business-brain used to call refresh_business_brain() unconditionally
@@ -8133,6 +8875,24 @@ def _business_brain_meta(db: Session, business_id: int) -> Dict[str, Any]:
     confidence = _brain_confidence(history_days, prior_accuracy)
     return {"history_days": history_days, "confidence": confidence, "prior_accuracy": prior_accuracy, "evaluated_predictions": len(completed), "accuracy_trend": _brain_accuracy_trend(completed)}
 
+def _resolve_stock_row_warehouse(db: Session, business_id: int, stock: "WarehouseStock", cache: Dict[Any, Optional["Warehouse"]]) -> Optional["Warehouse"]:
+    """Real warehouse_id (migration 0031) first; a legacy WarehouseStock
+    row that predates it is resolved by its own name string instead —
+    the same "ID first, name fallback for genuinely legacy data" rule
+    used everywhere else in this app's warehouse-identity work (never a
+    new pattern invented for Business Brain specifically)."""
+    if stock.warehouse_id is not None:
+        key = ("id", stock.warehouse_id)
+        if key not in cache:
+            cache[key] = db.query(Warehouse).filter(Warehouse.id == stock.warehouse_id, Warehouse.business_id == business_id).first()
+        return cache[key]
+    if stock.warehouse:
+        key = ("name", stock.warehouse)
+        if key not in cache:
+            cache[key] = get_warehouse_for_business(db, business_id, stock.warehouse)
+        return cache[key]
+    return None
+
 def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
     """Learn from one business only; never infer seasons or product facts
     generically. Only ever invoked from a claimed dirty refresh (see
@@ -8150,10 +8910,82 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
         db.query(SaleModel.product_id, func.sum(SaleModel.quantity))
         .filter(SaleModel.business_id == business_id).group_by(SaleModel.product_id).all()
     )
+    # Low-stock evidence (FINAL 3-DEFECT CLOSURE PASS, defect #1): the real
+    # per-warehouse stock source, batched once (no N+1) — never
+    # Product.quantity, which is the business-wide AGGREGATE and can hide
+    # a genuine shortage in one branch behind healthy stock in another
+    # (Lagos=2/London=50/min=5: Product.quantity=52 reads "healthy" while
+    # Lagos is critically low). Evaluated per (product_id, warehouse_id)
+    # independently below, never collapsed into one business-wide claim.
+    stock_rows_by_product: Dict[int, List["WarehouseStock"]] = {}
+    if product_ids:
+        for stock in db.query(WarehouseStock).filter(WarehouseStock.business_id == business_id, WarehouseStock.product_id.in_(product_ids)).all():
+            stock_rows_by_product.setdefault(stock.product_id, []).append(stock)
+    warehouse_cache: Dict[Any, Optional["Warehouse"]] = {}
+    # Used ONLY by the "genuinely no WarehouseStock rows at all" legacy
+    # fallback below, so that even that path's evidence still carries a
+    # real location_id/location_name in the same shape every other
+    # stock_review row now does (see business_brain()'s
+    # _brain_stock_review_location(), which reads this field directly
+    # rather than re-deriving it from the product's primary warehouse a
+    # second time at read time).
+    primary_locations = _resolve_products_locations(db, business_id, product_ids)
     for product in products:
-        if product.quantity <= product.min_stock_level:
-            _upsert_brain_recommendation(db, business_id, product.id, f"low-stock:{product.id}", "stock_review", "critical", f"Review stock for {product.name}", f"Current stock is {product.quantity} units, at or below this product's minimum level of {product.min_stock_level}.", {"current_stock": product.quantity, "minimum_stock": product.min_stock_level, "source": "current_inventory"})
-            affirmed.add(f"low-stock:{product.id}")
+        # --- Low stock: evaluated PER (product, warehouse) -- see the
+        # batched stock_rows_by_product above. A product with real
+        # WarehouseStock rows is judged ENTIRELY by those rows (never
+        # Product.quantity, even as a tiebreaker) so two branches of the
+        # same product can independently be low/healthy at once; only a
+        # product with NO WarehouseStock rows at all (genuinely legacy —
+        # predates the per-warehouse stock model) falls back to the old
+        # business-wide aggregate check, exactly as before this pass.
+        stock_rows = stock_rows_by_product.get(product.id, [])
+        if stock_rows:
+            for stock in stock_rows:
+                if stock.quantity > product.min_stock_level:
+                    continue
+                warehouse = _resolve_stock_row_warehouse(db, business_id, stock, warehouse_cache)
+                location = db.query(Location).filter(Location.id == warehouse.location_id).first() if warehouse and warehouse.location_id else None
+                warehouse_label = warehouse.name if warehouse else stock.warehouse
+                # Minimum stable identity (section 4): product_id +
+                # warehouse_id already uniquely determines location_id
+                # (via Warehouse.location_id), so it alone is enough to
+                # keep a Lagos low-stock insight from ever suppressing or
+                # colliding with London's for the SAME product. A row
+                # whose warehouse_id itself is unresolved (a legacy
+                # WarehouseStock row matched only by name) falls back to
+                # a name-keyed fingerprint instead of a numeric one, so it
+                # still never collides with a different warehouse of the
+                # same product.
+                fp_key = warehouse.id if warehouse else f"legacy-{stock.warehouse or stock.id}"
+                fingerprint = f"low-stock:{product.id}:{fp_key}"
+                title = f"Review stock for {product.name} at {warehouse_label}" if warehouse_label else f"Review stock for {product.name}"
+                summary = (
+                    f"Current stock at {warehouse_label} is {stock.quantity} units, at or below this product's minimum level of {product.min_stock_level}."
+                    if warehouse_label else
+                    f"Current stock is {stock.quantity} units, at or below this product's minimum level of {product.min_stock_level}."
+                )
+                _upsert_brain_recommendation(db, business_id, product.id, fingerprint, "stock_review", "critical", title, summary, {
+                    "current_stock": stock.quantity, "minimum_stock": product.min_stock_level, "source": "warehouse_stock",
+                    "warehouse_id": warehouse.id if warehouse else stock.warehouse_id,
+                    "warehouse_name": warehouse_label,
+                    "location_id": location.id if location else None,
+                    "location_name": location.name if location else None,
+                })
+                affirmed.add(fingerprint)
+        elif product.quantity <= product.min_stock_level:
+            # Genuinely legacy: zero WarehouseStock rows exist for this
+            # product at all (predates the per-warehouse stock model) —
+            # the only figure available is the business-wide aggregate,
+            # same behavior as before this pass. Location still resolves
+            # via the product's own primary warehouse where possible
+            # (primary_locations, batched above), so this fallback's
+            # evidence carries the same location_id/location_name shape
+            # every real per-warehouse row now does.
+            fingerprint = f"low-stock:{product.id}:legacy"
+            loc_id, loc_name = primary_locations.get(product.id, (None, None))
+            _upsert_brain_recommendation(db, business_id, product.id, fingerprint, "stock_review", "critical", f"Review stock for {product.name}", f"Current stock is {product.quantity} units, at or below this product's minimum level of {product.min_stock_level}.", {"current_stock": product.quantity, "minimum_stock": product.min_stock_level, "source": "current_inventory", "location_id": loc_id, "location_name": loc_name})
+            affirmed.add(fingerprint)
         if history_days < BUSINESS_BRAIN_HISTORY_DAYS: continue
         total_sold = total_sold_map.get(product.id, 0)
         daily_velocity = float(total_sold) / history_days
@@ -8174,6 +9006,21 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
             prediction.predicted_units, prediction.confidence, prediction.evidence_json = expected_units, confidence, json.dumps(evidence)
         if product.quantity < expected_units:
             days_to_stockout = round(product.quantity / daily_velocity, 1)
+            # forecast_stockout is, and stays, genuinely BUSINESS-WIDE
+            # (FINAL 2-DEFECT CLOSURE PASS, defect #2 — Option B):
+            # daily_velocity/total_sold above are summed across every
+            # Location's sales at once, and product.quantity here is the
+            # business-wide aggregate — nothing in this computation is
+            # scoped to one Location, so this recommendation is never
+            # given a location_id/Location-specific fingerprint, and
+            # business_brain()'s own classification (see
+            # _brain_recommendation_location()) always reports this kind
+            # as business-wide, never attributed via Product.primary
+            # warehouse. Making this genuinely Location-specific (Option
+            # A) would require redesigning velocity/calibration to run
+            # per-Location, which risks a much larger, riskier surface for
+            # a small, sparse-data branch than simply being honest that
+            # this figure is business-wide.
             _upsert_brain_recommendation(db, business_id, product.id, f"forecast-stockout:{product.id}", "forecast_stockout", "critical" if days_to_stockout <= 3 else "important", f"Prepare for demand on {product.name}", f"Based on {history_days} completed business days, expected demand for the next 7 days is about {expected_units:g} units while current stock is {product.quantity}.", {**evidence, "current_stock": product.quantity, "days_to_stockout": days_to_stockout, "expected_units": expected_units})
             affirmed.add(f"forecast-stockout:{product.id}")
         if history_days >= 28:
@@ -8186,8 +9033,30 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
     # changed accuracy_score/prediction rows since meta was first computed.
     return _business_brain_meta(db, business_id)
 
+def _resolve_products_locations(db: Session, business_id: int, product_ids) -> Dict[int, Tuple[Optional[int], Optional[str]]]:
+    """Batched product_id -> (location_id, location_name) resolution
+    (section 54/74/86: no N+1) — Business Brain evidence is already
+    product-scoped, and a Product belongs to exactly one primary warehouse
+    (see Product.warehouse_id's docstring), which belongs to exactly one
+    Location. This is how a per-product Brain insight is classified as
+    LOCATION-SPECIFIC (section 33) without needing a location_id column on
+    every Brain table — the evidence lineage already determines it."""
+    ids = {pid for pid in product_ids if pid}
+    if not ids:
+        return {}
+    products = db.query(Product.id, Product.warehouse_id).filter(Product.business_id == business_id, Product.id.in_(ids)).all()
+    warehouse_ids = {wid for _, wid in products if wid}
+    warehouses = {w.id: w.location_id for w in db.query(Warehouse).filter(Warehouse.id.in_(warehouse_ids)).all()} if warehouse_ids else {}
+    location_ids = {lid for lid in warehouses.values() if lid}
+    location_names = {l.id: l.name for l in db.query(Location).filter(Location.id.in_(location_ids)).all()} if location_ids else {}
+    out = {}
+    for pid, wid in products:
+        loc_id = warehouses.get(wid) if wid else None
+        out[pid] = (loc_id, location_names.get(loc_id))
+    return out
+
 @app.get("/business-brain")
-def business_brain(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def business_brain(location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if business and (business.business_brain_dirty or business.business_brain_refreshed_at is None):
         if _try_claim_business_brain_refresh(db, user.business_id):
@@ -8234,24 +9103,95 @@ def business_brain(user: User = Depends(get_current_user), db: Session = Depends
     # baseline access to this endpoint (that's ai.use, checked above).
     has_full_view = has_permission(user, "business_brain.view_full")
     if not has_full_view: rows = [r for r in rows if r.kind == "stock_review"]
-    def rec_out(r): return {"id": r.id, "kind": r.kind, "priority": r.priority, "title": r.title, "summary": r.summary, "evidence": json.loads(r.evidence_json or "{}"), "status": r.status, "updated_at": to_utc_iso(r.updated_at)}
+    # Location classification (section 32-40, revised by the FINAL 2-DEFECT
+    # CLOSURE PASS's defect #2): a Recommendation's Location is determined
+    # by its OWN kind's real evidence lineage — never a blanket "Product's
+    # primary warehouse" guess applied to every kind alike.
+    #   - stock_review: evidence-scoped to the REAL warehouse each row is
+    #     actually about (see refresh_business_brain()'s per-warehouse
+    #     low-stock loop) — can legitimately differ from that product's
+    #     single primary warehouse (defect #1's fix).
+    #   - forecast_stockout / seasonal_demand: computed from this
+    #     product's sales velocity / seasonal pattern across EVERY
+    #     Location's sales at once (see refresh_business_brain()'s
+    #     total_sold_map and _apply_seasonal_pattern() — neither is
+    #     scoped by Location anywhere in its statistics), so there is no
+    #     single Location this evidence actually belongs to. It is ALWAYS
+    #     genuinely business-wide/unscoped — never attributed via
+    #     Product.primary warehouse (the defect this closes: a
+    #     business-wide forecast is not "Lagos's" merely because
+    #     Product.warehouse_id happens to point there — Option B, chosen
+    #     over making the forecast itself Location-specific, which would
+    #     require redesigning the velocity/seasonal/calibration
+    #     statistics to operate per-Location rather than tagging existing
+    #     business-wide numbers with a Location they were never actually
+    #     computed from).
+    #   - every other kind (e.g. a cross-product business relationship
+    #     insight with no single product tied): the product's primary-
+    #     warehouse Location, exactly as before — unaffected by this fix.
+    rec_locations = _resolve_products_locations(db, user.business_id, [r.product_id for r in rows if r.kind not in ("forecast_stockout", "seasonal_demand")])
+    def _brain_recommendation_location(r):
+        if r.kind == "stock_review":
+            evidence = json.loads(r.evidence_json or "{}")
+            if "location_id" in evidence:
+                return evidence.get("location_id"), evidence.get("location_name")
+            return rec_locations.get(r.product_id, (None, None))
+        if r.kind in ("forecast_stockout", "seasonal_demand"):
+            return (None, None)
+        return rec_locations.get(r.product_id, (None, None))
+    if location_id is not None:
+        loc_check = db.query(Location).filter(Location.id == location_id, Location.business_id == user.business_id).first()
+        if not loc_check:
+            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+        # Keep this Location's own insights PLUS genuinely business-wide
+        # ones (location_id resolves to None — forecast_stockout/
+        # seasonal_demand always, or any other kind with no resolvable
+        # Location) — never another branch's location-specific item
+        # (section 53/77), and never a multi-warehouse product's OTHER
+        # branch's stock_review row just because they share one
+        # product_id.
+        rows = [r for r in rows if _brain_recommendation_location(r)[0] in (location_id, None)]
+    def rec_out(r):
+        loc_id, loc_name = _brain_recommendation_location(r)
+        return {"id": r.id, "kind": r.kind, "priority": r.priority, "title": r.title, "summary": r.summary, "evidence": json.loads(r.evidence_json or "{}"), "status": r.status, "updated_at": to_utc_iso(r.updated_at), "location_id": loc_id, "location_name": loc_name}
     output = {"learning": meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS, "history_days": meta["history_days"], "currency": business.currency if business else "USD ($)", "attention": [rec_out(r) for r in rows], "recommendations": [rec_out(r) for r in rows], "history_available": True, "learning_message": "Cauldra is still learning this part of your business. Continue recording sales and closing business days to build reliable predictions." if meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS else None}
     if has_full_view:
+        # Memory statements (velocity-28/seasonal — see refresh_business_
+        # brain()/_apply_seasonal_pattern()) are, like forecast_stockout/
+        # seasonal_demand above, computed from a product's sales across
+        # EVERY Location at once — there is no per-warehouse memory kind,
+        # so EVERY memory row is genuinely business-wide. Never classified
+        # via the product's primary warehouse (the same defect #2 fix as
+        # the recommendations above); a business-wide item still appears
+        # under any Location filter (never excluded — section 22).
         memories = db.query(BusinessBrainMemory).filter(BusinessBrainMemory.business_id == user.business_id).order_by(BusinessBrainMemory.last_observed_at.desc()).limit(20).all()
         # COMING UP = what is likely to matter next: only forecasts whose window
         # is still open, and only the newest one per product per kind so a
-        # standing condition never stacks near-identical rows.
+        # standing condition never stacks near-identical rows. Same
+        # business-wide-only reasoning as memories above — velocity/
+        # seasonal predictions have no Location dimension anywhere in
+        # their own statistics.
         open_predictions = db.query(BusinessBrainPrediction, Product.name).join(Product, Product.id == BusinessBrainPrediction.product_id).filter(BusinessBrainPrediction.business_id == user.business_id, Product.business_id == user.business_id, BusinessBrainPrediction.actual_units.is_(None), BusinessBrainPrediction.target_at >= now).order_by(BusinessBrainPrediction.forecast_at.desc()).all()
         seen_pred: set = set(); coming = []
         for p, name in open_predictions:
             key = (p.product_id, p.kind)
             if key in seen_pred: continue
+            # location_id filter never excludes these (they are always
+            # business-wide) — matches how a business-wide Recommendation
+            # is kept under any Location filter above.
             seen_pred.add(key)
-            coming.append({"product_name": name, "predicted_units": p.predicted_units, "target_at": to_utc_iso(p.target_at), "confidence": _brain_confidence_label(p.confidence), "evidence": json.loads(p.evidence_json or "{}")})
+            coming.append({"product_name": name, "predicted_units": p.predicted_units, "target_at": to_utc_iso(p.target_at), "confidence": _brain_confidence_label(p.confidence), "evidence": json.loads(p.evidence_json or "{}"), "location_id": None, "location_name": None})
             if len(coming) >= 8: break
         actions_taken = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.business_id == user.business_id, BusinessBrainRecommendation.status == "acted").count()
-        revenue_at_risk = _brain_revenue_at_risk(db, user.business_id)
-        output.update({"memory": [{"statement": m.statement, "evidence": json.loads(m.evidence_json or "{}"), "confidence": _brain_confidence_label(m.confidence), "last_observed_at": to_utc_iso(m.last_observed_at), "first_seen": to_utc_iso(m.created_at), "reinforced": bool(m.last_observed_at and m.created_at and (m.last_observed_at - m.created_at) > timedelta(days=1))} for m in memories], "coming": coming, "outcomes": {"evaluated_predictions": meta["evaluated_predictions"], "accuracy": round(meta["prior_accuracy"] * 100, 1) if meta["prior_accuracy"] is not None else None, "accuracy_trend": meta["accuracy_trend"], "actions_taken": actions_taken, "revenue_at_risk": revenue_at_risk, "message": "Prediction outcomes will appear after forecast periods complete." if not meta["evaluated_predictions"] else None}})
+        # Location-scoped exactly like the recommendations/memory/coming
+        # sections above it (section 28-30's previously-named gap: this used
+        # to stay business-wide even while everything else in the Brief was
+        # already filtered) — see _brain_revenue_at_risk()'s own docstring
+        # for the mixed-currency policy when location_id is None. Re-audited
+        # again for defect #2 (Option B) — see that function's own updated
+        # docstring.
+        revenue_risk = _brain_revenue_at_risk(db, user.business_id, location_id=location_id)
+        output.update({"memory": [{"statement": m.statement, "evidence": json.loads(m.evidence_json or "{}"), "confidence": _brain_confidence_label(m.confidence), "last_observed_at": to_utc_iso(m.last_observed_at), "first_seen": to_utc_iso(m.created_at), "reinforced": bool(m.last_observed_at and m.created_at and (m.last_observed_at - m.created_at) > timedelta(days=1)), "location_id": None, "location_name": None} for m in memories], "coming": coming, "outcomes": {"evaluated_predictions": meta["evaluated_predictions"], "accuracy": round(meta["prior_accuracy"] * 100, 1) if meta["prior_accuracy"] is not None else None, "accuracy_trend": meta["accuracy_trend"], "actions_taken": actions_taken, "revenue_at_risk": revenue_risk["value"], "revenue_at_risk_currency": revenue_risk["currency"], "revenue_at_risk_mixed_currency": revenue_risk["mixed_currency"], "revenue_at_risk_by_currency": revenue_risk["by_currency"], "message": "Prediction outcomes will appear after forecast periods complete." if not meta["evaluated_predictions"] else None}})
     return output
 
 @app.post("/business-brain/recommendations/{recommendation_id}/action")
@@ -8416,31 +9356,56 @@ def create_expense(data: ExpenseCreate, request: Request, user: User = Depends(g
     note = (data.note or "").strip()[:500] or None
     client_ref = (data.client_ref or "").strip()[:100] or None
 
+    # location_id is part of the idempotency hash (section 59/60) — without
+    # it, a retried client_ref carrying a DIFFERENT location_id than the
+    # original submission would be misread as "the same request" and
+    # silently return the FIRST location's cached result instead of being
+    # rejected as a conflicting resubmission.
     claim, replay = claim_idempotent_mutation(
         db, user.business_id, "expense_create", client_ref,
-        {"category": category, "amount": float(data.amount), "payment_source": payment_source, "note": note},
+        {"category": category, "amount": float(data.amount), "payment_source": payment_source, "note": note, "location_id": data.location_id},
     )
     if replay:
         return replay
 
+    # An expense belongs to a specific branch (section 10/11) — resolved
+    # and validated BEFORE the Business Day it will attach to, so the two
+    # can never disagree (Business Day Consistency Rule, section 8): this
+    # expense's location_id is always exactly the location the resulting
+    # Business Day session was opened/reused for.
+    resolved_location = resolve_expense_location(db, user.business_id, data.location_id)
+    resolved_location_id = resolved_location.id if resolved_location else None
+
     # Recording an expense is an operational financial action, exactly like
     # completing a sale — so it OWNS a Business Day the same way: it attaches
-    # to the active session, or auto-opens one if none is active. Previously
-    # this only attached to an already-open day and otherwise silently wrote
-    # business_day_id = NULL, leaving the expense outside every business-day
-    # report it belongs in. Read-only endpoints still never auto-open a day.
-    day = ensure_open_business_day(db, user.business_id, opener=user, commit=False)
+    # to the active session for THAT LOCATION, or auto-opens one there if
+    # none is active. Previously this only attached to an already-open day
+    # and otherwise silently wrote business_day_id = NULL, leaving the
+    # expense outside every business-day report it belongs in. Read-only
+    # endpoints still never auto-open a day.
+    day = ensure_open_business_day(db, user.business_id, opener=user, commit=False, location_id=resolved_location_id)
     business_day_id = day.id
 
+    # Currency snapshot (migration 0034/section 17) — this Location's OWN
+    # currency at creation time, never re-derived later.
+    expense_currency = resolved_location.currency if resolved_location and resolved_location.currency else None
+    if not expense_currency:
+        business_for_currency = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+        expense_currency = business_for_currency.currency if business_for_currency else None
+    # Canonical code only (never a decorated "NGN (₦)" string) — normalized
+    # here regardless of whether the source was already clean, since a
+    # Location or BusinessProfile row can predate this rule (section 26).
+    expense_currency = normalize_currency_code(expense_currency)
     expense = Expense(
         business_id=user.business_id, category=category, amount=float(data.amount),
         payment_source=payment_source, note=note, owner_id=user.id,
         created_at=datetime.utcnow(), client_ref=client_ref,
         synced_at=(datetime.utcnow() if client_ref else None),
-        business_day_id=business_day_id,
+        business_day_id=business_day_id, location_id=resolved_location_id,
+        currency_snapshot=expense_currency,
     )
     db.add(expense); db.flush()
-    add_audit(db, user, "EXPENSE_RECORDED", f"Recorded a {category} expense of {expense.amount:,.2f}.", business_day_id=business_day_id, action_category="EXPENSES", resource_type="expense", resource_id=expense.id)
+    add_audit(db, user, "EXPENSE_RECORDED", f"Recorded a {category} expense of {expense.amount:,.2f}.", business_day_id=business_day_id, action_category="EXPENSES", resource_type="expense", resource_id=expense.id, location_id=resolved_location_id)
     response = {"id": expense.id, "message": "Expense recorded successfully."}
     complete_idempotent_mutation(claim, response)
     try:
@@ -8451,13 +9416,20 @@ def create_expense(data: ExpenseCreate, request: Request, user: User = Depends(g
     db.refresh(expense)
     return response
 
-def _build_expenses_query(db: Session, user: User, business: "BusinessProfile", category, payment_source, user_id, search, date_from, date_to):
+def _build_expenses_query(db: Session, user: User, business: "BusinessProfile", category, payment_source, user_id, search, date_from, date_to, location_id: Optional[int] = None):
     """Shared filter-building for /expenses/ and /expenses/export — the two
     endpoints must never be able to disagree about which rows a given set of
     filters matches, so both call this exact same function rather than each
     maintaining their own copy of the filter logic."""
     tz = business_local_zoneinfo(business)
     q = db.query(Expense).filter(Expense.business_id == user.business_id)  # tenant scope — never trusts the request
+    if location_id is not None:
+        # History remains valid for a deactivated Location (section 14) —
+        # deliberately NOT filtered to is_active here, only same-business.
+        loc = db.query(Location).filter(Location.id == location_id, Location.business_id == user.business_id).first()
+        if not loc:
+            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+        q = q.filter(Expense.location_id == location_id)
     if category: q = q.filter(Expense.category == category)
     if payment_source: q = q.filter(Expense.payment_source == payment_source)
     if user_id: q = q.filter(Expense.owner_id == user_id)
@@ -8501,6 +9473,7 @@ def list_expenses(
     category: Optional[str] = Query(None), payment_source: Optional[str] = Query(None),
     user_id: Optional[int] = Query(None), search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
+    location_id: Optional[int] = Query(None),
     limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
@@ -8512,10 +9485,14 @@ def list_expenses(
         require_permission(user, "expenses.view_all")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
-    q = _build_expenses_query(db, user, business, category, payment_source, user_id, search, date_from, date_to)
+    q = _build_expenses_query(db, user, business, category, payment_source, user_id, search, date_from, date_to, location_id=location_id)
     total = q.count()
     rows = q.order_by(Expense.created_at.desc()).offset(offset).limit(limit).all()
     owner_name = _owner_name_lookup(db, rows)
+    # Batched — one query for every distinct location referenced on this
+    # page, not one lookup per row (section 50).
+    loc_ids = {r.location_id for r in rows if r.location_id}
+    loc_names = {l.id: l.name for l in db.query(Location).filter(Location.id.in_(loc_ids)).all()} if loc_ids else {}
 
     return {
         "total": total, "limit": limit, "offset": offset,
@@ -8523,6 +9500,8 @@ def list_expenses(
             "id": r.id, "category": r.category, "amount": r.amount, "payment_source": r.payment_source,
             "note": r.note, "recorded_by": owner_name(r.owner_id), "owner_id": r.owner_id,
             "created_at": to_utc_iso(r.created_at),
+            "location_id": r.location_id, "location_name": loc_names.get(r.location_id),
+            "currency": r.currency_snapshot,
         } for r in rows],
     }
 
@@ -8534,25 +9513,38 @@ EXPENSES_EXPORT_COLUMNS = [
     {"key": "amount", "label": "AMOUNT", "type": "currency"},
     {"key": "payment_method", "label": "PAYMENT METHOD", "type": "text"},
     {"key": "recorded_by", "label": "RECORDED BY", "type": "text"},
+    {"key": "location", "label": "LOCATION", "type": "text"},
+    {"key": "currency", "label": "CURRENCY", "type": "text"},
 ]
 
-def _expenses_export_rows(db, user, business, category, payment_source, user_id, search, date_from, date_to):
+def _expenses_export_rows(db, user, business, category, payment_source, user_id, search, date_from, date_to, location_id: Optional[int] = None):
     """Shared by the CSV and Excel Expense History exports — one query, one
     row-building pass, so the two formats can never show different data.
     Capped at 2000 rows (well above the 500-row page-fetch cap used
     everywhere else in the app) so "export everything matching my filters"
     actually works in practice rather than being limited to one page, while
     still bounding the query."""
-    q = _build_expenses_query(db, user, business, category, payment_source, user_id, search, date_from, date_to)
+    q = _build_expenses_query(db, user, business, category, payment_source, user_id, search, date_from, date_to, location_id=location_id)
     rows = q.order_by(Expense.created_at.desc()).limit(2000).all()
     owner_name = _owner_name_lookup(db, rows)
-    return [[r.id, to_utc_iso(r.created_at), r.category, r.note or "", r.amount, r.payment_source or "", owner_name(r.owner_id)] for r in rows]
+    # Batched location-name lookup (section 50) — one query for every
+    # distinct location in this export, never one per row. An honest
+    # "Unknown / Legacy" label for NULL — never "Main Location", since
+    # unlike BusinessDay there is no established legacy convention that
+    # NULL means Main Location for Expense (section 15/27).
+    loc_ids = {r.location_id for r in rows if r.location_id}
+    loc_names = {l.id: l.name for l in db.query(Location).filter(Location.id.in_(loc_ids)).all()} if loc_ids else {}
+    return [
+        [r.id, to_utc_iso(r.created_at), r.category, r.note or "", r.amount, r.payment_source or "", owner_name(r.owner_id), loc_names.get(r.location_id, "Unknown / Legacy"), r.currency_snapshot or ""]
+        for r in rows
+    ]
 
 @app.get("/expenses/export")
 def export_expenses_csv(
     category: Optional[str] = Query(None), payment_source: Optional[str] = Query(None),
     user_id: Optional[int] = Query(None), search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
+    location_id: Optional[int] = Query(None),
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """CSV export of Expense History. Same permission check and business
@@ -8563,7 +9555,7 @@ def export_expenses_csv(
         require_permission(user, "expenses.view_all")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
-    out_rows = _expenses_export_rows(db, user, business, category, payment_source, user_id, search, date_from, date_to)
+    out_rows = _expenses_export_rows(db, user, business, category, payment_source, user_id, search, date_from, date_to, location_id=location_id)
     if not out_rows:
         return Response(status_code=204)
     header = [c["label"] for c in EXPENSES_EXPORT_COLUMNS]
@@ -8574,6 +9566,7 @@ def export_expenses_xlsx(
     category: Optional[str] = Query(None), payment_source: Optional[str] = Query(None),
     user_id: Optional[int] = Query(None), search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
+    location_id: Optional[int] = Query(None),
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """Same authorization, tenant scoping, filters, and row data as the CSV
@@ -8584,7 +9577,7 @@ def export_expenses_xlsx(
         require_permission(user, "expenses.view_all")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
-    out_rows = _expenses_export_rows(db, user, business, category, payment_source, user_id, search, date_from, date_to)
+    out_rows = _expenses_export_rows(db, user, business, category, payment_source, user_id, search, date_from, date_to, location_id=location_id)
     if not out_rows:
         return Response(status_code=204)
     filters_desc = ", ".join(f"{k}={v}" for k, v in [("Category", category), ("Payment Source", payment_source), ("Search", search), ("From", date_from), ("To", date_to)] if v) or "None"
@@ -8668,21 +9661,44 @@ def delete_supplier(supplier_id: int, user: User = Depends(get_current_user), db
 # PURCHASE ORDERS
 # -----------------------------------------------------------------------------
 @app.get("/purchase-orders/")
-def get_purchase_orders(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_purchase_orders(location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "po.view")
-    rows = db.query(PurchaseOrder).filter(PurchaseOrder.business_id == user.business_id).order_by(PurchaseOrder.id.desc()).all()
+    q = db.query(PurchaseOrder).filter(PurchaseOrder.business_id == user.business_id)
+    if location_id is not None:
+        # History remains valid for a deactivated Location too (section 20) —
+        # deliberately NOT filtered to is_active, only same-business.
+        loc_check = db.query(Location).filter(Location.id == location_id, Location.business_id == user.business_id).first()
+        if not loc_check: raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+        q = q.filter(PurchaseOrder.location_id == location_id)
+    rows = q.order_by(PurchaseOrder.id.desc()).all()
     owner_name = _owner_name_lookup(db, rows)
+    # Batched (section 54/86: no N+1) — one query for every distinct
+    # supplier/location referenced across this page, not one per PO row.
+    supplier_ids = {po.supplier_id for po in rows if po.supplier_id}
+    suppliers_map = {s.id: s for s in db.query(Supplier).filter(Supplier.id.in_(supplier_ids)).all()} if supplier_ids else {}
+    location_ids = {po.location_id for po in rows if po.location_id}
+    locations_map = {l.id: l.name for l in db.query(Location).filter(Location.id.in_(location_ids)).all()} if location_ids else {}
     out=[]
     for po in rows:
-        supplier = db.query(Supplier).filter(Supplier.id == po.supplier_id).first() if po.supplier_id else None
+        supplier = suppliers_map.get(po.supplier_id)
         # created_at/created_by were always on the model but never serialized
         # here — additive fields, existing consumers of this response are
         # unaffected (the frontend already references po.created_at, which
         # was silently undefined until now).
-        out.append({"id": po.id, "supplier_id": po.supplier_id, "vendor_name": supplier.name if supplier else "General Vendor", "status": po.status, "total_estimated_cost": po.total_estimated_cost, "items_summary": po.email_draft or "", "email_draft": po.email_draft or "", "created_at": to_utc_iso(po.created_at), "sent_at": to_utc_iso(po.sent_at), "created_by": owner_name(po.owner_id)})
+        out.append({
+            "id": po.id, "supplier_id": po.supplier_id, "vendor_name": supplier.name if supplier else "General Vendor",
+            "status": po.status, "total_estimated_cost": po.total_estimated_cost, "items_summary": po.email_draft or "",
+            "email_draft": po.email_draft or "", "created_at": to_utc_iso(po.created_at), "sent_at": to_utc_iso(po.sent_at),
+            "created_by": owner_name(po.owner_id),
+            "location_id": po.location_id, "location_name": locations_map.get(po.location_id, "Legacy / Unknown" if not po.location_id else None),
+            # Section 18: reports must prefer this stored snapshot over
+            # Location's current currency, never reinterpret an old total
+            # under a currency the Location may have changed to since.
+            "currency": po.currency_snapshot,
+        })
     return out
 
-def resolve_purchase_order_requirements(db: Session, business_id: int, product_id: int) -> None:
+def resolve_purchase_order_requirements(db: Session, business_id: int, product_id: int, warehouse_id: Optional[int] = None) -> None:
     """Call this whenever a product's stock genuinely increases (manual
     stock adjustment, refund restock) — closes out any still-open
     requirement row for this product once it's no longer low-stock, so a
@@ -8690,15 +9706,72 @@ def resolve_purchase_order_requirements(db: Session, business_id: int, product_i
     of staying permanently blocked by an old, already-resolved one. Safe to
     call unconditionally; it only ever touches rows that are both open
     (resolved_at IS NULL) and for a product that has actually recovered
-    above its min_stock_level."""
+    above its min_stock_level.
+
+    warehouse_id (section 23): resolves ONLY that warehouse's requirement —
+    restocking Lagos must never resolve London's independent, still-open
+    shortage for the same product. The check itself also uses THAT
+    warehouse's own WarehouseStock.quantity, not the business-wide
+    aggregate. Omitted (a caller with no specific warehouse context) falls
+    back to the exact pre-hardening behavior: the aggregate Product.quantity
+    and every open product-only-keyed requirement — preserved for any
+    legacy requirement row a warehouse_id could not be backfilled onto (see
+    migration 0032's two-partial-index design)."""
     p = db.query(Product).filter(Product.id == product_id, Product.business_id == business_id).first()
-    if not p or p.quantity <= p.min_stock_level:
+    if not p:
+        return
+    if warehouse_id is not None:
+        stock = db.query(WarehouseStock).filter(
+            WarehouseStock.business_id == business_id, WarehouseStock.product_id == product_id,
+            WarehouseStock.warehouse_id == warehouse_id,
+        ).first()
+        current_qty = stock.quantity if stock else 0
+        if current_qty <= p.min_stock_level:
+            return
+        db.query(PurchaseOrderRequirement).filter(
+            PurchaseOrderRequirement.business_id == business_id,
+            PurchaseOrderRequirement.product_id == product_id,
+            PurchaseOrderRequirement.resolved_at.is_(None),
+            PurchaseOrderRequirement.warehouse_id == warehouse_id,
+        ).update({PurchaseOrderRequirement.resolved_at: datetime.utcnow()}, synchronize_session=False)
+        return
+    if p.quantity <= p.min_stock_level:
         return
     db.query(PurchaseOrderRequirement).filter(
         PurchaseOrderRequirement.business_id == business_id,
         PurchaseOrderRequirement.product_id == product_id,
         PurchaseOrderRequirement.resolved_at.is_(None),
     ).update({PurchaseOrderRequirement.resolved_at: datetime.utcnow()}, synchronize_session=False)
+
+def _low_stock_warehouse_candidates(db: Session, business_id: int) -> List[Tuple["Product", Optional[int], int]]:
+    """The authoritative per-warehouse low-stock detection (section 71-74):
+    (Product, warehouse_id, that warehouse's own quantity) for EVERY
+    product+warehouse combination currently at or below the product's
+    min_stock_level — never Product.quantity (the business-wide aggregate)
+    alone, since the SAME product can genuinely be low in one warehouse and
+    healthy in another at once (see WarehouseStock's docstring). No
+    warehouse-specific threshold is invented (section 19) — every row still
+    compares against the ONE shared Product.min_stock_level.
+
+    A product with NO WarehouseStock row at all (very old legacy data that
+    predates the stock ledger entirely) falls back to Product.quantity
+    against Product.warehouse_id, exactly as the old aggregate-only
+    behavior did — never silently dropped."""
+    products = db.query(Product).filter(Product.business_id == business_id).all()
+    stocks_by_product: Dict[int, List[WarehouseStock]] = {}
+    for row in db.query(WarehouseStock).filter(WarehouseStock.business_id == business_id).all():
+        stocks_by_product.setdefault(row.product_id, []).append(row)
+    candidates: List[Tuple["Product", Optional[int], int]] = []
+    for p in products:
+        rows = stocks_by_product.get(p.id)
+        if not rows:
+            if p.quantity <= p.min_stock_level:
+                candidates.append((p, p.warehouse_id, p.quantity))
+            continue
+        for row in rows:
+            if row.quantity <= p.min_stock_level:
+                candidates.append((p, row.warehouse_id, row.quantity))
+    return candidates
 
 @app.post("/purchase-orders/generate")
 def generate_po(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -8709,58 +9782,143 @@ def generate_po(user: User = Depends(get_current_user), db: Session = Depends(ge
     # delete the drafts, and generate more, indefinitely. The allowance is
     # enforced exactly once, at the point a PO is actually SENT (see
     # dispatch_po_email() and confirm_po_whatsapp_sent()).
-    low_stock = db.query(Product).filter(Product.business_id == user.business_id, Product.quantity <= Product.min_stock_level).all()
+    low_stock = _low_stock_warehouse_candidates(db, user.business_id)
     if not low_stock: raise HTTPException(status_code=400, detail="No low stock items requiring restock.")
-    # Duplicate-prevention (section 17): a product already covered by an
-    # open requirement (its shortage is already represented in a DRAFT, or
-    # in a SENT PO that hasn't actually been restocked yet — resolved_at is
-    # what tracks "actually restocked", not the PO's own status) is skipped
-    # entirely rather than duplicated into a second PO.
-    already_covered_ids = {
-        r[0] for r in db.query(PurchaseOrderRequirement.product_id).filter(
+    # Duplicate-prevention (section 17/21): keyed on (product, warehouse) —
+    # a product already covered by an open requirement FOR THAT SAME
+    # WAREHOUSE (its shortage is already represented in a DRAFT, or in a
+    # SENT PO that hasn't actually been restocked yet — resolved_at is what
+    # tracks "actually restocked", not the PO's own status) is skipped
+    # entirely rather than duplicated; the SAME product's independent
+    # shortage in a DIFFERENT warehouse is never blocked by this.
+    already_covered = {
+        (r[0], r[1]) for r in db.query(PurchaseOrderRequirement.product_id, PurchaseOrderRequirement.warehouse_id).filter(
             PurchaseOrderRequirement.business_id == user.business_id,
             PurchaseOrderRequirement.resolved_at.is_(None),
         ).all()
     }
-    uncovered = [p for p in low_stock if p.id not in already_covered_ids]
+    uncovered = [(p, wid, qty) for (p, wid, qty) in low_stock if (p.id, wid) not in already_covered]
     if not uncovered:
         raise HTTPException(status_code=400, detail="All current restock requirements are already covered by existing purchase orders.")
-    total_cost = sum(p.cost_price * max(p.min_stock_level * 2, 1) for p in uncovered)
-    items = ", ".join([f"{p.name} ({max(p.min_stock_level * 2, 1)} units)" for p in uncovered])
-    draft = f"Please confirm availability for: {items}."
-    po = PurchaseOrder(status="DRAFT", total_estimated_cost=total_cost, email_draft=draft, business_id=user.business_id, owner_id=None)
-    db.add(po); db.flush()
-    # One requirement row per newly-covered product. A concurrent request
-    # racing to cover the SAME product is caught by the partial unique
-    # index (business_id, product_id) WHERE resolved_at IS NULL (migration
-    # 0023) — per-row, not per-PO, so a race only ever drops the specific
-    # product(s) that lost the race, never the whole PO.
-    covered_names = []
-    for p in uncovered:
-        # Each attempt runs inside its own SAVEPOINT (begin_nested): if the
-        # partial unique index rejects it (another concurrent request just
-        # covered this exact product), only THIS savepoint rolls back —
-        # every earlier product's already-flushed requirement row in this
-        # same transaction is untouched, unlike a full session rollback
-        # which would have discarded them too.
-        try:
-            with db.begin_nested():
-                db.add(PurchaseOrderRequirement(business_id=user.business_id, purchase_order_id=po.id, product_id=p.id))
-                db.flush()
-        except IntegrityError:
+
+    # --- Group uncovered requirements by Location (section 12-14) -----------
+    # A restock requirement belongs operationally to the Location whose
+    # Warehouse needs stock — derived by real warehouse_id -> Warehouse.
+    # location_id, never from the current user, a supplier, or a Main
+    # Location fallback. One DRAFT PO is generated PER LOCATION — never one
+    # PO spanning two branches.
+    warehouse_rows = {w.id: w for w in db.query(Warehouse).filter(Warehouse.business_id == user.business_id).all()}
+    groups: Dict[Optional[int], List[Tuple["Product", Optional[int], int]]] = {}
+    unresolved_product_names: List[str] = []
+    for p, wid, qty in uncovered:
+        warehouse_row = warehouse_rows.get(wid) if wid is not None else None
+        location_id = warehouse_row.location_id if warehouse_row else None
+        if not warehouse_row or not location_id:
+            # Excluded with actionable feedback (section 13) — never silently
+            # included under a guessed/default Location.
+            unresolved_product_names.append(p.name)
             continue
-        covered_names.append(p.name)
-    if not covered_names:
-        db.rollback()
+        groups.setdefault(location_id, []).append((p, wid, qty))
+
+    if not groups:
+        raise HTTPException(
+            status_code=400,
+            detail="No low-stock product's warehouse is assigned to a business location yet. Assign a location to the relevant warehouse(s) in Business Profile first.",
+        )
+
+    location_names = {l.id: l for l in db.query(Location).filter(Location.id.in_(groups.keys())).all()}
+    created_pos: List[PurchaseOrder] = []
+    for location_id, items_in_group in groups.items():
+        location = location_names.get(location_id)
+        total_cost = sum(p.cost_price * max(p.min_stock_level * 2, 1) for p, _, _ in items_in_group)
+        # Warehouse name shown per line whenever this Location's PO covers
+        # more than one warehouse, so two independent shortages of the SAME
+        # product (different warehouses, same branch) are never visually
+        # collapsed into one ambiguous line (section 58).
+        multi_warehouse_po = len({wid for _, wid, _ in items_in_group}) > 1
+        def _item_label(p, wid):
+            qty_needed = max(p.min_stock_level * 2, 1)
+            wh = warehouse_rows.get(wid)
+            suffix = f" [{wh.name}]" if multi_warehouse_po and wh else ""
+            return f"{p.name} ({qty_needed} units){suffix}"
+        items = ", ".join(_item_label(p, wid) for p, wid, _ in items_in_group)
+        # Branch context in the message itself (section 19) — never internal
+        # database IDs, and never the business's generic address for a PO
+        # that belongs to one specific branch.
+        header_lines = [f"Purchase Order for {location.name}" if location else "Purchase Order"]
+        if location and location.address:
+            header_lines.append(f"Delivery address: {location.address}")
+        draft = "\n".join(header_lines) + f"\n\nPlease confirm availability for: {items}."
+        # Currency snapshot (migration 0034/section 17) — this Location's own
+        # currency at generation time, never re-derived from Location.
+        # currency later.
+        po_currency = location.currency if location and location.currency else None
+        if not po_currency:
+            business_for_currency = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+            po_currency = business_for_currency.currency if business_for_currency else None
+        po_currency = normalize_currency_code(po_currency)  # canonical code only — see normalize_currency_code()
+        po = PurchaseOrder(status="DRAFT", total_estimated_cost=total_cost, email_draft=draft, business_id=user.business_id, owner_id=None, location_id=location_id, currency_snapshot=po_currency)
+        db.add(po); db.flush()
+        # One requirement row per newly-covered (product, warehouse) pair. A
+        # concurrent request racing to cover the SAME pair is caught by the
+        # partial unique index (business_id, product_id, warehouse_id)
+        # WHERE resolved_at IS NULL (migration 0032) — per-row, not per-PO,
+        # so a race only ever drops the specific pair(s) that lost the
+        # race, never the whole PO.
+        covered_names = []
+        for p, wid, qty in items_in_group:
+            # Each attempt runs inside its own SAVEPOINT (begin_nested): if the
+            # partial unique index rejects it (another concurrent request just
+            # covered this exact pair), only THIS savepoint rolls back —
+            # every earlier pair's already-flushed requirement row in this
+            # same transaction is untouched, unlike a full session rollback
+            # which would have discarded them too.
+            try:
+                with db.begin_nested():
+                    db.add(PurchaseOrderRequirement(business_id=user.business_id, purchase_order_id=po.id, product_id=p.id, warehouse_id=wid))
+                    db.flush()
+            except IntegrityError:
+                continue
+            covered_names.append(p.name)
+        if not covered_names:
+            # Every pair in this Location's group lost the race — this
+            # Location's draft has nothing left to cover; discard it rather
+            # than leaving an empty PO behind.
+            db.delete(po)
+            continue
+        add_audit(
+            db, user, "PURCHASE_ORDER_CREATED",
+            f"Generated purchase order #{po.id}" + (f" for {location.name}." if location else "."),
+            action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id,
+            location_id=location_id,
+            metadata={"location_id": location_id, "location_name": location.name if location else None},
+        )
+        created_pos.append(po)
+
+    if not created_pos:
         raise HTTPException(status_code=400, detail="All current restock requirements are already covered by existing purchase orders.")
-    add_audit(db, user, "PURCHASE_ORDER_CREATED", f"Generated purchase order #{po.id}.", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id)
-    # No user-facing notification here on purpose (section 19): drafting is
+    # No user-facing notification here on purpose (section 19/70): drafting is
     # not yet a meaningful outcome for anyone to be notified about — only a
     # successful SEND is (see dispatch_po_email/confirm_po_whatsapp_sent).
     # The audit trail above is a separate, permanent record and is not a
     # notification.
-    db.commit(); db.refresh(po)
-    return {"message": "Purchase Order generated successfully.", "id": po.id, "po_id": po.id}
+    db.commit()
+    for po in created_pos:
+        db.refresh(po)
+    drafts = [{"id": po.id, "location_id": po.location_id, "location_name": location_names[po.location_id].name if po.location_id in location_names else None} for po in created_pos]
+    message = (
+        f"Purchase Order generated successfully for {drafts[0]['location_name']}." if len(drafts) == 1 and drafts[0]["location_name"]
+        else f"Generated {len(drafts)} purchase order draft(s) across {len(drafts)} location(s)." if len(drafts) > 1
+        else "Purchase Order generated successfully."
+    )
+    return {
+        "message": message,
+        # Back-compat: existing frontend code reads these top-level fields
+        # for the single-PO case — always the FIRST draft generated.
+        "id": created_pos[0].id, "po_id": created_pos[0].id,
+        "purchase_orders": drafts,
+        "unresolved_products": unresolved_product_names or None,
+    }
 
 @app.put("/purchase-orders/{po_id}")
 def update_po_draft(po_id: int, update: PODraftUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -8871,10 +10029,12 @@ def confirm_po_whatsapp_sent(po_id: int, user: User = Depends(get_current_user),
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     check_plan_limit(db, business, "purchase_order", _po_sent_count_this_period(db, business))
     po.status = "SENT"; po.sent_at = datetime.utcnow()
-    add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Dispatched purchase order #{po.id} via WhatsApp (user-confirmed sent).", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id)
+    po_location = db.query(Location).filter(Location.id == po.location_id).first() if po.location_id else None
+    location_suffix = f" for {po_location.name}" if po_location else ""
+    add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Dispatched purchase order #{po.id}{location_suffix} via WhatsApp (user-confirmed sent).", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id, location_id=po.location_id)
     create_notification(
         db, business_id=user.business_id, category="purchase_order", severity="important", type="PO_SUBMITTED",
-        title="Purchase order submitted", message=f"Purchase order #{po.id} was sent to {supplier.name}.",
+        title="Purchase order submitted", message=f"Purchase order #{po.id}{location_suffix} was sent to {supplier.name}.",
         related_entity_type="purchase_order", related_entity_id=po.id, deep_link=f"purchase_order:{po.id}",
     )
     db.commit()
@@ -8922,10 +10082,12 @@ def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Se
         # provider-accepted send can consume it.
         raise HTTPException(status_code=502, detail="We could not email this purchase order right now.") from exc
     po.status = "SENT"; po.sent_at = datetime.utcnow()
-    add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Emailed purchase order #{po.id} to {supplier.name}.", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id)
+    po_location = db.query(Location).filter(Location.id == po.location_id).first() if po.location_id else None
+    location_suffix = f" for {po_location.name}" if po_location else ""
+    add_audit(db, user, "PURCHASE_ORDER_DISPATCHED", f"Emailed purchase order #{po.id}{location_suffix} to {supplier.name}.", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id, location_id=po.location_id)
     create_notification(
         db, business_id=user.business_id, category="purchase_order", severity="important", type="PO_SUBMITTED",
-        title="Purchase order submitted", message=f"Purchase order #{po.id} was sent to {supplier.name}.",
+        title="Purchase order submitted", message=f"Purchase order #{po.id}{location_suffix} was sent to {supplier.name}.",
         related_entity_type="purchase_order", related_entity_id=po.id, deep_link=f"purchase_order:{po.id}",
     )
     db.commit()
@@ -8967,6 +10129,50 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
     items = payload.items
     if not items:
         raise HTTPException(status_code=400, detail="Cart is empty.")
+
+    # --- Resolve and validate the OPERATING Location context FIRST -----------
+    # (FINAL 3-DEFECT CLOSURE PASS, defect #2) — deliberately BEFORE any
+    # warehouse is even considered, never derived afterward from whichever
+    # warehouse happened to get auto-selected. That reversed order was the
+    # actual architectural weakness: a product stocked only in a DIFFERENT
+    # Location than the one the operator has actually selected (Dashboard /
+    # Business Day control) could previously be auto-sold from there,
+    # silently opening/reusing that OTHER Location's Business Day too.
+    #
+    # payload.location_id is an AUTHORITATIVE-CONTEXT field, not blindly
+    # trusted — independently validated against this business and its
+    # active status below, exactly like warehouse_id already is.
+    operating_location_id: Optional[int] = None
+    if payload.location_id is not None:
+        operating_location = db.query(Location).filter(Location.id == payload.location_id, Location.business_id == user.business_id).first()
+        if not operating_location:
+            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+        if not operating_location.is_active:
+            raise HTTPException(status_code=400, detail=f"{operating_location.name} is not active and cannot be used for a new sale.")
+        operating_location_id = operating_location.id
+    else:
+        active_locations = db.query(Location).filter(Location.business_id == user.business_id, Location.is_active == True).all()
+        if len(active_locations) == 1:
+            # Single-active-Location business: no selector is ever needed.
+            operating_location_id = active_locations[0].id
+        elif len(active_locations) > 1:
+            # Mirrors current_business_day_summary()'s own identical rule
+            # (an established convention, not a new one this pass invents):
+            # with no explicit choice, an exactly-one-currently-open
+            # session is unambiguous; zero or more-than-one open is
+            # genuinely ambiguous and must be rejected outright, never
+            # guessed by picking whichever warehouse happens to be
+            # unambiguous for THIS product.
+            open_sessions = get_active_business_days(db, user.business_id)
+            if len(open_sessions) == 1:
+                operating_location_id = open_sessions[0].location_id
+            else:
+                raise HTTPException(status_code=400, detail="This business has more than one location — select which location this sale is operating in.")
+        # else: zero active locations should never happen (migration 0024
+        # guarantees at least one Main Location per business) — left None;
+        # every check below that depends on it is then correctly permissive
+        # exactly as this endpoint behaved before this pass, rather than
+        # inventing a location to enforce.
 
     # Every checkout submission gets a stable transaction identifier stored
     # on every line item it creates — the client's own client_ref for an
@@ -9043,26 +10249,154 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
         if requested > product.quantity:
             raise HTTPException(status_code=409, detail=f"Not enough stock for {product.name}.")
 
-    locked_stocks = (
+    # --- Resolve, per cart LINE, the ACTUAL warehouse supplying it -----------
+    # (section 6-15 of the FINAL 3-DEFECT CLOSURE PASS; supersedes the prior
+    # pass's warehouse-first resolution): the OPERATING Location resolved
+    # above now CONSTRAINS eligibility from the start — Product.primary
+    # warehouse is still never trusted blindly once a product can hold
+    # stock in more than one warehouse at once (see WarehouseStock's
+    # docstring / transfer_stock()), but a warehouse belonging to a
+    # DIFFERENT Location than the one actually operating is never even
+    # considered, let alone auto-selected.
+    #
+    # warehouse_rows_cache/_warehouse_row defined before the eligibility
+    # query below (moved up from after it) because eligibility itself now
+    # needs each row's Warehouse (and Location) to decide inclusion.
+    warehouse_rows_cache: Dict[int, "Warehouse"] = {}
+    def _warehouse_row(wid):
+        if wid not in warehouse_rows_cache:
+            warehouse_rows_cache[wid] = db.query(Warehouse).filter(Warehouse.id == wid, Warehouse.business_id == user.business_id).first()
+        return warehouse_rows_cache[wid]
+
+    # For each product referenced in the cart, "eligible" warehouses are
+    # every WarehouseStock row for it with quantity > 0 AND (when an
+    # operating Location is known) belonging to that Location:
+    #   - exactly one eligible warehouse -> auto-selected (the overwhelming
+    #     common case, identical outcome to the original single-warehouse
+    #     behavior).
+    #   - zero eligible rows -> see the "no stock at this Location" vs
+    #     genuinely-legacy-fallback distinction below (section 14).
+    #   - more than one eligible warehouse -> the client's own requested
+    #     SalesCheckoutItem.warehouse_id is REQUIRED and independently
+    #     re-validated (must be one of the actually-eligible, THIS-
+    #     LOCATION-ONLY rows — a warehouse from a different Location can
+    #     never match, so an injected foreign warehouse_id is rejected
+    #     automatically); omitted, this is rejected with a structured,
+    #     actionable list of the eligible warehouses (id, name, Location,
+    #     available quantity), already scoped to this one Location, rather
+    #     than guessing which one to sell from (section 8/15/76).
+    #
+    # any_stock_rows_by_product tracks, per product, whether REAL
+    # per-warehouse stock exists ANYWHERE in the business (any Location) —
+    # this is what distinguishes "genuinely no per-warehouse data at all"
+    # (legacy fallback allowed) from "this product IS tracked per
+    # warehouse, just not stocked at the selected Location" (never falls
+    # back — a real shortage at the operating Location is reported as
+    # exactly that, never silently sourced from a different branch).
+    eligible_stocks_by_product: Dict[int, List[WarehouseStock]] = {}
+    any_stock_rows_by_product: Dict[int, bool] = {}
+    for stock in (
         db.query(WarehouseStock)
-        .filter(WarehouseStock.business_id == user.business_id, WarehouseStock.product_id.in_(product_ids))
+        .filter(WarehouseStock.business_id == user.business_id, WarehouseStock.product_id.in_(product_ids), WarehouseStock.quantity > 0)
         .order_by(WarehouseStock.product_id.asc(), WarehouseStock.warehouse.asc(), WarehouseStock.id.asc())
         .with_for_update()
         .all()
-    )
-    stock_by_source = {(stock.product_id, stock.warehouse): stock for stock in locked_stocks}
-    source_stock_by_product = {}
-    for product_id, requested in requested_by_product.items():
+    ):
+        any_stock_rows_by_product[stock.product_id] = True
+        stock_warehouse = _warehouse_row(stock.warehouse_id) if stock.warehouse_id else (get_warehouse_for_business(db, user.business_id, stock.warehouse) if stock.warehouse else None)
+        if operating_location_id is not None and (not stock_warehouse or stock_warehouse.location_id != operating_location_id):
+            continue  # real stock, just not AT the operating Location — excluded from eligibility, never auto-sold from here
+        eligible_stocks_by_product.setdefault(stock.product_id, []).append(stock)
+
+    resolved_stock_by_line: List[Optional[WarehouseStock]] = []
+    requires_selection: List[dict] = []
+    location_mismatch_products: List[str] = []
+    for item in items:
+        product = products_by_id[item.product_id]
+        eligible = eligible_stocks_by_product.get(item.product_id, [])
+        if not eligible:
+            if any_stock_rows_by_product.get(item.product_id):
+                # Real per-warehouse stock exists for this product, just not
+                # at the operating Location — a genuine "no stock HERE"
+                # condition (section 14), never silently sourced from
+                # elsewhere: no hidden route from Lagos to London.
+                location_mismatch_products.append(product.name)
+                resolved_stock_by_line.append(None)
+                continue
+            # Genuinely legacy: this product has ZERO WarehouseStock rows
+            # anywhere in the business — the old (pre-this-pass) fallback
+            # to its primary warehouse remains available, but ONLY when it
+            # does not contradict the operating Location (section 14):
+            # allowed when the fallback warehouse is unresolvable and
+            # nothing else is known, but REJECTED — never silently
+            # attributed to a Location it was never confirmed to belong to
+            # — once an operating Location is known and the fallback
+            # warehouse either doesn't resolve to a real row or resolves
+            # to a different (or no) Location than that one.
+            fallback_name = product.warehouse or "Main Central Warehouse"
+            fallback_warehouse = get_warehouse_for_business(db, user.business_id, fallback_name)
+            if operating_location_id is not None and not (fallback_warehouse and fallback_warehouse.location_id == operating_location_id):
+                location_mismatch_products.append(product.name)
+                resolved_stock_by_line.append(None)
+                continue
+            fallback_stock = (
+                db.query(WarehouseStock)
+                .filter(WarehouseStock.business_id == user.business_id, WarehouseStock.product_id == product.id, WarehouseStock.warehouse == fallback_name)
+                .with_for_update().first()
+            )
+            resolved_stock_by_line.append(fallback_stock)
+            continue
+        if len(eligible) == 1:
+            resolved_stock_by_line.append(eligible[0])
+            continue
+        if item.warehouse_id is None:
+            options = []
+            for stock in eligible:
+                wh = _warehouse_row(stock.warehouse_id) if stock.warehouse_id else None
+                loc = db.query(Location).filter(Location.id == wh.location_id).first() if wh and wh.location_id else None
+                options.append({
+                    "warehouse_id": stock.warehouse_id, "warehouse_name": wh.name if wh else stock.warehouse,
+                    "location_id": loc.id if loc else None, "location_name": loc.name if loc else None,
+                    "available_quantity": stock.quantity,
+                })
+            requires_selection.append({"product_id": product.id, "product_name": product.name, "eligible_warehouses": options})
+            resolved_stock_by_line.append(None)
+            continue
+        match = next((s for s in eligible if s.warehouse_id == item.warehouse_id), None)
+        if not match:
+            raise HTTPException(status_code=400, detail=f"The selected warehouse for {product.name} is not a valid, in-stock source for this business.")
+        resolved_stock_by_line.append(match)
+
+    if location_mismatch_products:
+        names = ", ".join(sorted(set(location_mismatch_products))[:5])
+        raise HTTPException(status_code=409, detail=f"{names} — this product has no available stock at the selected location.")
+
+    if requires_selection:
+        raise HTTPException(status_code=409, detail={
+            "message": "One or more products are stocked in more than one warehouse — select which warehouse each sale draws from.",
+            "requires_warehouse_selection": requires_selection,
+        })
+
+    # Combined requested quantity per (product, resolved warehouse) — a
+    # product appearing on two lines with the SAME resolved warehouse is
+    # validated against its combined quantity, not twice independently;
+    # two lines resolving to DIFFERENT warehouses (same product) are
+    # correctly validated as two separate stock sources.
+    requested_by_product_warehouse: Dict[Tuple[int, Optional[int]], int] = {}
+    for item, stock in zip(items, resolved_stock_by_line):
+        key = (item.product_id, stock.id if stock else None)
+        requested_by_product_warehouse[key] = requested_by_product_warehouse.get(key, 0) + item.quantity
+    stocks_by_id = {s.id: s for s in resolved_stock_by_line if s}
+    for (product_id, stock_id), requested in requested_by_product_warehouse.items():
         product = products_by_id[product_id]
-        source_name = product.warehouse or "Main Central Warehouse"
-        stock = stock_by_source.get((product_id, source_name))
+        stock = stocks_by_id.get(stock_id) if stock_id else None
+        source_label = (_warehouse_row(stock.warehouse_id).name if stock and stock.warehouse_id and _warehouse_row(stock.warehouse_id) else (stock.warehouse if stock else (product.warehouse or "Main Central Warehouse")))
         if stock and requested > stock.quantity:
-            raise HTTPException(status_code=409, detail=f"Not enough stock for {product.name} in {source_name}.")
-        source_stock_by_product[product_id] = stock
+            raise HTTPException(status_code=409, detail=f"Not enough stock for {product.name} in {source_label}.")
 
     validated = []
     negotiated_lines = []
-    for item in items:
+    for item, stock in zip(items, resolved_stock_by_line):
         p = products_by_id[item.product_id]
         qty = item.quantity
         retail_price = float(p.retail_price or 0.0)
@@ -9099,34 +10433,107 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
                 "unit_cost": float(p.cost_price or 0.0),
                 "negotiated_price": price, "reason": reason,
             })
-        validated.append((p, qty, price, item.price_mode))
+        validated.append((p, qty, price, item.price_mode, stock))
+
+    # --- This cart's operating Location for Business Day/currency ------------
+    # No longer derived from the resolved warehouse(s) AFTER the fact
+    # (section 16: "do not re-derive Location from selected warehouse after
+    # the fact") — operating_location_id was already resolved and used to
+    # CONSTRAIN which warehouses were even eligible above, so every line's
+    # resolved stock is already guaranteed consistent with it (enforced
+    # during eligibility/legacy-fallback resolution above); there is
+    # nothing left to cross-check against in the normal case.
+    checkout_location_id = operating_location_id
+    if checkout_location_id is None:
+        # Defensive-only path for the "zero active Locations" edge case
+        # (should never happen — migration 0024 guarantees at least one
+        # Main Location per business) where eligibility above could not be
+        # Location-constrained at all: fall back to the OLD per-line
+        # cross-check (unchanged from the prior pass) so a cart still can
+        # never silently span two different Locations even in this
+        # should-never-happen state.
+        def _line_location(p, stock) -> Optional["Location"]:
+            warehouse_name = stock.warehouse if stock else (p.warehouse or "Main Central Warehouse")
+            if stock and stock.warehouse_id:
+                wh = _warehouse_row(stock.warehouse_id)
+                if wh and wh.location_id:
+                    return db.query(Location).filter(Location.id == wh.location_id).first()
+                if wh:
+                    return None  # a real warehouse row, but genuinely no Location assigned yet
+            return resolve_warehouse_location(db, user.business_id, warehouse_name)
+        resolved_location_ids: set = set()
+        for p, qty, price, price_mode, stock in validated:
+            location = _line_location(p, stock)
+            if location:
+                resolved_location_ids.add(location.id)
+        if len(resolved_location_ids) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Products in one sale must come from the same location. Complete separate sales for each location.",
+            )
+        checkout_location_id = next(iter(resolved_location_ids)) if resolved_location_ids else None
 
     # --- PHASE 2: the whole cart is valid — now open the day and write -------
     # Only reached once every line passed, so a rejected cart never leaves a
-    # spuriously auto-opened Business Day behind either.
-    day = ensure_open_business_day(db, user.business_id, opener=user, commit=False)
+    # spuriously auto-opened Business Day behind either. Scoped to the
+    # derived Location (section 8) — this can never reuse or auto-open a
+    # DIFFERENT location's session, so a London sale can never silently land
+    # inside a currently-open Lagos Business Day.
+    day = ensure_open_business_day(db, user.business_id, opener=user, commit=False, location_id=checkout_location_id)
     txn.business_day_id = day.id
+
+    # Currency snapshot (migration 0034/section 17): this selling Location's
+    # OWN currency, resolved once here and stamped on every line — never
+    # re-derived from Location.currency later, so a future currency change
+    # at this Location can never reinterpret this sale's historical amount.
+    checkout_location_row = db.query(Location).filter(Location.id == checkout_location_id).first() if checkout_location_id else None
+    checkout_currency = checkout_location_row.currency if checkout_location_row and checkout_location_row.currency else None
+    if not checkout_currency:
+        business_for_currency = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+        checkout_currency = business_for_currency.currency if business_for_currency else None
+    checkout_currency = normalize_currency_code(checkout_currency)  # canonical code only — see normalize_currency_code()
 
     daily_total = 0.0
     synced_at = datetime.utcnow() if client_ref else None
     updated_products = []  # authoritative post-sale quantities — lets the frontend patch its local state instead of reloading everything (see performance refactor, section 13)
+    # Product.quantity is decremented ONCE per product, by the combined
+    # quantity across ALL its lines regardless of which warehouse(s) they
+    # resolved to — it is always the business-wide aggregate (section 13),
+    # never warehouse-scoped.
     for product_id in product_ids:
         p = products_by_id[product_id]
-        qty = requested_by_product[product_id]
-        p.quantity -= qty
-        stock = source_stock_by_product[product_id]
-        if stock:
-            stock.quantity -= qty
+        p.quantity -= requested_by_product[product_id]
         updated_products.append({"id": p.id, "quantity": p.quantity})
+    # Each ACTUAL resolved WarehouseStock row is decremented exactly once,
+    # by its own combined requested quantity — never the wrong row (section
+    # 13/76: no arbitrary/blind warehouse write).
+    for (product_id, stock_id), requested in requested_by_product_warehouse.items():
+        if stock_id is None:
+            continue
+        stocks_by_id[stock_id].quantity -= requested
 
-    for p, qty, price, price_mode in validated:
+    for p, qty, price, price_mode, stock in validated:
         total = qty * price
         # Every sale-time fact this line will ever need is captured here (see
         # the SaleModel snapshot comments) — nothing about this row's
         # financial meaning depends on the Product row afterwards.
+        # warehouse_name_snapshot/warehouse_id_at_sale (migration 0030/0032):
+        # the SAME warehouse this exact LINE actually resolved to and drew
+        # stock from above — never blindly Product.warehouse/warehouse_id,
+        # which is only the product's PRIMARY warehouse and may not be where
+        # THIS line's stock came from once multiple warehouses are eligible
+        # (section 11/16) — and never re-derived from Product's possibly-
+        # since-changed current value, so a later transfer/reassignment can
+        # never retroactively alter which branch this specific sale is
+        # durably attributed to (section 27/28).
+        line_warehouse_name = stock.warehouse if stock else (p.warehouse or "Main Central Warehouse")
+        line_warehouse_id = stock.warehouse_id if stock else p.warehouse_id
         db.add(SaleModel(
             business_id=user.business_id, product_id=p.id, quantity=qty, total_price=total,
             unit_price=price, unit_cost_at_sale=p.cost_price, pricing_type=price_mode, product_name_snapshot=p.name,
+            warehouse_name_snapshot=line_warehouse_name,
+            warehouse_id_at_sale=line_warehouse_id,
+            currency_snapshot=checkout_currency,
             timestamp=datetime.utcnow(), client_ref=transaction_ref, synced_at=synced_at,
             business_day_id=day.id,
         ))
@@ -9142,7 +10549,7 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
         db, user, "SALE_COMPLETED", f"Completed a sale worth {daily_total:.2f}.", business_day_id=day.id,
         action_category="SALES", resource_type="sale_transaction", resource_id=None,
         metadata={"transaction_id": transaction_ref, "total": round(daily_total, 2),
-                  "lines": len(validated), "units": sum(q for _, q, _, _ in validated),
+                  "lines": len(validated), "units": sum(q for _, q, _, _, _ in validated),
                   "pricing_policy": "server_catalog_or_authorized_negotiation",
                   "negotiated_lines": negotiated_lines},
     )
@@ -9156,7 +10563,7 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
     # completed sale into an error response.
     try:
         for product_id in product_ids:
-            check_inventory_notifications(db, user.business_id, products_by_id[product_id])
+            check_inventory_notifications_for_product(db, user.business_id, products_by_id[product_id])
         db.commit()
     except Exception:
         db.rollback()
@@ -9192,7 +10599,7 @@ def _sales_for_transaction_key(db: Session, business_id: int, transaction_key: s
         .order_by(SaleModel.timestamp.asc()).all()
     )
 
-def _serialize_sale_transactions(sales: List[SaleModel], refunded_map: Dict[int, int], products_map: Dict[int, "Product"]) -> List[dict]:
+def _serialize_sale_transactions(sales: List[SaleModel], refunded_map: Dict[int, int], products_map: Dict[int, "Product"], day_location_map: Optional[Dict[int, Tuple[Optional[int], Optional[str]]]] = None) -> List[dict]:
     """Groups a flat list of SaleModel rows into transactions by client_ref
     (see module note above), enriching each line with how much of it has
     already been refunded (refunded_map: sale_id -> cumulative refunded
@@ -9237,13 +10644,34 @@ def _serialize_sale_transactions(sales: List[SaleModel], refunded_map: Dict[int,
         if total_refundable <= 0: status = "fully_refunded"
         elif total_refundable == total_original_qty: status = "not_refunded"
         else: status = "partially_refunded"
+        # Location context (section 26) — resolved via this transaction's
+        # own Business Day, batched by the caller (never one query per
+        # transaction). Absent entirely for a transaction with no
+        # business_day_id at all (pre-Business-Day-linkage legacy rows).
+        loc_id, loc_name = (day_location_map or {}).get(rows[0].business_day_id, (None, None)) if rows[0].business_day_id else (None, None)
         out.append({
             "transaction_key": key, "timestamp": to_utc_iso(min(s.timestamp for s in rows)),
             "business_day_id": rows[0].business_day_id,
+            "location_id": loc_id, "location_name": loc_name,
+            # Section 18/21: the stored per-line snapshot, never Location's
+            # current currency — every line in one checkout shares it.
+            "currency": rows[0].currency_snapshot,
             "original_total": original_total, "refunded_total": refunded_total,
             "net_total": round(original_total - refunded_total, 2), "status": status, "items": items,
         })
     return out
+
+def _business_day_location_map(db: Session, business_day_ids: List[int]) -> Dict[int, Tuple[Optional[int], Optional[str]]]:
+    """Batched business_day_id -> (location_id, location_name) lookup —
+    used everywhere a list of transactions/sales needs Location context
+    without one query per row (section 26/54/86: no N+1)."""
+    ids = list({bd_id for bd_id in business_day_ids if bd_id})
+    if not ids:
+        return {}
+    days = db.query(BusinessDay.id, BusinessDay.location_id).filter(BusinessDay.id.in_(ids)).all()
+    loc_ids = {loc_id for _, loc_id in days if loc_id}
+    loc_names = {l.id: l.name for l in db.query(Location).filter(Location.id.in_(loc_ids)).all()} if loc_ids else {}
+    return {day_id: (loc_id, loc_names.get(loc_id)) for day_id, loc_id in days}
 
 def _refunded_quantity_map(db: Session, business_id: int, sale_ids: List[int]) -> Dict[int, int]:
     if not sale_ids: return {}
@@ -9286,7 +10714,8 @@ def list_sale_transactions(
     refunded_map = _refunded_quantity_map(db, user.business_id, sale_ids)
     product_ids = list({s.product_id for s in sales if s.product_id})
     products_map = {p.id: p for p in db.query(Product).filter(Product.id.in_(product_ids)).all()} if product_ids else {}
-    return _serialize_sale_transactions(sales, refunded_map, products_map)
+    day_location_map = _business_day_location_map(db, [s.business_day_id for s in sales if s.business_day_id])
+    return _serialize_sale_transactions(sales, refunded_map, products_map, day_location_map)
 
 @app.get("/sales/transactions/{transaction_key}")
 def get_sale_transaction(transaction_key: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -9297,7 +10726,8 @@ def get_sale_transaction(transaction_key: str, user: User = Depends(get_current_
     refunded_map = _refunded_quantity_map(db, user.business_id, sale_ids)
     product_ids = list({s.product_id for s in sales if s.product_id})
     products_map = {p.id: p for p in db.query(Product).filter(Product.id.in_(product_ids)).all()} if product_ids else {}
-    return _serialize_sale_transactions(sales, refunded_map, products_map)[0]
+    day_location_map = _business_day_location_map(db, [s.business_day_id for s in sales if s.business_day_id])
+    return _serialize_sale_transactions(sales, refunded_map, products_map, day_location_map)[0]
 
 REFUND_REASONS = {"Customer return", "Wrong item", "Damaged product", "Pricing error", "Duplicate charge", "Other"}
 
@@ -9360,10 +10790,32 @@ def create_refund(transaction_key: str, payload: RefundRequest, user: User = Dep
             "restock_requested": line.restock,
         })
 
+    # --- Resolve the refund's Location from the ORIGINAL sale(s) ------------
+    # A refund is processed at the SAME Location as the original sale — never
+    # wherever the currently-open Business Day happens to be (section 5-7).
+    # Every Sale in this transaction shares one business_day_id by
+    # construction (one checkout call, see sales_checkout/txn.business_day_id),
+    # so in practice this loop only ever confirms a single value; the
+    # explicit check below is a deliberate defensive guard against corrupted/
+    # inconsistent historical data, never assumed.
+    original_business_day_ids = {s.business_day_id for s in transaction_sales if s.business_day_id}
+    original_location_id = None
+    if original_business_day_ids:
+        if len(original_business_day_ids) > 1:
+            raise HTTPException(status_code=409, detail="This transaction's original sales belong to inconsistent Business Day records and cannot be refunded automatically. Contact support.")
+        original_day = db.query(BusinessDay).filter(BusinessDay.id == next(iter(original_business_day_ids))).first()
+        original_location_id = original_day.location_id if original_day else None
+    # else: every sale in this transaction predates business_day_id — a
+    # genuinely legacy transaction. The refund still proceeds financially;
+    # its Location is honestly unknown (None), never guessed.
+
     # Refunds are a genuine operational action, same as a sale — they open a
-    # new Business Day session if none is active, never by merely viewing
-    # history (section 6). Only reached after every line above validated.
-    day = ensure_open_business_day(db, user.business_id, opener=user)
+    # new Business Day session AT THE ORIGINAL SALE'S LOCATION if none is
+    # active there, never by merely viewing history (section 6), and never
+    # reusing/auto-opening a DIFFERENT location's already-open session
+    # (section 7/8) — e.g. a Lagos sale's refund can never land inside an
+    # already-open London Business Day just because London happens to be open.
+    day = ensure_open_business_day(db, user.business_id, opener=user, location_id=original_location_id)
 
     refund_total = round(sum(r["quantity"] * r["unit_price"] for r in resolved), 2)
     refund_cost_total = (
@@ -9371,8 +10823,26 @@ def create_refund(transaction_key: str, payload: RefundRequest, user: User = Dep
         if all(r["unit_cost"] is not None for r in resolved) else None
     )
 
+    # Currency snapshot (migration 0034/section 17) — prefer the ORIGINAL
+    # sale's OWN currency_snapshot (the most precise possible source: what
+    # that specific sale was actually denominated in), falling back to the
+    # processing Location's current currency, then the business's own.
+    refund_currency = transaction_sales[0].currency_snapshot
+    if not refund_currency and original_location_id:
+        original_location_row = db.query(Location).filter(Location.id == original_location_id).first()
+        refund_currency = original_location_row.currency if original_location_row else None
+    if not refund_currency:
+        business_for_currency = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+        refund_currency = business_for_currency.currency if business_for_currency else None
+    # Canonical code only, regardless of which of the three sources above
+    # supplied it — a pre-normalization Sale.currency_snapshot or a
+    # Location/BusinessProfile row that predates this rule could otherwise
+    # still carry a decorated string (section 26).
+    refund_currency = normalize_currency_code(refund_currency)
+
     rt = RefundTransaction(
-        business_id=user.business_id, business_day_id=day.id,
+        business_id=user.business_id, business_day_id=day.id, location_id=original_location_id,
+        currency_snapshot=refund_currency,
         # transaction_sales all share the same client_ref by construction
         # (see _sales_for_transaction_key) — None for the synthetic "S{id}"
         # legacy single-sale form, the real shared ref otherwise.
@@ -9422,18 +10892,58 @@ def create_refund(transaction_key: str, payload: RefundRequest, user: User = Dep
             # matching WarehouseStock row — the same two writes checkout
             # itself makes in reverse, so the two never drift apart
             # (sections 7/9). Never more, never less, never twice.
+            #
+            # Restocks into the ORIGINAL sale's own warehouse (section 17/27)
+            # — sale.warehouse_id_at_sale (identity, migration 0032) when
+            # present, else sale.warehouse_name_snapshot (migration 0030),
+            # never Product's CURRENT warehouse, which may have changed
+            # since the sale (a transfer/reassignment must never silently
+            # redirect where refunded stock lands). Falls back to the
+            # product's current warehouse only for a legacy sale that
+            # predates both snapshot columns, exactly as before this pass.
             product.quantity += qty
-            stock = db.query(WarehouseStock).filter(WarehouseStock.product_id == product.id, WarehouseStock.warehouse == (product.warehouse or "Main Central Warehouse")).first()
-            if stock: stock.quantity += qty
+            restock_warehouse_id = sale.warehouse_id_at_sale
+            restock_warehouse = sale.warehouse_name_snapshot or product.warehouse or "Main Central Warehouse"
+            if restock_warehouse_id is not None:
+                stock = db.query(WarehouseStock).filter(WarehouseStock.product_id == product.id, WarehouseStock.warehouse_id == restock_warehouse_id).first()
+            else:
+                stock = db.query(WarehouseStock).filter(WarehouseStock.product_id == product.id, WarehouseStock.warehouse == restock_warehouse).first()
+                if stock and stock.warehouse_id:
+                    restock_warehouse_id = stock.warehouse_id
+                elif restock_warehouse_id is None:
+                    # Resolve identity from the name if the snapshot only gave
+                    # us a string (legacy sale) — never guess, just look it up.
+                    resolved_wh = get_warehouse_for_business(db, user.business_id, restock_warehouse, active_only=False)
+                    restock_warehouse_id = resolved_wh.id if resolved_wh else None
+            if not stock:
+                # The snapshot warehouse no longer has a WarehouseStock row
+                # (e.g. it was never created there) — create it rather than
+                # silently restocking into the wrong warehouse's row.
+                stock = WarehouseStock(business_id=user.business_id, product_id=product.id, warehouse=restock_warehouse, warehouse_id=restock_warehouse_id, quantity=0)
+                db.add(stock); db.flush()
+            elif stock.warehouse_id is None and restock_warehouse_id is not None:
+                stock.warehouse_id = restock_warehouse_id
+            stock.quantity += qty
             updated_products.append({"id": product.id, "quantity": product.quantity})
-            resolve_purchase_order_requirements(db, user.business_id, product.id)
+            resolve_purchase_order_requirements(db, user.business_id, product.id, warehouse_id=stock.warehouse_id)
+            check_inventory_notifications_for_product(db, user.business_id, product)
 
     mark_business_brain_dirty(db, user.business_id)
     db.commit(); db.refresh(rt)
 
+    # Location context in the audit description (section 11) — snapshot the
+    # NAME at this moment, so a later rename never rewrites what this
+    # historical audit entry reads like.
+    refund_location_name = None
+    if original_location_id:
+        refund_location = db.query(Location).filter(Location.id == original_location_id).first()
+        refund_location_name = refund_location.name if refund_location else None
     add_audit(
-        db, user, "SALE_REFUNDED", f"Refunded {refund_total:.2f} across {len(resolved)} item(s).",
+        db, user,
+        "SALE_REFUNDED",
+        f"Refunded {refund_total:.2f} across {len(resolved)} item(s)" + (f" at {refund_location_name}." if refund_location_name else "."),
         business_day_id=day.id, action_category="SALES", resource_type="refund_transaction", resource_id=rt.id,
+        location_id=original_location_id,
         metadata={
             "refund_transaction_id": rt.id, "original_transaction": transaction_key,
             "refund_total": refund_total, "refund_cost_total": refund_cost_total,
@@ -9441,6 +10951,7 @@ def create_refund(transaction_key: str, payload: RefundRequest, user: User = Dep
             "quantity": sum(r["quantity"] for r in resolved),
             "restocked": any(r["restock_requested"] and r["product"] is not None for r in resolved),
             "restock_skipped_products": restock_skipped or None,
+            "location_id": original_location_id, "location_name": refund_location_name,
         },
     )
     db.commit()
@@ -9450,6 +10961,8 @@ def create_refund(transaction_key: str, payload: RefundRequest, user: User = Dep
         "refund_total": refund_total, "refund_cost_total": refund_cost_total,
         "business_day_id": day.id, "updated_products": updated_products,
         "restock_skipped_products": restock_skipped or None,
+        "location_id": original_location_id, "location_name": refund_location_name,
+        "currency": refund_currency,
     }
 
 @app.get("/sales/current-day")
@@ -9621,22 +11134,41 @@ def financial_summary_by_location(period: str = Query("today"), custom_start: Op
     return out
 
 @app.get("/financial-summary/breakdown")
-def financial_summary_breakdown(period: str = Query("today"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def financial_summary_breakdown(period: str = Query("today"), custom_start: Optional[str] = Query(None), custom_end: Optional[str] = Query(None), location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Expense-by-category and top-selling-products for the same period
     financial_summary() uses — deliberately calls resolve_financial_period()
     directly (not a separately re-derived boundary) so a Profit page's
     breakdown rows always add up to the same headline totals shown above
-    them, never a second, independently-computed version."""
+    them, never a second, independently-computed version.
+
+    location_id (section 21): validated same-business, then applied to
+    EVERY query below (expenses, sales, top products) — never leaked across
+    locations. resolve_financial_period() is also given this Location so
+    "today"/"this week"/etc. are computed in ITS OWN timezone (section 22),
+    reconciling exactly with /financial-summary?location_id=<same id> for
+    the same period."""
     require_permission(user, "reports.profit")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
-    start_utc, end_utc = resolve_financial_period(business, period, custom_start, custom_end)
+    location = None
+    if location_id is not None:
+        location = db.query(Location).filter(Location.id == location_id, Location.business_id == user.business_id).first()
+        if not location:
+            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+    start_utc, end_utc = resolve_financial_period(business, period, custom_start, custom_end, location=location)
 
     expense_filters = [Expense.business_id == business.id]
     sales_filters = [SaleModel.business_id == business.id]
     if start_utc is not None and end_utc is not None:
         expense_filters += [Expense.created_at >= start_utc, Expense.created_at < end_utc]
         sales_filters += [SaleModel.timestamp >= start_utc, SaleModel.timestamp < end_utc]
+    if location_id is not None:
+        # Expense carries a direct location_id (migration 0026) — filtered
+        # straight, no join needed. Sale has no such column yet, so it is
+        # scoped the same way compute_financial_summary() already does: via
+        # its own Business Day's location_id (section 27 disclosure below).
+        expense_filters += [Expense.location_id == location_id]
+        sales_filters += [SaleModel.business_day_id == BusinessDay.id, BusinessDay.location_id == location_id]
 
     expense_rows = (
         db.query(Expense.category, func.coalesce(func.sum(Expense.amount), 0.0))
@@ -9665,14 +11197,17 @@ def sales_history(period: str = Query("all"), custom_start: Optional[str] = Quer
     require_permission(user, "sales.view_history")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if not business: raise HTTPException(status_code=404, detail="Business not found.")
+    loc_check = None
     if location_id is not None:
         loc_check = db.query(Location).filter(Location.id == location_id, Location.business_id == user.business_id).first()
         if not loc_check: raise HTTPException(status_code=400, detail="That location could not be found for this business.")
     # Same shared period resolver every other date-range filter in the app
-    # uses (Profit, Expense History's totals) — business-timezone-aware, and
+    # uses (Profit, Expense History's totals) — timezone-aware: a specific
+    # Location's OWN timezone once one is selected (section 22), the
+    # business's own timezone otherwise, exactly as before this pass.
     # period="all" (the default, preserving this endpoint's original
     # behavior when called with no params) returns (None, None): no filter.
-    start_utc, end_utc = resolve_financial_period(business, period, custom_start, custom_end)
+    start_utc, end_utc = resolve_financial_period(business, period, custom_start, custom_end, location=loc_check)
     # A day that has been closed at least once belongs in Sales History even
     # while it is currently REOPENED (is_open == True) awaiting re-close —
     # otherwise a reopened day would vanish from history entirely instead of
@@ -9776,9 +11311,11 @@ SALES_EXPORT_COLUMNS = [
     {"key": "product", "label": "PRODUCT", "type": "text"},
     {"key": "sku", "label": "SKU", "type": "text"},
     {"key": "warehouse", "label": "WAREHOUSE", "type": "text"},
+    {"key": "location", "label": "LOCATION", "type": "text"},
     {"key": "quantity", "label": "QUANTITY", "type": "number"},
     {"key": "unit_price", "label": "UNIT PRICE", "type": "currency"},
     {"key": "total", "label": "TOTAL", "type": "currency"},
+    {"key": "currency", "label": "CURRENCY", "type": "text"},
 ]
 
 def _sales_export_rows(db, user, business, period, custom_start, custom_end):
@@ -9795,6 +11332,33 @@ def _sales_export_rows(db, user, business, period, custom_start, custom_end):
         q = q.filter(SaleModel.timestamp >= start_utc, SaleModel.timestamp < end_utc)
     rows = q.order_by(SaleModel.timestamp.asc()).limit(5000).all()
     tz = business_local_zoneinfo(business)
+    # Location, resolved via each sale's OWN Business Day session — the
+    # durable historical path (section 27): a Sale's location is fixed by
+    # which Business Day it was recorded under, never recomputed from the
+    # product's CURRENT warehouse (which may have been reassigned to a
+    # different Location since). A day whose own location_id is NULL (a
+    # legacy pre-location session — see the BusinessDay model docstring)
+    # honestly shows "Main Location" ONLY because that IS this app's
+    # established convention for a NULL BusinessDay.location_id, not a
+    # guess; a sale with no business_day_id at all (pre-Business-Day-
+    # linkage legacy row) shows "Legacy / Unknown" instead, since for that
+    # row there is no relationship to resolve at all.
+    day_ids = {s.business_day_id for s, _ in rows if s.business_day_id}
+    day_location_map = {}
+    if day_ids:
+        for bd_id, loc_id in db.query(BusinessDay.id, BusinessDay.location_id).filter(BusinessDay.id.in_(day_ids)).all():
+            day_location_map[bd_id] = loc_id
+    loc_ids = {v for v in day_location_map.values() if v}
+    loc_names = {l.id: l.name for l in db.query(Location).filter(Location.id.in_(loc_ids)).all()} if loc_ids else {}
+
+    def location_label(sale):
+        if not sale.business_day_id:
+            return "Legacy / Unknown"
+        loc_id = day_location_map.get(sale.business_day_id)
+        if not loc_id:
+            return "Main Location"
+        return loc_names.get(loc_id, "Main Location")
+
     out_rows = []
     for sale, product in rows:
         local_dt = sale.timestamp.replace(tzinfo=timezone.utc).astimezone(tz)
@@ -9802,7 +11366,9 @@ def _sales_export_rows(db, user, business, period, custom_start, custom_end):
         out_rows.append([
             sale.id, local_dt.strftime("%Y-%m-%d"), local_dt.strftime("%H:%M:%S"),
             product.name if product else "Deleted product", product.sku if product else "", (product.warehouse if product else "") or "",
+            location_label(sale),
             sale.quantity, unit_price, sale.total_price,
+            sale.currency_snapshot or "",
         ])
     return out_rows
 
@@ -9891,7 +11457,7 @@ def _close_business_day(db: Session, day: BusinessDay, user: User) -> dict:
     action = "BUSINESS_DAY_CLOSED_AGAIN" if is_reclose else "BUSINESS_DAY_CLOSED"
     add_audit(
         db, user, action, f"Closed business day {day.date}.",
-        business_day_id=day.id, metadata=snapshot,
+        business_day_id=day.id, location_id=day.location_id, metadata=snapshot,
     )
     # Closing finalizes a day's sales/expense totals — a Business Brain input
     # (history_days, velocity). Mark dirty rather than recomputing inline.
@@ -10297,7 +11863,7 @@ def sync_condition_driven_notifications(db: Session, business_id: int) -> None:
     safety net for a condition that changed without going through one of
     those hooks (e.g. min_stock_level itself was edited)."""
     for p in db.query(Product).filter(Product.business_id == business_id).all():
-        check_inventory_notifications(db, business_id, p)
+        check_inventory_notifications_for_product(db, business_id, p)
     check_expiry_notifications(db, business_id)
     db.commit()
 
