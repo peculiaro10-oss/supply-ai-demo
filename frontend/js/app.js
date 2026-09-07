@@ -1410,7 +1410,7 @@
                     healthy: "Healthy", lowStock: "Low Stock", outOfStock: "Out of Stock", allWarehouses: "All Warehouses", addProduct: "Add Product",
                     searchPlaceholder: "Search products, SKU, orders...", product: "Product / SKU", location: "Location", stock: "Stock",
                     wholesalePrice: "Wholesale Price", retailPrice: "Retail Price",
-                    welcomeUser: "Welcome, {name}", managingCompany: "Managing {company} [Code: {code}]",
+                    welcomeUser: "Welcome, {name}", managingCompany: "Managing {company} [Code: {code}]", managingCompanyOnly: "Managing {company}",
                     welcomeGuestHeading: "Welcome to Cauldra", welcomeGuestSub: "Explore inventory and procurement management. Register a business or sign in to get started.",
                     newSale: "New Sale",
                 },
@@ -1424,6 +1424,7 @@
                     businessVerifiedSuccess: "Business verified successfully!",
                     verifyBusinessFirst: "Verify the business and select an account role first.",
                     createNewPasswordFirst: "Please create a new password before continuing.",
+                    createPermanentPasswordTitle: "Create your permanent password",
                     passwordUpdatedSuccess: "Password updated successfully.",
                     signedInAsRole: "Successfully signed in as {role}.",
                 },
@@ -1594,6 +1595,10 @@
                     managersOnlyStaff: "Managers can only create Staff accounts.",
                     passwordComplexityError: "Temporary password must be at least 8 characters and contain uppercase, lowercase, and a number.",
                     passwordSameAsUsername: "Temporary password must be different from the username.",
+                    confirmTemporaryPassword: "Confirm Temporary Password",
+                    confirmTempPasswordPlaceholder: "Re-enter temporary password",
+                    tempPasswordTooShort: "Temporary password must be at least 6 characters.",
+                    tempPasswordMismatch: "Temporary passwords do not match.",
                     employeeCreatedSuccess: "Employee account created. The temporary password must be changed at first sign-in.",
                     createEmployeeFailed: "Failed to create employee.",
                     deleteEmployeeConfirmBody: 'Delete the account for "{username}" permanently?',
@@ -16681,7 +16686,13 @@
                 "my-profile": authed,
                 "business-profile": adminOrManager, // ownership-adjacent — stays role-based, see D in the final report
                 "billing": adminOrManager, // ownership/subscription control — hard role-based on purpose
+                // AI Credits & Usage only exists for a plan that actually
+                // includes AI credits — Core (currentAiEntitled === false)
+                // never sees this destination at all, not merely a disabled
+                // or empty version of it.
+                "ai-usage": adminOrManager && currentAiEntitled,
                 "activity-history": authed && hasFeaturePermission('activity history'),
+                "about": authed,
             };
             entries.settings = Object.values(entries).some(Boolean);
             return entries;
@@ -17132,7 +17143,12 @@
         // enforcement either way, this is only ever used to decide whether to show a
         // helpful upgrade prompt early.
         let currentAiEntitled = true;
-        const AI_GATED_FEATURE_NAMES = new Set(['business brain', 'ai center', 'predictive monitor']);
+        // Business Brain is deterministic/internal intelligence, not
+        // billable external AI (section 13) — it must never be blocked
+        // behind AI-plan entitlement, on the frontend or the backend (see
+        // main.py's business_brain()/business_brain_history(), which no
+        // longer depend on require_ai_access either).
+        const AI_GATED_FEATURE_NAMES = new Set(['ai center', 'predictive monitor']);
 
         function featureDisplayName(featureName) {
             const map = {
@@ -17364,7 +17380,8 @@
             const subEl = document.getElementById("welcome-sub-text");
             const roleBadgeEl = document.getElementById("user-role-badge");
             const welcomeRoleBadgeEl = document.getElementById("welcome-role-badge");
-            const copyLinkBtn = document.getElementById("banner-copy-link-btn");
+            const codeRowEl = document.getElementById("welcome-code-row");
+            const codeValueEl = document.getElementById("welcome-code-value");
 
             const bannerEl = document.getElementById("dynamic-welcome-banner");
             if (hasAuthenticatedBusinessContext()) {
@@ -17372,10 +17389,15 @@
                 const userNameUpper = (currentUserProfile.username || "").toUpperCase();
                 const positionText = currentUserProfile.position || "";
                 const role = (currentUserProfile.role || "").toLowerCase();
-                
+
                 if (headingEl) headingEl.innerText = t("dashboard.welcomeUser", { name: userNameUpper });
-                if (subEl) subEl.innerText = t("dashboard.managingCompany", { company: businessProfile.company_name, code: businessProfile.business_code });
-                if (copyLinkBtn) copyLinkBtn.classList.remove("hidden");
+                // Company name and Business ID are two separate lines now (see
+                // the welcome-code-row markup) — never combined into one
+                // sentence that wraps unpredictably on narrow screens.
+                if (subEl) subEl.innerText = t("dashboard.managingCompanyOnly", { company: businessProfile.company_name });
+                if (codeRowEl) codeRowEl.classList.remove("hidden");
+                if (codeRowEl) codeRowEl.classList.add("flex");
+                if (codeValueEl) codeValueEl.textContent = businessProfile.business_code || "—";
 
                 if (welcomeRoleBadgeEl) {
                     welcomeRoleBadgeEl.innerText = positionText;
@@ -17397,7 +17419,7 @@
                 if (bannerEl) bannerEl.classList.remove("signed-in");
                 if (headingEl) headingEl.innerText = t("dashboard.welcomeGuestHeading");
                 if (subEl) subEl.innerText = t("dashboard.welcomeGuestSub");
-                if (copyLinkBtn) copyLinkBtn.classList.add("hidden");
+                if (codeRowEl) { codeRowEl.classList.add("hidden"); codeRowEl.classList.remove("flex"); }
 
                 if (welcomeRoleBadgeEl) {
                     welcomeRoleBadgeEl.innerText = t("navigation.guest");
@@ -19275,6 +19297,9 @@
                 applyRoleRestrictions();
 
                 if (data.must_change_password) {
+                    const title = document.getElementById("password-change-title");
+                    if (title) title.textContent = t("auth.createPermanentPasswordTitle");
+                    document.getElementById("pw-change-cancel-btn")?.classList.add("hidden"); // non-dismissable
                     document.getElementById("password-change-modal").classList.remove("hidden");
                     document.getElementById("password-change-modal").style.display = "flex";
                     showToast(t("auth.createNewPasswordFirst"), "warning");
@@ -19480,6 +19505,193 @@
 
         function closeActivityHistoryModal() {
             document.getElementById("activity-history-modal")?.classList.add("hidden");
+        }
+
+        // ---------------------------------------------------------------------
+        // ABOUT / LEGAL — version/build/contact come from ONE source of truth,
+        // the backend's GET /public/app-config (see main.py), never a second
+        // hardcoded copy here. Cached in-memory for the session; About re-fetches
+        // fresh each open so a redeploy's new build number shows up without
+        // requiring the user to reload the page.
+        // ---------------------------------------------------------------------
+        async function openAboutModal() {
+            document.getElementById("about-modal")?.classList.remove("hidden");
+            try {
+                const res = await fetch(`${API_URL}/public/app-config`);
+                const data = await res.json();
+                document.getElementById("about-version").textContent = data.version || "—";
+                document.getElementById("about-build").textContent = data.build || "—";
+                const contactEl = document.getElementById("about-contact-email");
+                if (contactEl && data.contact_email) { contactEl.textContent = data.contact_email; contactEl.href = `mailto:${data.contact_email}`; }
+            } catch (_) { /* version/build/contact stay at their static fallback markup */ }
+        }
+        function closeAboutModal() { document.getElementById("about-modal")?.classList.add("hidden"); }
+
+        function openLegalDocModal(title, bodyHtml) {
+            document.getElementById("about-modal")?.classList.add("hidden");
+            const titleEl = document.getElementById("legal-doc-title");
+            if (titleEl) titleEl.innerHTML = `<i class="fa-solid fa-scale-balanced text-primary"></i> ${escapeHtml(title)}`;
+            const bodyEl = document.getElementById("legal-doc-body");
+            if (bodyEl) bodyEl.innerHTML = bodyHtml;
+            document.getElementById("legal-doc-modal")?.classList.remove("hidden");
+        }
+        function closeLegalDocModal() {
+            document.getElementById("legal-doc-modal")?.classList.add("hidden");
+            document.getElementById("about-modal")?.classList.remove("hidden");
+        }
+
+        // Shared draft-notice banner every legal document opens with — one
+        // definition, reused by all three, so the wording can never drift
+        // between them.
+        function legalDraftBanner() {
+            return `<div class="rounded-xl border border-warning/40 bg-warning/10 text-warning px-3 py-2 font-bold text-[10px] uppercase tracking-wide">DRAFT — REQUIRES LEGAL REVIEW BEFORE PUBLIC LAUNCH</div>`;
+        }
+        function legalSection(heading, bodyHtml) {
+            return `<div><h5 class="font-bold text-textMain text-[11px] mb-1">${escapeHtml(heading)}</h5><div>${bodyHtml}</div></div>`;
+        }
+
+        function openPrivacyPolicyModal() {
+            const s = legalSection;
+            const html = [
+                legalDraftBanner(),
+                s("1. Who operates Cauldra", `Cauldra is operated by [LEGAL ENTITY NAME TO BE CONFIRMED AFTER REGISTRATION]. Registered address: [REGISTERED ADDRESS TO BE CONFIRMED]. Jurisdiction: [JURISDICTION TO BE CONFIRMED]. Contact: <a class="text-primary hover:underline" href="mailto:contact@cohren.com">contact@cohren.com</a>.`),
+                s("2. Personal information we collect", `Name, username, email, phone number, avatar/profile photo, role, position, preferred language, email verification state, login/session/security information, and account activity/audit information.`),
+                s("3. Business information", `Business profile details; locations/branches; warehouses; products; inventory and stock levels; pricing; suppliers and their contact information; sales; expenses; purchase orders; Business Day records; employee/team information; notifications; audit/activity history; reporting and operational metrics; and Business Brain's own operational findings about your business.`),
+                s("4. Why Cauldra processes this data", `To create and secure accounts; verify email addresses; provide Cauldra's business-management functionality (inventory, sales, purchasing, expenses, Business Day); manage employee permissions; generate reports; manage subscriptions and billing; send transactional communications; prevent security incidents, fraud and abuse; maintain audit records; diagnose reliability/errors; and meet applicable legal obligations.`),
+                s("5. Authentication", `Cauldra uses Supabase for authentication and email verification. Passwords are never stored in plain text.`),
+                s("6. Payments", `Payment processing is handled by Paystack. Cauldra does not store full card numbers or CVV codes. Cauldra may retain limited billing metadata such as subscription status and transaction/payment references.`),
+                s("7. Email delivery", `Transactional emails (verification, password recovery, security and billing notices, and Purchase Order emails you choose to send) are delivered through Cauldra's email provider.`),
+                s("8. Error monitoring", `Cauldra uses Sentry for technical error and diagnostic monitoring, with security-sensitive information intended to be filtered before it reaches that system.`),
+                s("9. AI providers", `For the specific AI-powered features you choose to use (such as the margin advisor, AI chat, or invoice scanning), the information that feature needs is sent to the relevant AI provider (such as OpenAI or Google Gemini) to generate a response. Cauldra does not send your business data to an AI provider merely because you use the rest of the application.`),
+                s("10. Business Brain", `Business Brain is Cauldra's own deterministic, internal analysis of your business's data. It is not a third-party AI service and does not send your data to an external AI provider.`),
+                s("11. Local/browser storage", `Cauldra uses necessary session/authentication browser storage, and, where applicable, localStorage/sessionStorage, IndexedDB, and a service-worker cache to support offline use. Not every one of these is a "cookie" in the traditional sense.`),
+                s("12. Data sharing", `Cauldra does not sell personal data. Information may be shared with the service providers necessary to operate Cauldra (such as those named above).`),
+                s("13. Retention", `[RETENTION PERIODS TO BE CONFIRMED AND LEGALLY REVIEWED]. Some limited historical, audit, security, or billing records may be retained for longer where necessary for legal, security, fraud-prevention, or historical business-integrity reasons.`),
+                s("14. Deletion / disabled accounts", `Disabling an account, deleting a user, and deleting a business are different actions. Historical business records may retain identity snapshots (such as a name or role at the time of an action) for attribution even after a user is deleted.`),
+                s("15. International processing", `Cauldra's service providers may process information in countries other than your own, subject to applicable legal safeguards.`),
+                s("16. Your rights", `Subject to applicable law, you may have rights to access, correct, delete, restrict or object to the processing of, or withdraw consent for the use of your personal information, and to make privacy inquiries generally.`),
+                s("17. Age", `[MINIMUM ACCOUNT AGE / CONTRACTUAL CAPACITY RULE TO BE LEGALLY CONFIRMED]`),
+                s("18. Contact", `Privacy questions: <a class="text-primary hover:underline" href="mailto:contact@cohren.com">contact@cohren.com</a>`),
+            ].join("");
+            openLegalDocModal("Privacy Policy", html);
+        }
+
+        function openTermsOfServiceModal() {
+            const s = legalSection;
+            const html = [
+                legalDraftBanner(),
+                s("1. Legal entity", `[LEGAL ENTITY NAME TO BE CONFIRMED AFTER REGISTRATION]`),
+                s("2. Service description", `Cauldra is a business-management platform for inventory, sales, suppliers, purchase orders, expenses, teams, Business Day operations, reporting, and related operational workflows.`),
+                s("3. Account responsibilities", `You must provide accurate information, protect your credentials, use only accounts you're authorized to use, keep your contact details up to date, and report any suspected unauthorized access.`),
+                s("4. Business Admin responsibilities", `A Business Admin is responsible for inviting appropriate staff, assigning permissions responsibly, removing access when appropriate, and ensuring they have the authority to submit employee, vendor, and business information to Cauldra.`),
+                s("5. Acceptable use", `You may not: use Cauldra illegally; attempt unauthorized access; introduce malware; interfere with or abuse the service; impersonate another person or business; access another business's information without authority; deliberately bypass security or plan limits; or infringe intellectual property rights.`),
+                s("6. Subscription plans", `Plans differ by features and resource limits, and may bill monthly or annually. The Core plan has no billable external-AI entitlement; AI-enabled plans may include AI credits as described in the app.`),
+                s("7. Trial", `[TRIAL LENGTH TO BE CONFIRMED]. [AUTO-CHARGE AFTER TRIAL RULE TO BE CONFIRMED]. [TRIAL-END / PAYMENT-FAILURE RULE TO BE CONFIRMED]`),
+                s("8. Card verification", `Where onboarding uses a small, refundable card-verification transaction, that transaction is separate and distinct from your actual subscription charge.`),
+                s("9. Cancellation", `[CANCELLATION POLICY TO BE CONFIRMED]`),
+                s("10. Refunds", `[REFUND POLICY TO BE CONFIRMED AND LEGALLY REVIEWED]`),
+                s("11. Failed payment", `Access may be restricted or suspended according to Cauldra's billing rules. Cauldra does not promise immediate deletion of your data for a failed payment.`),
+                s("12. Plan limits", `Each plan has its own feature and resource limits, shown in the app.`),
+                s("13. AI features", `AI-generated output may be incomplete or inaccurate. You should review important business decisions rather than relying on AI output alone.`),
+                s("14. Your data", `You retain ownership of the business information you submit to Cauldra. Cauldra receives only the rights reasonably necessary to host, process, transmit, back up, and display that information to operate the service.`),
+                s("15. Cauldra's intellectual property", `Cauldra's branding, code, UI/design, documentation, and other proprietary technology remain Cauldra's intellectual property.`),
+                s("16. Third-party services", `Cauldra relies on third-party service providers (see the Privacy Policy) to operate the service.`),
+                s("17. Availability", `Cauldra aims to provide reliable service but does not guarantee uninterrupted or error-free operation.`),
+                s("18. Suspension / termination", `Cauldra may suspend or terminate access for security threats, fraud, illegal use, serious breach of these Terms, nonpayment, or to protect the service or its customers.`),
+                s("19. Liability", `[LIMITATION OF LIABILITY / INDEMNITY TO BE REVIEWED BY LAWYER]`),
+                s("20. Governing law", `[JURISDICTION TO BE CONFIRMED]. [GOVERNING LAW / DISPUTE TERMS TO BE LEGALLY REVIEWED]`),
+                s("21. Contact", `<a class="text-primary hover:underline" href="mailto:contact@cohren.com">contact@cohren.com</a>`),
+            ].join("");
+            openLegalDocModal("Terms of Service", html);
+        }
+
+        function openThirdPartyNoticesModal() {
+            // Audited against the actual shipped dependencies (requirements.txt
+            // and frontend/assets/vendor/) — not a fabricated list. Update this
+            // alongside requirements.txt / vendor/ whenever a dependency is
+            // actually added, removed, or upgraded.
+            const backend = [
+                ["FastAPI", "MIT"], ["Uvicorn", "BSD-3-Clause"], ["SQLAlchemy", "MIT"], ["Alembic", "MIT"],
+                ["psycopg", "LGPL-3.0"], ["boto3", "Apache-2.0"], ["supabase-py", "MIT"], ["passlib", "BSD-2-Clause"],
+                ["bcrypt", "Apache-2.0"], ["python-jose", "MIT"], ["PyJWT", "MIT"], ["python-multipart", "Apache-2.0"],
+                ["requests", "Apache-2.0"], ["python-dotenv", "BSD-3-Clause"], ["openai (Python SDK)", "Apache-2.0"],
+                ["google-genai", "Apache-2.0"], ["Pydantic", "MIT"], ["openpyxl", "MIT"], ["pywebpush", "MPL-2.0"],
+                ["sentry-sdk", "MIT"], ["phonenumbers", "Apache-2.0"],
+            ];
+            const frontend = [
+                ["Tailwind CSS", "MIT"], ["Font Awesome (Free)", "Font: SIL OFL 1.1 · Icons: CC BY 4.0 · Code: MIT"],
+                ["html5-qrcode", "Apache-2.0"], ["ZXing ('zxing.umd.js')", "Apache-2.0"], ["libphonenumber-js", "MIT"],
+            ];
+            const rows = (list) => list.map(([name, license]) => `<div class="flex items-center justify-between gap-2 py-1 border-b border-borderCol/60 last:border-0"><span class="text-textMain">${escapeHtml(name)}</span><span class="text-textSec text-[10px] font-mono">${escapeHtml(license)}</span></div>`).join("");
+            const html = [
+                `<p class="text-[10px]">Cauldra is built with the help of the following open-source software. Cauldra does not claim ownership of any third-party library listed here; each remains the property of its respective authors under its own license.</p>`,
+                legalSection("Backend (Python)", rows(backend)),
+                legalSection("Frontend", rows(frontend)),
+            ].join("");
+            openLegalDocModal("Third-party Licenses / Notices", html);
+        }
+
+        // ---------------------------------------------------------------------
+        // AI CREDITS & USAGE — renders the SAME server-authoritative
+        // /subscription/usage response Subscription & Billing already reads
+        // (usage_summary() in main.py); this page just presents the
+        // included/used/remaining/per-feature figures on their own dedicated
+        // screen instead of folding them into Billing.
+        // ---------------------------------------------------------------------
+        async function openAiUsageModal() {
+            const modal = document.getElementById("ai-usage-modal");
+            const body = document.getElementById("ai-usage-body");
+            if (!modal || !body) return;
+            modal.classList.remove("hidden");
+            body.innerHTML = `<div class="text-center py-6 text-textSec"><i class="fa-solid fa-spinner fa-spin mr-1.5"></i> Loading usage…</div>`;
+            try {
+                const res = await fetch(`${API_URL}/subscription/usage`, { headers: { "Authorization": `Bearer ${authToken}` } });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || "Could not load AI usage.");
+                renderAiUsageModal(data);
+            } catch (e) {
+                body.innerHTML = `<div class="text-center py-6 text-danger text-[11px]"><i class="fa-solid fa-triangle-exclamation mr-1.5"></i>${escapeHtml(friendlyErrorMessage(e.message, "Could not load AI usage right now."))}</div>`;
+            }
+        }
+        function closeAiUsageModal() { document.getElementById("ai-usage-modal")?.classList.add("hidden"); }
+
+        function renderAiUsageModal(data) {
+            const body = document.getElementById("ai-usage-body");
+            if (!body) return;
+            const included = data.included_ai_credits || 0;
+            const used = data.used_ai_credits || 0;
+            const remaining = data.remaining_ai_credits || 0;
+            const pct = included > 0 ? Math.min(100, Math.round((used / included) * 100)) : 0;
+            const barColor = pct >= 90 ? "bg-danger" : pct >= 70 ? "bg-warning" : "bg-primary";
+            const byFeature = data.usage_by_feature || [];
+            body.innerHTML = `
+                <div class="rounded-xl bg-bgMain border border-borderCol p-3 space-y-2">
+                    <div class="flex items-center justify-between text-[10px] text-textSec"><span>Used this period</span><span>${used} / ${included} credits</span></div>
+                    <div class="h-2 rounded-full bg-borderCol overflow-hidden"><div class="h-full ${barColor} rounded-full" style="width:${pct}%"></div></div>
+                    <div class="flex items-center justify-between text-[10px] text-textSec"><span>${remaining} credits remaining</span><span>${pct}% used</span></div>
+                </div>
+                <div class="grid grid-cols-2 gap-2 text-[10px]">
+                    <div class="rounded-xl bg-bgMain border border-borderCol p-2.5"><span class="block text-textSec uppercase tracking-wide text-[9px] font-bold mb-0.5">Billing Period</span>${formatBusinessDate(data.billing_period_start, {dateStyle:'medium'})} – ${formatBusinessDate(data.billing_period_end, {dateStyle:'medium'})}</div>
+                    <div class="rounded-xl bg-bgMain border border-borderCol p-2.5"><span class="block text-textSec uppercase tracking-wide text-[9px] font-bold mb-0.5">Overage this period</span>${data.overage_credits ? `${data.overage_credits} credits (${formatCurrency(data.estimated_overage_charge || 0)})` : "None"}</div>
+                </div>
+                <div>
+                    <h5 class="font-bold text-[10px] text-textSec uppercase tracking-wider mb-1.5">Usage by Feature</h5>
+                    ${byFeature.length ? byFeature.map(f => `
+                        <div class="flex items-center justify-between py-1.5 border-b border-borderCol/60 last:border-0">
+                            <span>${escapeHtml(f.label)}</span>
+                            <span class="text-textSec text-[10px]">${f.calls} call${f.calls === 1 ? '' : 's'} · ${f.credits_consumed} credits</span>
+                        </div>
+                    `).join("") : `<div class="text-center py-4 text-textSec text-[11px]">No AI feature usage yet this period.</div>`}
+                </div>
+                <div>
+                    <h5 class="font-bold text-[10px] text-textSec uppercase tracking-wider mb-1.5">Credit Cost Reference</h5>
+                    <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] text-textSec">
+                        <span>Margin Advisor — 2</span><span>AI Chat — 2</span>
+                        <span>Inventory Insight — 5</span><span>Predictive Analysis — 8</span>
+                        <span>Invoice Scanning — 10</span><span>Complex Analysis — 10</span>
+                    </div>
+                </div>
+            `;
         }
 
         // Employees: manage/view business employees. This is intentionally a
@@ -20532,6 +20744,7 @@
             document.getElementById("emp-phone").value = "";
             document.getElementById("emp-username").value = "";
             document.getElementById("emp-password").value = "";
+            document.getElementById("emp-password-confirm").value = "";
             document.getElementById("emp-position").value = "";
             document.getElementById("add-employee-modal").classList.remove("hidden");
         }
@@ -20599,10 +20812,21 @@
             const phone = normalizeBusinessPhone(document.getElementById("emp-phone").value.trim());
             const username = document.getElementById("emp-username").value.trim();
             const password = document.getElementById("emp-password").value;
+            const passwordConfirm = document.getElementById("emp-password-confirm").value;
             const position = document.getElementById("emp-position").value.trim();
 
-            if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password)) {
-                showToast(t("team.passwordComplexityError"), "error");
+            // Temporary-password rule is deliberately weaker than a
+            // permanent password's (see validate_temp_password_strength()
+            // on the backend, which is authoritative here) — just a modest
+            // minimum length, no complexity requirement, so it stays easy
+            // to speak/type/hand to a new hire. The employee replaces it
+            // with a full-strength permanent password at first sign-in.
+            if (password.length < 6) {
+                showToast(t("team.tempPasswordTooShort"), "error");
+                return;
+            }
+            if (password !== passwordConfirm) {
+                showToast(t("team.tempPasswordMismatch"), "error");
                 return;
             }
             if (password.toLowerCase() === username.toLowerCase()) {

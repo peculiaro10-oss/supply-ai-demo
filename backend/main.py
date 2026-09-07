@@ -577,6 +577,44 @@ class BusinessProfile(Base):
 
     users = relationship("User", back_populates="business_rel", cascade="all, delete-orphan")
 
+class Location(Base):
+    """ONE Business Profile has MANY Locations/Branches; a Location in turn
+    owns Warehouses. Every business (including one that predates this
+    table) always has at least one Location — migration 0024 creates a
+    "Main Location" for every existing business, populated from
+    BusinessProfile's own existing country/city/timezone/currency/phone/
+    email/address fields (never fabricated), and reassigns every existing
+    Warehouse to it, so nothing is orphaned.
+
+    BusinessProfile's own country/currency/timezone/phone/email/address
+    columns are DELIBERATELY left in place, not removed — they still back
+    the original single-location UI/flows (registration, Business Profile
+    settings) and other code that reads them directly. Locations are the
+    real, growing operational model; BusinessProfile's fields become that
+    business's default/first Location's values at the moment of migration
+    and are not kept in sync afterward — editing a Location does not
+    silently rewrite BusinessProfile, and vice versa. Removing the
+    BusinessProfile columns entirely is a separate, later deprecation step
+    once every remaining reader has migrated to Locations."""
+    __tablename__ = "locations"
+    id = Column(Integer, primary_key=True, index=True)
+    business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    country = Column(String, nullable=True)
+    country_code = Column(String, nullable=True)
+    city = Column(String, nullable=True)
+    timezone = Column(String, nullable=True)
+    currency = Column(String, nullable=True)
+    contact_phone = Column(String, nullable=True)
+    # Operational contact info ONLY — never a login identity, never used for
+    # authentication or account recovery of any kind.
+    contact_email = Column(String, nullable=True)
+    address = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    is_main = Column(Boolean, default=False, nullable=False)  # the migration-created default location for a pre-existing business
+    created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(SQLDateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
 class Warehouse(Base):
     __tablename__ = "warehouses"
     __table_args__ = (UniqueConstraint("business_id", "name", name="uq_warehouse_business_name"),)
@@ -586,6 +624,14 @@ class Warehouse(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(SQLDateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    # Nullable during the transition: migration 0024 backfills every
+    # EXISTING warehouse to its business's Main Location, but the column
+    # itself stays nullable so a warehouse can never become an orphaned/
+    # broken row if a location is later deleted (ondelete="SET NULL", not
+    # CASCADE — a warehouse must never silently disappear because its
+    # location did). create_warehouse() below always sets this for new
+    # warehouses going forward.
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="SET NULL"), nullable=True, index=True)
 
 class User(Base):
     __tablename__ = "users"
@@ -727,6 +773,40 @@ class PurchaseOrder(Base):
     # 0020_purchase_order_sent_at for how existing SENT rows (created before
     # this column existed) were backfilled.
     sent_at = Column(SQLDateTime, nullable=True)
+
+class PurchaseOrderRequirement(Base):
+    """Durable, structured record of "this PO's line is covering this
+    product's current restock shortage" — the minimum schema needed to
+    prevent generating a second, duplicate Purchase Order for a shortage a
+    DRAFT or SENT-but-unresolved PO already covers, WITHOUT parsing the
+    human-readable email_draft text (see generate_po()).
+
+    One row per (business, product) pair is active at a time — enforced by
+    a partial unique index on (business_id, product_id) WHERE resolved_at
+    IS NULL (migration 0023), which is also what makes duplicate-generation
+    prevention concurrency-safe: two simultaneous requests racing to cover
+    the same product can only ever have one INSERT succeed, and the loser
+    is treated as "already covered", not as a duplicate.
+
+    resolved_at is set the moment the product's stock is genuinely
+    replenished back above its min_stock_level (see
+    resolve_purchase_order_requirements(), called from update_stock() and
+    the refund-restock path) — NOT when the PO is sent. A SENT PO whose
+    shortage hasn't actually been restocked yet must keep blocking a
+    duplicate PO; only real replenishment closes the requirement and allows
+    a later, genuinely NEW shortage event to generate a fresh one.
+
+    Deleting the PO row (DRAFT deletion; see delete_po()) cascades to
+    delete its requirement rows here too — this is precisely what "deleting
+    a DRAFT releases the requirements it covered" means at the schema
+    level, no extra code needed for that part."""
+    __tablename__ = "purchase_order_requirements"
+    id = Column(Integer, primary_key=True, index=True)
+    business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False, index=True)
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
+    resolved_at = Column(SQLDateTime, nullable=True)
 
 class Expense(Base):
     """A business expense transaction. Deliberately mirrors PurchaseOrder's
@@ -934,6 +1014,16 @@ class BusinessDay(Base):
     __tablename__ = "business_days"
     id = Column(Integer, primary_key=True, index=True)
     business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Additive, nullable location-compatibility column (section 4's "minimum
+    # acceptable safe implementation" — NOT a rearchitecture of Business Day
+    # into genuinely separate per-location sessions/dashboards, which stays
+    # future work). NULL means "this business's Main Location" for a
+    # single-location business or a pre-existing session — every existing
+    # query that filters purely on business_id is completely unaffected.
+    # start_business_day() stamps the caller's business's current default
+    # location going forward; nothing currently combines two locations'
+    # figures into one total (see location-scoped reporting notes).
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="SET NULL"), nullable=True, index=True)
     date = Column(String, nullable=False, index=True)
     opened_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     closed_at = Column(SQLDateTime, nullable=True)
@@ -1705,6 +1795,13 @@ for _plan_id, _plan in PLAN_CONFIG.items():
     _plan["paystack_monthly_plan_code"] = os.getenv(f"PAYSTACK_{_plan_id.upper()}_MONTHLY_PLAN_CODE", "").strip()
     _plan["paystack_annual_plan_code"] = os.getenv(f"PAYSTACK_{_plan_id.upper()}_ANNUAL_PLAN_CODE", "").strip()
 AI_CREDIT_WEIGHTS = {"margin_advisor": 2, "chat": 2, "inventory_insight": 5, "predictive_analysis": 8, "invoice_ocr": 10, "complex_analysis": 10}
+# Human-readable labels for the AI Credits & Usage settings page's
+# per-feature breakdown — purely cosmetic, the actual accounting keys off
+# AI_CREDIT_WEIGHTS above (the single source of truth for cost).
+AI_FEATURE_LABELS = {
+    "margin_advisor": "Margin Advisor", "chat": "AI Chat", "inventory_insight": "Inventory Insight",
+    "predictive_analysis": "Predictive Analysis", "invoice_ocr": "Invoice/Receipt Scanning", "complex_analysis": "Complex Analysis",
+}
 # Maps a plan id to the next plan id up — used only to name the next upgrade
 # target in messages. enterprise has no plan above it, so it maps to itself.
 UPGRADE_PATH = {"core": "starter", "starter": "business", "business": "enterprise", "enterprise": "enterprise"}
@@ -2494,6 +2591,23 @@ def validate_password_strength(password: str):
         raise HTTPException(status_code=400, detail="Password must be 72 characters or fewer.")
     if len(password) < 8 or not re.search(r"[A-Z]", password) or not re.search(r"[a-z]", password) or not re.search(r"\d", password):
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters and include uppercase, lowercase, and a number.")
+
+def validate_temp_password_strength(password: str):
+    """Deliberately WEAKER than validate_password_strength() — a temporary
+    password is something the creator sets and communicates to a new hire
+    or a locked-out employee (spoken aloud, texted, written on a note), not
+    something the employee themselves chose, and it can never actually be
+    used long-term: must_change_password=True forces it to be replaced with
+    a full-strength permanent password at first login (see
+    POST /auth/change-password). Reusing the full complexity policy here
+    only makes temp passwords harder to communicate for zero real security
+    benefit. Still genuinely validated — not blank, not absurdly short —
+    just not held to uppercase/lowercase/digit complexity."""
+    password = password or ""
+    if len(password) > 72:
+        raise HTTPException(status_code=400, detail="Temporary password must be 72 characters or fewer.")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Temporary password must be at least 6 characters.")
 
 def generate_dynamic_business_code(db: Session, business_name: str) -> str:
     words = business_name.strip().split()
@@ -4099,8 +4213,10 @@ def _create_business_day_session(db: Session, business_id: int, opener: Optional
     different things when reconstructing what happened, so they must not be
     logged under the same action code."""
     today = business_local_today(db, business_id)
+    default_location = get_default_location(db, business_id)
     day = BusinessDay(
         business_id=business_id, date=today, is_open=True, status="OPEN",
+        location_id=default_location.id if default_location else None,
         opened_by_id=opener.id if opener else None,
         opened_by_name=opener.username if opener else None,
         opened_by_role=opener.role if opener else None,
@@ -4661,9 +4777,37 @@ class BusinessProfileSchema(BaseModel):
 
 class WarehouseCreate(BaseModel):
     name: str
+    # Optional for backward compatibility with any existing caller that
+    # doesn't send it yet — create_warehouse() falls back to the business's
+    # Main Location when omitted, so nothing breaks during the transition.
+    location_id: Optional[int] = None
 
 class WarehouseUpdate(BaseModel):
     name: str
+    is_active: Optional[bool] = None
+    location_id: Optional[int] = None
+
+class LocationCreate(BaseModel):
+    name: str
+    country: Optional[str] = None
+    country_code: Optional[str] = None
+    city: Optional[str] = None
+    timezone: Optional[str] = None
+    currency: Optional[str] = None
+    contact_phone: Optional[str] = None
+    contact_email: Optional[EmailStr] = None
+    address: Optional[str] = None
+
+class LocationUpdate(BaseModel):
+    name: Optional[str] = None
+    country: Optional[str] = None
+    country_code: Optional[str] = None
+    city: Optional[str] = None
+    timezone: Optional[str] = None
+    currency: Optional[str] = None
+    contact_phone: Optional[str] = None
+    contact_email: Optional[EmailStr] = None
+    address: Optional[str] = None
     is_active: Optional[bool] = None
 
 class ProductCreate(BaseModel):
@@ -5017,6 +5161,18 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
         )
         db.add(new_biz)
         db.flush()
+        # Every business always has at least one Location, from the moment
+        # it exists — a brand-new registration gets its Main Location here,
+        # seeded from the exact same country/currency/timezone/phone/email/
+        # address values just resolved for BusinessProfile itself, so the
+        # two start out consistent (they are not kept in sync afterward —
+        # see the Location model docstring).
+        db.add(Location(
+            business_id=new_biz.id, name="Main Location", country=new_biz.country, country_code=new_biz.country_code,
+            timezone=new_biz.timezone, currency=new_biz.currency, contact_phone=new_biz.phone, contact_email=new_biz.email,
+            address=new_biz.address, is_active=True, is_main=True,
+        ))
+        db.flush()
 
         admin = User(
             username=data.username.strip(), password=hashed_password, role="admin",
@@ -5148,7 +5304,7 @@ def authenticate_user_for_business(db: Session, business_code: str, username: st
     password_ok = verify_password(password, user.password) if user else False
     print(f"[auth-diag {diag_id}] PASSWORD VERIFICATION result={password_ok}")
 
-    if not user or not password_ok or user.disabled:
+    if not user or not password_ok:
         record_failure(db, scope, key)
         if client_ip: record_failure(db, scope + "-ip", client_ip)
         if user:
@@ -5159,9 +5315,19 @@ def authenticate_user_for_business(db: Session, business_code: str, username: st
             # dedup/threshold check) — never on every subsequent locked-out
             # attempt.
             check_login_lockout_notification(db, user, scope, key)
-        reason = "user_not_found" if not user else ("password_mismatch" if not password_ok else "user_disabled")
+        reason = "user_not_found" if not user else "password_mismatch"
         print(f"[auth-diag {diag_id}] RESULT status=401 reason={reason}")
         raise HTTPException(status_code=401, detail="Incorrect username or password.")
+    if user.disabled:
+        # The password was just proven CORRECT above — only now is it safe
+        # to reveal disabled status at all (an attacker who doesn't already
+        # know the real password still only ever sees the generic 401
+        # above). This is deliberately NOT a failed-password attempt: no
+        # record_failure(), no lockout accounting, no token/session of any
+        # kind is issued — the caller below never gets far enough to do
+        # either since this raises first.
+        print(f"[auth-diag {diag_id}] RESULT status=403 reason=user_disabled_correct_password")
+        raise HTTPException(status_code=403, detail="This account is currently disabled. Contact your administrator.")
     clear_failures(db, scope, key)
     if client_ip: clear_failures(db, scope + "-ip", client_ip)
     # V31: cheap activity signal - piggybacks on this already-happening login,
@@ -5970,7 +6136,7 @@ def create_user(data: CreateUserRequest, user: User = Depends(get_current_user),
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     current = db.query(User).filter(User.business_id == user.business_id, User.role == role).count()
     check_plan_limit(db, business, role, current)
-    validate_password_strength(data.password)
+    validate_temp_password_strength(data.password)
     if normalize_username(data.username) == normalize_username(user.username):
         raise HTTPException(status_code=409, detail="That username is already in use in this business.")
     exists = next((u for u in db.query(User).filter(User.business_id == user.business_id).all() if normalize_username(u.username) == normalize_username(data.username)), None)
@@ -6020,7 +6186,9 @@ def reset_user_password(user_id: int, data: AdminPasswordResetRequest, actor: Us
     target = db.query(User).filter(User.id == user_id, User.business_id == actor.business_id).first()
     if not target: raise HTTPException(status_code=404, detail="Account is unavailable.")
     if actor.role == "manager" and target.role != "staff": raise HTTPException(status_code=403, detail="Managers can only reset Staff accounts.")  # scope
-    validate_password_strength(data.new_password)
+    if target.id == actor.id:
+        raise HTTPException(status_code=400, detail="You cannot reset your own password here. Use Settings > My Profile > Change Password.")
+    validate_temp_password_strength(data.new_password)
     if target.previous_password_hash and verify_password(data.new_password, target.previous_password_hash):
         raise HTTPException(status_code=400, detail="Last created password cannot be used.")
     target.previous_password_hash = target.password
@@ -6306,7 +6474,99 @@ def get_warehouse_for_business(db: Session, business_id: int, name: str, active_
 
 def serialize_warehouse(w: Warehouse, db: Session) -> dict:
     sku_count = db.query(WarehouseStock.product_id).filter(WarehouseStock.business_id == w.business_id, WarehouseStock.warehouse == w.name).distinct().count()
-    return {"id": w.id, "name": w.name, "is_active": w.is_active, "sku_count": sku_count, "created_at": to_utc_iso(w.created_at)}
+    location = db.query(Location).filter(Location.id == w.location_id).first() if w.location_id else None
+    return {"id": w.id, "name": w.name, "is_active": w.is_active, "sku_count": sku_count, "created_at": to_utc_iso(w.created_at),
+            "location_id": w.location_id, "location_name": location.name if location else None}
+
+def get_default_location(db: Session, business_id: int) -> Optional["Location"]:
+    """The location a NEW warehouse/Business Day is attached to when the
+    caller doesn't specify one — the migration-created (or first-created)
+    Main Location, falling back to whatever active location exists at all.
+    Returns None only for a business with zero locations, which migration
+    0024 guarantees never happens for a pre-existing business; a genuinely
+    new business gets its Main Location created at registration (see
+    register_business)."""
+    return (
+        db.query(Location).filter(Location.business_id == business_id, Location.is_main == True).first()
+        or db.query(Location).filter(Location.business_id == business_id, Location.is_active == True).order_by(Location.id.asc()).first()
+    )
+
+def serialize_location(l: "Location", db: Session) -> dict:
+    warehouse_count = db.query(Warehouse).filter(Warehouse.location_id == l.id, Warehouse.is_active == True).count()
+    return {
+        "id": l.id, "name": l.name, "country": l.country, "country_code": l.country_code, "city": l.city,
+        "timezone": l.timezone, "currency": l.currency, "contact_phone": l.contact_phone, "contact_email": l.contact_email,
+        "address": l.address, "is_active": l.is_active, "is_main": l.is_main, "warehouse_count": warehouse_count,
+        "created_at": to_utc_iso(l.created_at),
+    }
+
+# -----------------------------------------------------------------------------
+# LOCATIONS / BRANCHES — one Business Profile has many; see the Location
+# model docstring for why BusinessProfile's own country/currency/etc. columns
+# stay in place rather than being removed.
+# -----------------------------------------------------------------------------
+@app.get("/locations/")
+def list_locations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Read access matches Business Profile's own existing rule (Admin/Manager
+    # read; see get_business_profile) — Locations are business-identity-
+    # adjacent information, not a Staff-facing operational screen.
+    if user.role not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Business location information is managed by an Admin.")
+    rows = db.query(Location).filter(Location.business_id == user.business_id).order_by(Location.is_main.desc(), Location.name.asc()).all()
+    return [serialize_location(l, db) for l in rows]
+
+@app.post("/locations/")
+def create_location(data: LocationCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only Admins can create business locations.")
+    name = data.name.strip()
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Location name must contain at least 2 characters.")
+    duplicate = db.query(Location).filter(Location.business_id == user.business_id, func.lower(Location.name) == name.casefold()).first()
+    if duplicate:
+        raise HTTPException(status_code=409, detail="A location with that name already exists.")
+    row = Location(
+        business_id=user.business_id, name=name, country=data.country, country_code=data.country_code, city=data.city,
+        timezone=data.timezone, currency=data.currency, contact_phone=data.contact_phone,
+        contact_email=str(data.contact_email) if data.contact_email else None, address=data.address, is_active=True, is_main=False,
+    )
+    db.add(row); db.flush()
+    add_audit(db, user, "LOCATION_CREATED", f"Created location {name}.", action_category="BUSINESS_SETTINGS", resource_type="location", resource_id=row.id)
+    db.commit(); db.refresh(row)
+    return serialize_location(row, db)
+
+@app.patch("/locations/{location_id}")
+def update_location(location_id: int, data: LocationUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only Admins can edit business locations.")
+    row = db.query(Location).filter(Location.id == location_id, Location.business_id == user.business_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Location not found.")
+    if data.name is not None:
+        new_name = data.name.strip()
+        if len(new_name) < 2:
+            raise HTTPException(status_code=400, detail="Location name must contain at least 2 characters.")
+        duplicate = db.query(Location).filter(Location.business_id == user.business_id, Location.id != row.id, func.lower(Location.name) == new_name.casefold()).first()
+        if duplicate:
+            raise HTTPException(status_code=409, detail="A location with that name already exists.")
+        row.name = new_name
+    for field in ("country", "country_code", "city", "timezone", "currency", "contact_phone", "address"):
+        value = getattr(data, field)
+        if value is not None:
+            setattr(row, field, value)
+    if data.contact_email is not None:
+        row.contact_email = str(data.contact_email)
+    if data.is_active is not None:
+        if row.is_main and not data.is_active:
+            raise HTTPException(status_code=400, detail="The main location cannot be deactivated.")
+        active_warehouses = db.query(Warehouse).filter(Warehouse.location_id == row.id, Warehouse.is_active == True).count()
+        if not data.is_active and active_warehouses:
+            raise HTTPException(status_code=400, detail="Reassign or deactivate this location's warehouses before deactivating it.")
+        row.is_active = bool(data.is_active)
+    row.updated_at = datetime.utcnow()
+    add_audit(db, user, "LOCATION_UPDATED", f"Updated location {row.name}.", action_category="BUSINESS_SETTINGS", resource_type="location", resource_id=row.id)
+    db.commit(); db.refresh(row)
+    return serialize_location(row, db)
 
 @app.get("/warehouses/")
 def list_warehouses(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -6319,19 +6579,30 @@ def create_warehouse(data: WarehouseCreate, user: User = Depends(get_current_use
     name = data.name.strip()
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Warehouse name must contain at least 2 characters.")
+    # A warehouse must belong to a location in THIS business — an omitted
+    # location_id falls back to the Main Location (compatibility with any
+    # existing caller that doesn't send one yet), never silently to no
+    # location and never to another business's location.
+    if data.location_id is not None:
+        location = db.query(Location).filter(Location.id == data.location_id, Location.business_id == user.business_id, Location.is_active == True).first()
+        if not location:
+            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+    else:
+        location = get_default_location(db, user.business_id)
     existing = db.query(Warehouse).filter(Warehouse.business_id == user.business_id, func.lower(Warehouse.name) == name.casefold()).first()
     if existing:
         if not existing.is_active:
             business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
             check_plan_limit(db, business, "warehouse", db.query(Warehouse).filter(Warehouse.business_id == user.business_id, Warehouse.is_active == True).count())
             existing.is_active = True
+            existing.location_id = location.id if location else existing.location_id
             existing.updated_at = datetime.utcnow()
             db.commit(); db.refresh(existing)
             return serialize_warehouse(existing, db)
         raise HTTPException(status_code=409, detail="That warehouse already exists in this business.")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     check_plan_limit(db, business, "warehouse", db.query(Warehouse).filter(Warehouse.business_id == user.business_id, Warehouse.is_active == True).count())
-    row = Warehouse(business_id=user.business_id, name=name, is_active=True)
+    row = Warehouse(business_id=user.business_id, name=name, is_active=True, location_id=location.id if location else None)
     db.add(row); db.flush()
     add_audit(db, user, "WAREHOUSE_CREATED", f"Created warehouse {name}.", action_category="WAREHOUSE", resource_type="warehouse", resource_id=row.id)
     db.commit(); db.refresh(row)
@@ -6349,6 +6620,11 @@ def update_warehouse(warehouse_id: int, data: WarehouseUpdate, user: User = Depe
     duplicate = db.query(Warehouse).filter(Warehouse.business_id == user.business_id, Warehouse.id != row.id, func.lower(Warehouse.name) == new_name.casefold()).first()
     if duplicate:
         raise HTTPException(status_code=409, detail="That warehouse already exists in this business.")
+    if data.location_id is not None:
+        location = db.query(Location).filter(Location.id == data.location_id, Location.business_id == user.business_id, Location.is_active == True).first()
+        if not location:
+            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+        row.location_id = location.id
     old_name = row.name
     if old_name != new_name:
         db.query(Product).filter(Product.business_id == user.business_id, Product.warehouse == old_name).update({Product.warehouse: new_name}, synchronize_session=False)
@@ -6991,6 +7267,8 @@ def update_stock(product_id: int, data: StockUpdate, user: User = Depends(get_cu
     )
     mark_business_brain_dirty(db, user.business_id)
     check_inventory_notifications(db, user.business_id, p)
+    if data.quantity_change > 0:
+        resolve_purchase_order_requirements(db, user.business_id, p.id)
     add_audit(
         db, user, "STOCK_ADJUSTED", f"Adjusted stock for {p.name} in {warehouse_name} by {data.quantity_change:+d}.",
         action_category="INVENTORY", resource_type="product", resource_id=p.id,
@@ -7815,7 +8093,7 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
     return _business_brain_meta(db, business_id)
 
 @app.get("/business-brain")
-def business_brain(user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
+def business_brain(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if business and (business.business_brain_dirty or business.business_brain_refreshed_at is None):
         if _try_claim_business_brain_refresh(db, user.business_id):
@@ -7883,7 +8161,7 @@ def business_brain(user: User = Depends(require_ai_access), db: Session = Depend
     return output
 
 @app.post("/business-brain/recommendations/{recommendation_id}/action")
-def action_business_brain_recommendation(recommendation_id: int, payload: BusinessBrainRecommendationAction, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
+def action_business_brain_recommendation(recommendation_id: int, payload: BusinessBrainRecommendationAction, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "business_brain.manage")
     row = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.id == recommendation_id, BusinessBrainRecommendation.business_id == user.business_id).first()
     if not row: raise HTTPException(status_code=404, detail="Recommendation not found.")
@@ -7938,7 +8216,7 @@ def business_brain_history(
     date_to: Optional[str] = Query(None),
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=50),
-    user: User = Depends(require_ai_access), db: Session = Depends(get_db),
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """Paginated long-term Business Brain archive. Filtering and pagination
     happen in the database — the browser never downloads a whole multi-year
@@ -8311,6 +8589,24 @@ def get_purchase_orders(user: User = Depends(get_current_user), db: Session = De
     return out
 
 @app.post("/purchase-orders/generate")
+def resolve_purchase_order_requirements(db: Session, business_id: int, product_id: int) -> None:
+    """Call this whenever a product's stock genuinely increases (manual
+    stock adjustment, refund restock) — closes out any still-open
+    requirement row for this product once it's no longer low-stock, so a
+    LATER, independent shortage can generate a fresh Purchase Order instead
+    of staying permanently blocked by an old, already-resolved one. Safe to
+    call unconditionally; it only ever touches rows that are both open
+    (resolved_at IS NULL) and for a product that has actually recovered
+    above its min_stock_level."""
+    p = db.query(Product).filter(Product.id == product_id, Product.business_id == business_id).first()
+    if not p or p.quantity <= p.min_stock_level:
+        return
+    db.query(PurchaseOrderRequirement).filter(
+        PurchaseOrderRequirement.business_id == business_id,
+        PurchaseOrderRequirement.product_id == product_id,
+        PurchaseOrderRequirement.resolved_at.is_(None),
+    ).update({PurchaseOrderRequirement.resolved_at: datetime.utcnow()}, synchronize_session=False)
+
 def generate_po(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "po.create")
     # No subscription/plan-limit check here, on purpose. A generated PO always
@@ -8321,16 +8617,54 @@ def generate_po(user: User = Depends(get_current_user), db: Session = Depends(ge
     # dispatch_po_email() and confirm_po_whatsapp_sent()).
     low_stock = db.query(Product).filter(Product.business_id == user.business_id, Product.quantity <= Product.min_stock_level).all()
     if not low_stock: raise HTTPException(status_code=400, detail="No low stock items requiring restock.")
-    total_cost = sum(p.cost_price * max(p.min_stock_level * 2, 1) for p in low_stock)
-    items = ", ".join([f"{p.name} ({max(p.min_stock_level * 2, 1)} units)" for p in low_stock])
+    # Duplicate-prevention (section 17): a product already covered by an
+    # open requirement (its shortage is already represented in a DRAFT, or
+    # in a SENT PO that hasn't actually been restocked yet — resolved_at is
+    # what tracks "actually restocked", not the PO's own status) is skipped
+    # entirely rather than duplicated into a second PO.
+    already_covered_ids = {
+        r[0] for r in db.query(PurchaseOrderRequirement.product_id).filter(
+            PurchaseOrderRequirement.business_id == user.business_id,
+            PurchaseOrderRequirement.resolved_at.is_(None),
+        ).all()
+    }
+    uncovered = [p for p in low_stock if p.id not in already_covered_ids]
+    if not uncovered:
+        raise HTTPException(status_code=400, detail="All current restock requirements are already covered by existing purchase orders.")
+    total_cost = sum(p.cost_price * max(p.min_stock_level * 2, 1) for p in uncovered)
+    items = ", ".join([f"{p.name} ({max(p.min_stock_level * 2, 1)} units)" for p in uncovered])
     draft = f"Please confirm availability for: {items}."
     po = PurchaseOrder(status="DRAFT", total_estimated_cost=total_cost, email_draft=draft, business_id=user.business_id, owner_id=None)
-    db.add(po); db.flush(); add_audit(db, user, "PURCHASE_ORDER_CREATED", f"Generated purchase order #{po.id}.", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id)
-    create_notification(
-        db, business_id=user.business_id, category="purchase_order", severity="info", type="PO_GENERATED",
-        title="Purchase order generated", message=f"Purchase order #{po.id} was generated for {len(low_stock)} low-stock item(s).",
-        related_entity_type="purchase_order", related_entity_id=po.id, deep_link=f"purchase_order:{po.id}",
-    )
+    db.add(po); db.flush()
+    # One requirement row per newly-covered product. A concurrent request
+    # racing to cover the SAME product is caught by the partial unique
+    # index (business_id, product_id) WHERE resolved_at IS NULL (migration
+    # 0023) — per-row, not per-PO, so a race only ever drops the specific
+    # product(s) that lost the race, never the whole PO.
+    covered_names = []
+    for p in uncovered:
+        # Each attempt runs inside its own SAVEPOINT (begin_nested): if the
+        # partial unique index rejects it (another concurrent request just
+        # covered this exact product), only THIS savepoint rolls back —
+        # every earlier product's already-flushed requirement row in this
+        # same transaction is untouched, unlike a full session rollback
+        # which would have discarded them too.
+        try:
+            with db.begin_nested():
+                db.add(PurchaseOrderRequirement(business_id=user.business_id, purchase_order_id=po.id, product_id=p.id))
+                db.flush()
+        except IntegrityError:
+            continue
+        covered_names.append(p.name)
+    if not covered_names:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="All current restock requirements are already covered by existing purchase orders.")
+    add_audit(db, user, "PURCHASE_ORDER_CREATED", f"Generated purchase order #{po.id}.", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id)
+    # No user-facing notification here on purpose (section 19): drafting is
+    # not yet a meaningful outcome for anyone to be notified about — only a
+    # successful SEND is (see dispatch_po_email/confirm_po_whatsapp_sent).
+    # The audit trail above is a separate, permanent record and is not a
+    # notification.
     db.commit(); db.refresh(po)
     return {"message": "Purchase Order generated successfully.", "id": po.id, "po_id": po.id}
 
@@ -8346,7 +8680,19 @@ def update_po_draft(po_id: int, update: PODraftUpdate, user: User = Depends(get_
         raise HTTPException(status_code=409, detail="Only draft purchase orders can be edited. This purchase order has already been sent and is now permanent history.")
     details = update.details if update.details is not None else update.items_summary
     if details is not None: po.email_draft = details
-    if update.supplier_id is not None: po.supplier_id = update.supplier_id
+    # "supplier_id" absent from the request body means "leave unchanged";
+    # an EXPLICIT supplier_id: null means "clear the assignment" — these
+    # are different requests and must not collapse into one another.
+    # Pydantic v2's model_fields_set is what actually tells them apart
+    # (update.supplier_id is None is true for BOTH cases on its own).
+    if "supplier_id" in update.model_fields_set:
+        if update.supplier_id is None:
+            po.supplier_id = None
+        else:
+            supplier = db.query(Supplier).filter(Supplier.id == update.supplier_id, Supplier.business_id == user.business_id).first()
+            if not supplier:
+                raise HTTPException(status_code=400, detail="That supplier could not be found for this business.")
+            po.supplier_id = supplier.id
     db.commit(); add_audit(db, user, "PURCHASE_ORDER_UPDATED", f"Updated purchase order #{po.id}.", action_category="PURCHASE_ORDERS", resource_type="purchase_order", resource_id=po.id); db.commit()
     return {"message": "PO draft updated."}
 
@@ -8986,6 +9332,7 @@ def create_refund(transaction_key: str, payload: RefundRequest, user: User = Dep
             stock = db.query(WarehouseStock).filter(WarehouseStock.product_id == product.id, WarehouseStock.warehouse == (product.warehouse or "Main Central Warehouse")).first()
             if stock: stock.quantity += qty
             updated_products.append({"id": product.id, "quantity": product.quantity})
+            resolve_purchase_order_requirements(db, user.business_id, product.id)
 
     mark_business_brain_dirty(db, user.business_id)
     db.commit(); db.refresh(rt)
@@ -9719,8 +10066,13 @@ def team_presence(user: User = Depends(get_current_user), db: Session = Depends(
     device's stale/absent session incorrectly speak for the whole user."""
     require_permission(user, "team.view_presence")
     now = datetime.utcnow()
+    # Deliberately NOT scoped to Staff-only for Manager — Team Presence is
+    # read-only VISIBILITY (who's online right now), not a management
+    # action surface. A Manager seeing an Admin online grants them nothing
+    # beyond that fact; every actual management endpoint (create/disable/
+    # reset-password/permissions) keeps its own independent Manager-Staff-
+    # only scope check regardless of what this endpoint returns.
     q = db.query(User).filter(User.business_id == user.business_id, User.id != user.id)
-    if user.role == "manager": q = q.filter(User.role == "staff")  # scope: Manager sees Staff only
     employees = q.order_by(User.id.asc()).all()
 
     sessions_by_user: Dict[int, list] = {}
@@ -10109,7 +10461,7 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     summary = usage_summary(db, business)
     plan = subscription_for(db, business)
-    period_start, period_end, _ = billing_period_for(db, business)
+    period_start, period_end, current_period = billing_period_for(db, business)
     storage_used_bytes = db.query(func.coalesce(func.sum(StoredUpload.size_bytes), 0)).filter(StoredUpload.business_id == business.id).scalar() or 0
     # Purchase Order usage counts SENT orders only, by sent_at (not
     # created_at) falling inside the current billing period — see
@@ -10142,6 +10494,23 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
     # over as if it were one.
     summary["users_by_role"] = {role: {"used": role_counts[role], "limit": plan.get(role)} for role in ("admin", "manager", "staff")}
     summary["unlimited_people_and_locations"] = plan.get("admin") is None
+    # Per-feature AI usage breakdown for the current billing period — same
+    # AIUsageLedger the headline included/used/remaining figures above
+    # already come from (usage_summary()), just grouped by operation_type
+    # instead of summed across all of them. Reused by Settings > AI Credits
+    # & Usage; a Core business (included_ai_credits == 0) simply gets an
+    # empty list here since it can never have any successful billable-AI
+    # rows to group.
+    feature_rows = (
+        db.query(AIUsageLedger.operation_type, func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0), func.count(AIUsageLedger.id))
+        .filter(AIUsageLedger.business_id == business.id, AIUsageLedger.billing_period == current_period, AIUsageLedger.success == True)
+        .group_by(AIUsageLedger.operation_type)
+        .all()
+    )
+    summary["usage_by_feature"] = [
+        {"operation": op, "label": AI_FEATURE_LABELS.get(op, op.replace("_", " ").title()), "credits_consumed": int(credits), "calls": int(calls), "credit_cost_per_call": AI_CREDIT_WEIGHTS.get(op)}
+        for op, credits, calls in feature_rows
+    ]
     return summary
 
 class ChangePlanRequest(BaseModel):
@@ -10712,24 +11081,48 @@ def _supabase_email_verify_redirect(request: Request, plan: str, interval: str, 
     return base.rstrip("/") + "/?" + urlencode(params)
 
 def _supabase_email_confirmed(email: str) -> Optional[bool]:
-    """True / False from Supabase's own user record for this email; None if
-    Supabase has never seen it. Uses admin.generate_link purely as an O(1)
-    lookup-by-email — it returns the user record and does NOT send an email."""
+    """True / False from Supabase's own AUTHORITATIVE user record for this
+    email; None if Supabase has never seen it.
+
+    Previously used admin.generate_link({"type": "magiclink", ...}) purely
+    as a side-channel "does this user exist" probe. That is semantically an
+    action to ISSUE a usable sign-in link (Supabase's own admin API is
+    documented around actually generating a link to send/use), not a state
+    query — reusing it as a pseudo-lookup was fragile (relies on parsing
+    exception message text for "not found") and not what it exists for.
+
+    This calls admin.list_users() instead — the installed supabase-auth
+    SDK's only genuine read/lookup admin call, no link ever generated,
+    nothing sent to the user. The SDK (2.31.0) does not expose a
+    server-side email filter param, so this paginates through Supabase's
+    own user list looking for an exact (case-insensitive) email match,
+    bounded to a generous page count so a lookup can never run away
+    indefinitely. A future optimization — storing the Supabase user's own
+    UUID on this User row the first time verification succeeds, then using
+    admin.get_user_by_id() for O(1) lookups thereafter — would remove the
+    pagination entirely; that's a schema addition intentionally left for a
+    dedicated follow-up rather than bundled into this security fix."""
     email_l = (email or "").strip().lower()
     if not email_l:
         return None
     auth = _supabase_auth_or_503()
     try:
-        resp = auth.admin.generate_link({"type": "magiclink", "email": email_l})
-    except Exception as exc:
-        msg = str(getattr(exc, "message", "") or exc).lower()
-        if any(m in msg for m in ("not found", "user_not_found", "no user", "does not exist")):
-            return None
-        raise HTTPException(status_code=502, detail="We couldn't check your verification status right now. Please try again.") from exc
-    user = getattr(resp, "user", None)
-    if user is None:
+        page = 1
+        while page <= 50:  # 50 * 200 = 10,000 Supabase auth users scanned, max
+            users = auth.admin.list_users(page=page, per_page=200)
+            if not users:
+                return None
+            for u in users:
+                if (getattr(u, "email", None) or "").strip().lower() == email_l:
+                    return bool(getattr(u, "email_confirmed_at", None) or getattr(u, "confirmed_at", None))
+            if len(users) < 200:
+                return None
+            page += 1
         return None
-    return bool(getattr(user, "email_confirmed_at", None) or getattr(user, "confirmed_at", None))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="We couldn't check your verification status right now. Please try again.") from exc
 
 def _validated_onboarding_plan_interval(plan, interval):
     p = str(plan or "").strip().lower()
@@ -13166,6 +13559,28 @@ def get_public_config():
         "sentry_frontend_dsn": SENTRY_FRONTEND_DSN if IS_PRODUCTION else "",
         "environment": ENVIRONMENT,
     }
+
+CAULDRA_VERSION = "1.0.0"
+# Falls back to the literal string "100" when no CI/deployment tooling has
+# set CAULDRA_BUILD — this constant plus the env var are the ONLY two places
+# a build/version number is ever defined; nothing else in the app hardcodes
+# a second, potentially-conflicting copy. A Railway (or any platform) deploy
+# can override this with a real incrementing build number or short commit
+# SHA via the CAULDRA_BUILD environment variable without any code change.
+CAULDRA_BUILD = os.environ.get("CAULDRA_BUILD", "100")
+CAULDRA_CONTACT_EMAIL = os.environ.get("CAULDRA_CONTACT_EMAIL", "contact@cohren.com")
+
+@app.get("/public/app-config")
+def public_app_config():
+    """The ONE source of truth for the handful of non-secret, product-level
+    facts the About page (and nothing else) needs to display — version,
+    build, contact email. Deliberately unauthenticated (About is reachable
+    before/without sign-in in spirit, and none of this is sensitive) and
+    deliberately minimal: this must never grow into a general config/
+    diagnostics endpoint. Never include: API base URLs meant to stay
+    internal, database/Supabase/Sentry/Paystack credentials, or any other
+    environment secret — see section 6 of the About/legal requirements."""
+    return {"version": CAULDRA_VERSION, "build": CAULDRA_BUILD, "contact_email": CAULDRA_CONTACT_EMAIL}
 
 @app.get("/")
 def serve_index():

@@ -253,8 +253,14 @@
                             <button type="button" id="nav-btn-billing" data-nav="billing" data-settings-view="billing" onclick="openBillingModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
                                 <i class="fa-solid fa-credit-card w-4"></i> <span>Subscription &amp; Billing</span>
                             </button>
+                            <button type="button" id="nav-btn-ai-usage" data-nav="ai-usage" data-settings-view="ai-usage" onclick="openAiUsageModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
+                                <i class="fa-solid fa-wand-magic-sparkles w-4"></i> <span>AI Credits &amp; Usage</span>
+                            </button>
                             <button type="button" id="nav-btn-activity-history" data-nav="activity-history" data-settings-view="activity" onclick="openActivityHistoryModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
                                 <i class="fa-solid fa-clock-rotate-left w-4"></i> <span>Activity History</span>
+                            </button>
+                            <button type="button" id="nav-btn-about" data-nav="about" data-settings-view="about" onclick="openAboutModal()" class="settings-subnav-btn w-full text-left flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer text-[11px]">
+                                <i class="fa-solid fa-circle-info w-4"></i> <span>About</span>
                             </button>
                         </div>
                     </div>
@@ -344,22 +350,27 @@
         <!-- DYNAMIC WORKSPACE BANNER & METRICS -->
         <div id="dynamic-dashboard-container">
             <section class="max-w-[1500px] w-full mx-auto px-6 pt-6" id="default-dashboard-section">
-                <div id="dynamic-welcome-banner" class="bg-gradient-to-r from-primary/15 via-cardBg to-cardBg border border-primary/30 rounded-2xl p-5 shadow-sm mb-4 flex items-center justify-between">
-                    <div>
-                        <div class="flex items-center gap-2.5">
+                <div id="dynamic-welcome-banner" class="bg-gradient-to-r from-primary/15 via-cardBg to-cardBg border border-primary/30 rounded-2xl p-4 sm:p-5 shadow-sm mb-4 flex flex-wrap items-start justify-between gap-2">
+                    <div class="min-w-0">
+                        <div class="flex items-center gap-2.5 flex-wrap">
                             <h2 id="welcome-heading-text" class="text-xl font-extrabold text-textMain tracking-tight">Welcome to Cauldra</h2>
                             <span id="welcome-role-badge" class="px-3 py-1 rounded-xl bg-cardBg border border-borderCol text-xs font-semibold text-textSec">Guest</span>
                         </div>
-                        <div class="flex items-center gap-2 mt-1 welcome-copy-row">
-                            <p id="welcome-sub-text" class="text-xs text-textSec">Explore inventory and procurement management. Register a business or sign in to get started.</p>
-                            <button type="button" id="guest-get-started-btn" onclick="openBusinessAuthModal()" class="inline-flex items-center justify-center gap-1.5 w-fit bg-primary hover:bg-primaryHover text-white text-[11px] font-semibold px-3 py-1.5 rounded-lg transition shadow-md shadow-primary/15 cursor-pointer whitespace-nowrap"><i class="fa-solid fa-rocket text-[10px]"></i> Get Started</button>
-                            <button type="button" id="banner-copy-link-btn" onclick="copyBusinessIdFromWelcomeCard()" class="hidden text-primary hover:text-white text-[11px] font-semibold items-center gap-1 bg-primary/15 hover:bg-primary/25 border border-primary/30 px-2.5 py-0.5 rounded-lg transition cursor-pointer" title="Copy Business ID" aria-label="Copy Business ID">
+                        <!-- Company name and Business ID are two separate facts, on
+                             their own rows, so the copy button never has to share a
+                             line with (and wrap away from) the code it copies. -->
+                        <p id="welcome-sub-text" class="text-xs text-textSec mt-1">Explore inventory and procurement management. Register a business or sign in to get started.</p>
+                        <div id="welcome-code-row" class="hidden items-center gap-1.5 mt-1 flex-wrap">
+                            <span class="text-xs text-textSec">Code:</span>
+                            <span id="welcome-code-value" class="text-xs font-mono font-bold text-textMain">—</span>
+                            <button type="button" id="banner-copy-link-btn" onclick="copyBusinessIdFromWelcomeCard()" class="text-primary hover:text-white text-[11px] font-semibold flex items-center gap-1 bg-primary/15 hover:bg-primary/25 border border-primary/30 px-2.5 py-1 rounded-lg transition cursor-pointer shrink-0" title="Copy Business ID" aria-label="Copy Business ID">
                                 <i class="fa-solid fa-copy text-[10px]"></i>
                             </button>
                         </div>
+                        <button type="button" id="guest-get-started-btn" onclick="openBusinessAuthModal()" class="inline-flex items-center justify-center gap-1.5 w-fit bg-primary hover:bg-primaryHover text-white text-[11px] font-semibold px-3 py-1.5 rounded-lg transition shadow-md shadow-primary/15 cursor-pointer whitespace-nowrap mt-2"><i class="fa-solid fa-rocket text-[10px]"></i> Get Started</button>
                     </div>
-                    <div class="hidden sm:flex items-center gap-2">
-                        <span id="user-role-badge" class="px-3 py-1 rounded-xl bg-cardBg border border-borderCol text-xs font-medium text-textSec">Guest Hub</span>
+                    <div class="flex items-center gap-2">
+                        <span id="user-role-badge" class="px-3 py-1 rounded-xl bg-cardBg border border-borderCol text-xs font-medium text-textSec whitespace-nowrap">Guest Hub</span>
                     </div>
                 </div>
 
@@ -1567,6 +1578,76 @@
         </div>
     </div>
 
+    <!-- ABOUT MODAL -->
+    <div id="about-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-lg w-full shadow-2xl flex flex-col max-h-[90vh]">
+            <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3 shrink-0">
+                <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-circle-info text-primary"></i> About</h3>
+                <button type="button" onclick="closeAboutModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+            </div>
+            <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 space-y-4 text-xs text-textMain">
+                <div>
+                    <h4 class="font-extrabold text-base text-textMain tracking-tight">CAULDRA</h4>
+                    <p class="text-textSec leading-relaxed mt-1">Cauldra helps businesses manage inventory, sales, suppliers, purchasing, expenses, teams, and daily operations from one workspace. It keeps day-to-day business data organized while surfacing the information that needs attention, helping teams make faster operational decisions.</p>
+                </div>
+                <div>
+                    <h5 class="font-bold text-[10px] text-textSec uppercase tracking-wider mb-1.5">What Cauldra Does</h5>
+                    <ul class="grid grid-cols-2 gap-x-3 gap-y-1 text-textSec">
+                        <li><i class="fa-solid fa-check text-success text-[10px] mr-1.5"></i>Inventory</li>
+                        <li><i class="fa-solid fa-check text-success text-[10px] mr-1.5"></i>Sales</li>
+                        <li><i class="fa-solid fa-check text-success text-[10px] mr-1.5"></i>Suppliers</li>
+                        <li><i class="fa-solid fa-check text-success text-[10px] mr-1.5"></i>Purchase Orders</li>
+                        <li><i class="fa-solid fa-check text-success text-[10px] mr-1.5"></i>Expenses</li>
+                        <li><i class="fa-solid fa-check text-success text-[10px] mr-1.5"></i>Business Day</li>
+                        <li><i class="fa-solid fa-check text-success text-[10px] mr-1.5"></i>Reporting</li>
+                        <li><i class="fa-solid fa-check text-success text-[10px] mr-1.5"></i>Team Management</li>
+                        <li><i class="fa-solid fa-check text-success text-[10px] mr-1.5"></i>Business Brain</li>
+                    </ul>
+                </div>
+                <div class="grid grid-cols-2 gap-2 rounded-xl bg-bgMain border border-borderCol p-3">
+                    <div><span class="block text-[9px] font-bold text-textSec uppercase tracking-wider">Version</span><span id="about-version" class="font-mono">—</span></div>
+                    <div><span class="block text-[9px] font-bold text-textSec uppercase tracking-wider">Build</span><span id="about-build" class="font-mono">—</span></div>
+                </div>
+                <div>
+                    <h5 class="font-bold text-[10px] text-textSec uppercase tracking-wider mb-1.5">Contact</h5>
+                    <a id="about-contact-email" href="mailto:contact@cohren.com" class="text-primary hover:underline">contact@cohren.com</a>
+                </div>
+                <div class="pt-3 border-t border-borderCol space-y-1.5">
+                    <h5 class="font-bold text-[10px] text-textSec uppercase tracking-wider mb-1.5">Legal</h5>
+                    <button type="button" onclick="openPrivacyPolicyModal()" class="w-full text-left flex items-center justify-between px-3 py-2 rounded-lg bg-bgMain hover:bg-cardHover border border-borderCol transition cursor-pointer"><span>Privacy Policy</span><i class="fa-solid fa-chevron-right text-[10px] text-textSec"></i></button>
+                    <button type="button" onclick="openTermsOfServiceModal()" class="w-full text-left flex items-center justify-between px-3 py-2 rounded-lg bg-bgMain hover:bg-cardHover border border-borderCol transition cursor-pointer"><span>Terms of Service</span><i class="fa-solid fa-chevron-right text-[10px] text-textSec"></i></button>
+                    <button type="button" onclick="openThirdPartyNoticesModal()" class="w-full text-left flex items-center justify-between px-3 py-2 rounded-lg bg-bgMain hover:bg-cardHover border border-borderCol transition cursor-pointer"><span>Third-party Licenses / Notices</span><i class="fa-solid fa-chevron-right text-[10px] text-textSec"></i></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- LEGAL DOCUMENT MODAL — one shared shell for Privacy Policy, Terms of
+         Service, and Third-party Notices. Only the title/body content
+         differ; opened by openLegalDocModal(title, html) in app.js. -->
+    <div id="legal-doc-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-[151] hidden flex items-center justify-center p-4">
+        <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-2xl w-full shadow-2xl flex flex-col max-h-[90vh]">
+            <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3 shrink-0">
+                <h3 id="legal-doc-title" class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-scale-balanced text-primary"></i> Legal</h3>
+                <button type="button" onclick="closeLegalDocModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+            </div>
+            <div id="legal-doc-body" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 text-[11px] text-textSec leading-relaxed space-y-3"></div>
+        </div>
+    </div>
+
+    <!-- AI CREDITS & USAGE MODAL -->
+    <div id="ai-usage-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-lg w-full shadow-2xl flex flex-col max-h-[90vh]">
+            <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3 shrink-0">
+                <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-wand-magic-sparkles text-primary"></i> AI Credits &amp; Usage</h3>
+                <button type="button" onclick="closeAiUsageModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+            </div>
+            <div id="ai-usage-body" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 text-xs text-textMain space-y-3">
+                <div class="text-center py-6 text-textSec"><i class="fa-solid fa-spinner fa-spin mr-1.5"></i> Loading usage…</div>
+            </div>
+        </div>
+    </div>
+
     <!-- TRIAL START CONFIRMATION MODAL -->
     <div id="trial-start-confirm-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-[135] hidden flex items-center justify-center p-4">
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-sm w-full shadow-2xl text-xs space-y-3.5">
@@ -1784,10 +1865,17 @@
                 <div>
                     <label class="block font-medium text-textSec mb-1"><span data-i18n="team.temporaryPassword">Temporary Password</span> <span class="text-danger">*</span></label>
                     <div class="relative">
-                        <input type="password" id="emp-password" required minlength="8" placeholder="Enter temporary password" data-i18n-placeholder="team.tempPasswordPlaceholder" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 pr-9 text-textMain focus:outline-none focus:border-primary">
+                        <input type="password" id="emp-password" required minlength="6" placeholder="Enter temporary password" data-i18n-placeholder="team.tempPasswordPlaceholder" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 pr-9 text-textMain focus:outline-none focus:border-primary">
                         <button type="button" onclick="togglePasswordVisibility('emp-password', this)" class="absolute right-2.5 top-2.5 text-textSec hover:text-textMain cursor-pointer" aria-label="Show password" data-i18n-aria-label="team.showPassword"><i class="fa-solid fa-eye text-xs"></i></button>
                     </div>
-                    <p class="text-[9px] text-textSec mt-1" data-i18n="team.passwordHint">Use at least 8 characters with uppercase, lowercase, and a number.</p>
+                    <p class="text-[9px] text-textSec mt-1" data-i18n="team.passwordHint">At least 6 characters — this is temporary, the employee will replace it with their own permanent password at first sign-in.</p>
+                </div>
+                <div>
+                    <label class="block font-medium text-textSec mb-1"><span data-i18n="team.confirmTemporaryPassword">Confirm Temporary Password</span> <span class="text-danger">*</span></label>
+                    <div class="relative">
+                        <input type="password" id="emp-password-confirm" required minlength="6" placeholder="Re-enter temporary password" data-i18n-placeholder="team.confirmTempPasswordPlaceholder" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 pr-9 text-textMain focus:outline-none focus:border-primary">
+                        <button type="button" onclick="togglePasswordVisibility('emp-password-confirm', this)" class="absolute right-2.5 top-2.5 text-textSec hover:text-textMain cursor-pointer" aria-label="Show password" data-i18n-aria-label="team.showPassword"><i class="fa-solid fa-eye text-xs"></i></button>
+                    </div>
                 </div>
                 <div class="rounded-xl bg-primary/10 border border-primary/20 px-3 py-2 text-[10px] text-textSec leading-relaxed" data-i18n="team.tempPasswordWarningShort">
                     This password is temporary. The employee must change it before using the app.
