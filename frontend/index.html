@@ -8,7 +8,7 @@
     <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16.png">
     <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
     <link rel="manifest" href="/assets/manifest.json">
-    <link rel="stylesheet" href="/frontend/css/base.css">
+
     <meta name="theme-color" content="#070B14">
     <!-- Prevent the static Guest/Get Started state from flashing before
          /js/app.js restores an existing refresh-cookie session. -->
@@ -326,7 +326,7 @@
                  a page load with no valid session never flashes it before
                  updateGuestHeaderState() runs; that function is what shows it
                  once an authenticated session is actually confirmed. -->
-            <div id="header-global-search-wrap" class="hidden items-center flex-1 min-w-0 max-w-lg">
+            <div id="header-global-search-wrap" hidden class="hidden items-center flex-1 min-w-0 max-w-lg">
                 <div class="relative w-full">
                     <input type="text" id="header-global-search" oninput="syncHeaderSearch(this.value)" placeholder="Search products, SKU, orders..." class="hidden sm:block w-full bg-bgMain border border-borderCol text-textMain text-xs rounded-xl pl-9 pr-3 py-2 focus:outline-none focus:border-primary transition placeholder-textSec">
                     <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-textSec text-xs"></i>
@@ -389,33 +389,6 @@
                 <div id="global-loading-banner" class="hidden mb-4 rounded-xl border border-primary/30 bg-primary/10 text-textMain px-4 py-3 text-[11px] sm:text-xs font-medium items-center gap-2 shadow-sm flex">
                     <i class="fa-solid fa-circle-notch fa-spin text-primary"></i>
                     <span>Loading your Cauldra data&hellip; Your data is safe — we're getting everything ready.</span>
-                </div>
-
-                <!-- Terminal "backend unreachable" state — see setBootState()/
-                     enterServerUnavailableState() in the main script.
-                     Mutually exclusive with #global-loading-banner above:
-                     setBootState() is the ONE place that toggles either
-                     element's "hidden" class, so the two can never both be
-                     visible (a stuck spinner next to this) or both hidden
-                     while the app is silently in neither state. Shown only
-                     after a handful of bounded automatic reconnect attempts
-                     fail — never as the first thing a user sees on a normal
-                     load. The Try Again button re-runs one full controlled
-                     reconnect cycle in place (retryServerConnection()) with
-                     no page reload.
-                     RESPONSIVE: flex-wrap lets the message and button stack
-                     on narrow (mobile) widths instead of overflowing/
-                     truncating; the button itself is full-width below
-                     ~640px (an easier tap target on a phone) and shrinks to
-                     an inline auto-width button from the sm: breakpoint up,
-                     which covers iPad portrait/landscape and desktop the
-                     same way the rest of this banner row already does. -->
-                <div id="server-unavailable-banner" class="hidden mb-4 rounded-xl border border-danger/30 bg-danger/10 text-textMain px-4 py-3 text-[11px] sm:text-xs font-medium items-center gap-2 sm:gap-3 shadow-sm flex flex-wrap" role="alert">
-                    <i class="fa-solid fa-plug-circle-xmark text-danger shrink-0"></i>
-                    <span class="flex-1 min-w-[180px]">Cauldra can&rsquo;t connect right now. Your data has not been deleted — check your connection and try again.</span>
-                    <button type="button" id="server-unavailable-retry-btn" onclick="retryServerConnection()" class="inline-flex items-center justify-center gap-1.5 bg-danger hover:bg-danger/85 text-white text-[11px] sm:text-xs font-semibold px-3 py-1.5 rounded-lg transition shadow-sm cursor-pointer whitespace-nowrap shrink-0 w-full sm:w-auto">
-                        <i class="fa-solid fa-rotate-right text-[10px]"></i> Try Again
-                    </button>
                 </div>
 
                 <!-- GLOBAL SUCCESS/ERROR/STATUS MESSAGE — the one fallback
@@ -3274,7 +3247,7 @@
     <input type="text" id="inventory-search" class="hidden" value="">
 
     <script src="/assets/vendor/zxing.umd.js"></script>
-    <script src="/assets/vendor/libphonenumber-js-1.11.15.min.js"></script>
+    <script src="/assets/vendor/libphonenumberjs1.11.15.min.js"></script>
 
     <div id="payment-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="payment-title" aria-describedby="payment-explanation">
         <section class="payment-dialog">

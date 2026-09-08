@@ -1715,6 +1715,20 @@ class PaystackWebhookEvent(Base):
     event_type = Column(String, nullable=False)
     received_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
 
+class OnboardingEmailChallenge(Base):
+    __tablename__ = "onboarding_email_challenges"
+    challenge_id = Column(String(64), primary_key=True)
+    email = Column(String, nullable=False)
+    plan = Column(String, nullable=False)
+    billing_interval = Column(String, nullable=False)
+    platform = Column(String, nullable=False)
+    return_target = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    created_at = Column(SQLDateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(SQLDateTime, nullable=False, index=True)
+    verified_at = Column(SQLDateTime, nullable=True)
+    consumed_at = Column(SQLDateTime, nullable=True)
+
 class OnboardingAuthorization(Base):
     """A verified, reusable Paystack card authorization captured BEFORE a
     business exists, for the new-business flow: plan -> card verification ->
@@ -1725,6 +1739,7 @@ class OnboardingAuthorization(Base):
     existing architecture unchanged. Never stores card numbers/CVV — only the
     safe, reusable authorization info Paystack returns."""
     __tablename__ = "onboarding_authorizations"
+    email_challenge_id = Column(String(64), ForeignKey("onboarding_email_challenges.challenge_id"), nullable=True, unique=True)
     id = Column(Integer, primary_key=True, index=True)
     paystack_reference = Column(String, unique=True, index=True, nullable=False)
     email = Column(String, nullable=False)
@@ -3484,8 +3499,31 @@ def create_refresh_session(db: Session, user: User) -> str:
     db.add(row); db.commit()
     return raw
 
+from contextvars import ContextVar
+_native_cookie_request = ContextVar("native_cookie_request", default=False)
+NATIVE_COOKIE_ORIGINS = {"https://localhost", "capacitor://localhost"}
+
+@app.middleware("http")
+async def native_cookie_policy(request: Request, call_next):
+    origin = request.headers.get("origin", "")
+    native = origin in NATIVE_COOKIE_ORIGINS and origin in ALLOWED_ORIGINS
+    # SameSite=None needs exact origin checks as well as credentialed CORS.
+    if request.url.path == "/auth/refresh" and origin:
+        same_origin = origin == str(request.base_url).rstrip("/")
+        if not same_origin and origin not in ALLOWED_ORIGINS:
+            return JSONResponse(status_code=403, content={"detail":"This session origin is not allowed."})
+    marker = _native_cookie_request.set(native)
+    try:
+        return await call_next(request)
+    finally:
+        _native_cookie_request.reset(marker)
+
 def set_refresh_cookie(response: Response, raw: str):
-    response.set_cookie(key=REFRESH_COOKIE_NAME, value=raw, httponly=True, secure=REFRESH_COOKIE_SECURE, samesite=REFRESH_COOKIE_SAMESITE if REFRESH_COOKIE_SAMESITE in {"lax","strict","none"} else "lax", max_age=REFRESH_TOKEN_EXPIRE_DAYS*86400, path="/")
+    native = _native_cookie_request.get()
+    response.set_cookie(key=REFRESH_COOKIE_NAME, value=raw, httponly=True,
+        secure=True if native else REFRESH_COOKIE_SECURE,
+        samesite="none" if native else REFRESH_COOKIE_SAMESITE,
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS*86400, path="/")
 
 def clear_refresh_cookie(response: Response):
     response.delete_cookie(REFRESH_COOKIE_NAME, path="/")
@@ -5604,6 +5642,10 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
     # one-time OnboardingAuthorization row is consumed below, so a genuine
     # typo can be corrected and resubmitted without burning the already-
     # verified payment method.
+    email_proof = db.query(OnboardingEmailChallenge).filter_by(challenge_id=auth_row.email_challenge_id).first()
+    if (not email_proof or not email_proof.verified_at or not email_proof.consumed_at or email_proof.status != "consumed"
+        or (email_proof.email, email_proof.plan, email_proof.billing_interval) != (str(auth_row.email).strip().lower(), auth_row.plan, auth_row.billing_interval)):
+        raise HTTPException(403, "Fresh onboarding email proof is required. Please verify your email and payment again.")
     verified_email = str(auth_row.email or "").strip().lower()
     if verified_email and str(data.owner_email).strip().lower() != verified_email:
         raise HTTPException(status_code=400, detail="The account owner's email must match the email address you verified. Please use that same email, or verify a new one before continuing.")
@@ -12909,16 +12951,8 @@ def ensure_verification_refund(db: Session, row, transaction_reference: str, pro
 # -----------------------------------------------------------------------------
 # EMAIL VERIFICATION BEFORE PAYSTACK (new-business onboarding)
 #
-# The person registering a business must prove they control the email address
-# BEFORE Cauldra initialises any Paystack transaction for them. This reuses the
-# project's already-configured Supabase project (SUPABASE_URL / SUPABASE_SECRET_KEY
-# via supabase_client.py) and Supabase Auth's own magic-link email plus its
-# user.email_confirmed_at state. No new table, no new column, no second email
-# provider, no custom verification codes: Supabase sends the email and Supabase
-# is the ONLY source of truth this code trusts. It sits strictly between the
-# "enter email" step and /onboarding/payment/init — the rest of onboarding,
-# Paystack, payment verification and business creation are untouched.
-# -----------------------------------------------------------------------------
+# Fresh onboarding possession is verified by per-challenge Supabase PKCE.
+# Profile email verification retains its existing Supabase-authoritative flow.
 # Where Supabase should send the guest after they click the verification link.
 # Must also be added to the Supabase project's Auth "Redirect URLs" allow-list.
 SUPABASE_EMAIL_REDIRECT_URL = os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "").strip().rstrip("/")
@@ -12935,7 +12969,7 @@ def _supabase_auth_or_503():
         raise HTTPException(status_code=503, detail="Email verification is not available right now. Please contact support.")
     return client.auth
 
-def _supabase_email_verify_redirect(request: Request, plan: str, interval: str, purpose: str = "") -> str:
+def _supabase_email_verify_redirect(request: Request, plan: str, interval: str, purpose: str = "email_change") -> str:
     """Centralized redirect-URL builder for every Supabase verification email
     Cauldra sends (new-business onboarding, existing-user email-change, and
     employee self-verification below). Base URL resolution stays a single
@@ -13005,85 +13039,157 @@ def _validated_onboarding_plan_interval(plan, interval):
     i = str(interval or "monthly").strip().lower()
     return p, (i if i in ("monthly", "annual") else "monthly")
 
+# Onboarding uses a unique S256 PKCE verifier for EACH challenge. An old
+# Supabase user/session/token cannot complete a new challenge. The verifier is
+# derived server-side and never returned to clients or stored in URLs.
+def _onboarding_verifier(challenge_id):
+    return hmac.new(SECRET_KEY.encode(), ("onboarding-pkce-v1:" + challenge_id).encode(), "sha256").hexdigest()
+
+def _onboarding_provider_post(path, body, params=None):
+    import requests
+    from supabase_client import SupabaseSettings
+    try:
+        settings = SupabaseSettings.from_environment(required=True)
+    except SupabaseConfigurationError:
+        raise HTTPException(503, "Email verification is not configured. Please contact support.")
+    try:
+        response = requests.post(settings.url + "/auth/v1/" + path,
+            headers={"apikey": settings.secret_key, "Content-Type": "application/json"},
+            json=body, params=params, timeout=20, allow_redirects=False)
+    except requests.RequestException:
+        raise HTTPException(502, "Email verification could not connect. Please try again.")
+    if response.status_code == 429:
+        raise HTTPException(429, "Please wait before requesting another verification email.")
+    if not 200 <= response.status_code < 300:
+        raise HTTPException(400 if response.status_code < 500 else 502,
+            "The verification link could not be processed. Please request a new email.")
+    try:
+        return response.json()
+    except ValueError:
+        raise HTTPException(502, "Email verification returned an invalid response. Please try again.")
+
+def _onboarding_web_base():
+    from urllib.parse import urlsplit
+    base = (SUPABASE_EMAIL_REDIRECT_URL or SUPPLY_AI_FRONTEND_URL).rstrip("/")
+    parts = urlsplit(base)
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
+        raise HTTPException(503, "A secure email return URL must be configured. Please contact support.")
+    return base
+
+def _onboarding_row(db, challenge_id, lock=False):
+    if not re.fullmatch(r"[a-f0-9]{64}", str(challenge_id or "")):
+        raise HTTPException(403, "Please start email verification for this onboarding attempt.")
+    query = db.query(OnboardingEmailChallenge).filter_by(challenge_id=challenge_id)
+    row = (query.with_for_update() if lock else query).first()
+    if not row:
+        raise HTTPException(403, "This verification link is not valid. Please request a new email.")
+    if row.status in ("invalidated", "expired") or row.expires_at <= datetime.utcnow():
+        raise HTTPException(410, "This verification has expired or changed. Please request a new email.")
+    return row
+
+def _onboarding_state(row):
+    return {"status": row.status, "challenge_id": row.challenge_id, "email": row.email,
+        "plan": row.plan, "billing_interval": row.billing_interval, "platform": row.platform,
+        "return_target": row.return_target, "expires_at": row.expires_at.isoformat() + "Z"}
+
 class OnboardingEmailVerifyRequest(BaseModel):
     email: EmailStr
     plan: str
-    billing_interval: str = "monthly"
+    billing_interval: str
+    platform: str = "web"
+    challenge_id: str = ""
 
 @app.post("/onboarding/email/verify")
 def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request, db: Session = Depends(get_db)):
-    """Send (or resend) a Supabase magic-link verification email to the address
-    the guest wants to register/pay with. This NEVER claims the email is
-    verified — it only asks Supabase to send its own email. Calling it again is
-    a resend; Supabase enforces its own per-email cooldown and that error is
-    surfaced as a friendly 'please wait' message."""
-    client_ip = request.client.host if request and request.client else "unknown"
-    check_rate_limit(db, "onboarding-email-verify-ip", client_ip)
-    email_l = str(data.email).strip().lower()
-    check_rate_limit(db, "onboarding-email-verify-email", email_l)
+    import base64
+    from urllib.parse import urlencode
+    ip = request.client.host if request.client else "unknown"
+    email = str(data.email).strip().lower()
+    check_rate_limit(db, "onboarding-email-verify-ip", ip)
+    check_rate_limit(db, "onboarding-email-verify-email", email)
     plan, interval = _validated_onboarding_plan_interval(data.plan, data.billing_interval)
-
-    # Already verified in Supabase -> do not send another email; let them continue.
-    if _supabase_email_confirmed(email_l) is True:
-        return {"status": "verified", "email": email_l, "plan": plan, "billing_interval": interval}
-
-    auth = _supabase_auth_or_503()
-    redirect = _supabase_email_verify_redirect(request, plan, interval)
+    if data.billing_interval not in ("monthly", "annual") or data.platform not in ("web", "native_android", "native_ios"):
+        raise HTTPException(400, "Invalid onboarding platform or billing interval.")
+    now = datetime.utcnow()
+    if data.challenge_id:
+        old = _onboarding_row(db, data.challenge_id, lock=True)
+        exact = (old.email, old.plan, old.billing_interval, old.platform) == (email, plan, interval, data.platform)
+        if exact and old.status == "verified":
+            return _onboarding_state(old)
+        if old.status == "consumed":
+            raise HTTPException(409, "This email verification is already bound to a payment attempt.")
+        if (now - old.created_at).total_seconds() < ONBOARDING_EMAIL_RESEND_SECONDS:
+            raise HTTPException(429, "Please wait before requesting another verification email.")
+        old.status = "invalidated"
+    # Count attempts, including successful sends, in the existing rate limiter.
+    record_failure(db, "onboarding-email-verify-ip", ip)
+    record_failure(db, "onboarding-email-verify-email", email)
+    base = _onboarding_web_base()
+    callback_base = os.getenv("ONBOARDING_EMAIL_CALLBACK_BASE_URL", "https://cauldra.up.railway.app").rstrip("/")
+    from urllib.parse import urlsplit
+    cb = urlsplit(callback_base)
+    if cb.scheme != "https" or not cb.hostname or cb.username or cb.password or cb.query or cb.fragment:
+        raise HTTPException(503, "A secure email callback URL must be configured.")
+    row = OnboardingEmailChallenge(challenge_id=secrets.token_hex(32), email=email, plan=plan,
+        billing_interval=interval, platform=data.platform,
+        return_target=base + "/" if data.platform == "web" else "cauldra://auth/email-verified",
+        status="pending", created_at=now, expires_at=now + timedelta(minutes=20))
+    db.add(row)
+    db.commit()  # durable pending state before any external side effect
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(_onboarding_verifier(row.challenge_id).encode()).digest()).decode().rstrip("=")
+    redirect = callback_base + "/auth/email-verified?" + urlencode({"challenge":row.challenge_id,"purpose":"onboarding"})
     try:
-        auth.sign_in_with_otp({
-            "email": email_l,
-            "options": {"email_redirect_to": redirect, "should_create_user": True},
-        })
-    except Exception as exc:
-        detail = str(getattr(exc, "message", "") or exc).lower()
-        if any(m in detail for m in ("rate", "limit", "too many", "seconds", "429")):
-            record_failure(db, "onboarding-email-verify-email", email_l)
-            raise HTTPException(status_code=429, detail="Please wait a little before requesting another verification email.") from exc
-        raise HTTPException(status_code=502, detail="We couldn't send the verification email right now. Please try again.") from exc
-    return {"status": "sent", "email": email_l, "plan": plan, "billing_interval": interval,
-            "resend_after_seconds": ONBOARDING_EMAIL_RESEND_SECONDS}
+        _onboarding_provider_post("otp", {"email": email, "create_user": True,
+            "code_challenge": challenge, "code_challenge_method": "s256"}, {"redirect_to":redirect})
+    except HTTPException:
+        row.status = "invalidated"; db.commit()
+        raise
+    return {**_onboarding_state(row), "status":"sent", "resend_after_seconds":ONBOARDING_EMAIL_RESEND_SECONDS}
 
 class OnboardingEmailConfirmRequest(BaseModel):
-    access_token: str = ""
-    email: Optional[EmailStr] = None
+    challenge_id: str = ""
+    code: str = ""
 
 @app.post("/onboarding/email/verify/confirm")
 def onboarding_email_verify_confirm(data: OnboardingEmailConfirmRequest, request: Request, db: Session = Depends(get_db)):
-    """Called when the guest returns from the Supabase link. Verification is
-    decided ONLY from trusted Supabase state:
-      * if a Supabase session access token is supplied (from the link's URL
-        fragment), it is validated WITH Supabase (auth.get_user) and the
-        confirmed email is read from the returned user record;
-      * the email is then re-checked against Supabase's stored user state.
-    A URL parameter such as ?verified=true, or a frontend boolean, is never
-    trusted. The frontend-supplied email is only ever a lookup key against
-    Supabase, never proof on its own."""
-    client_ip = request.client.host if request and request.client else "unknown"
-    check_rate_limit(db, "onboarding-email-confirm-ip", client_ip)
-    token = str(data.access_token or "").strip()
-    auth = _supabase_auth_or_503()
+    ip = request.client.host if request.client else "unknown"
+    check_rate_limit(db, "onboarding-email-confirm-ip", ip)
+    row = _onboarding_row(db, data.challenge_id, lock=True)
+    if row.status == "consumed":
+        raise HTTPException(409, "This email verification has already been used for payment.")
+    if row.status == "verified" or not data.code:
+        return _onboarding_state(row)  # polling never consults global confirmation
+    if len(data.code) > 2048 or not re.fullmatch(r"[A-Za-z0-9_-]+", data.code):
+        raise HTTPException(400, "Invalid verification code. Please request a new email.")
+    try:
+        proof = _onboarding_provider_post("token", {"auth_code":data.code,
+            "code_verifier":_onboarding_verifier(row.challenge_id)}, {"grant_type":"pkce"})
+    except HTTPException:
+        db.rollback()
+        record_failure(db, "onboarding-email-confirm-ip", ip)
+        raise
+    user = proof.get("user") or {}
+    if str(user.get("email") or "").strip().lower() != row.email or not user.get("email_confirmed_at"):
+        raise HTTPException(403, "The verified email does not match this onboarding attempt.")
+    # Provider session/refresh credentials are deliberately discarded here.
+    row.status = "verified"; row.verified_at = datetime.utcnow()
+    row.expires_at = row.verified_at + timedelta(minutes=30)
+    db.commit()
+    return _onboarding_state(row)
 
-    token_email = None
-    if token:
-        try:
-            resp = auth.get_user(token)
-            user = getattr(resp, "user", None)
-        except Exception:
-            user = None
-        if user is not None and getattr(user, "email", None):
-            confirmed = getattr(user, "email_confirmed_at", None) or getattr(user, "confirmed_at", None)
-            if confirmed:
-                token_email = str(user.email).strip().lower()
+@app.post("/onboarding/email/invalidate")
+def onboarding_email_invalidate(data: OnboardingEmailConfirmRequest, db: Session = Depends(get_db)):
+    row = _onboarding_row(db, data.challenge_id, lock=True)
+    if row.status == "consumed":
+        raise HTTPException(409, "Finish the existing payment attempt before changing its email.")
+    row.status = "invalidated"; db.commit()
+    return {"status":"invalidated"}
 
-    check_email = (str(data.email).strip().lower() if data.email else "") or token_email
-    if not check_email:
-        raise HTTPException(status_code=400, detail="We couldn't confirm this verification link. Please request a new verification email.")
-
-    if _supabase_email_confirmed(check_email) is not True:
-        raise HTTPException(status_code=400, detail="We couldn't confirm this verification link. It may have expired. Please request a new verification email.")
-    if token_email and token_email != check_email:
-        raise HTTPException(status_code=400, detail="The verified email does not match the email you entered. Please verify the correct address.")
-    return {"status": "verified", "email": check_email}
+@app.get("/auth/email-verified", include_in_schema=False)
+def onboarding_email_callback():
+    return FileResponse(FRONTEND_DIR / "email-verified.html", headers={
+        "Cache-Control":"no-store", "Referrer-Policy":"no-referrer",
+        "Content-Security-Policy":"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"})
 
 # -----------------------------------------------------------------------------
 # NEW-BUSINESS ONBOARDING: PAY-BEFORE-REGISTER
@@ -13104,6 +13210,7 @@ def onboarding_email_verify_confirm(data: OnboardingEmailConfirmRequest, request
 # older registrations) — the two flows don't interfere with each other.
 # -----------------------------------------------------------------------------
 class OnboardingPaymentInitRequest(BaseModel):
+    challenge_id: str = ""
     email: EmailStr
     plan: str
     billing_interval: str = "monthly"
@@ -13116,6 +13223,11 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
     client_ip = request.client.host if request and request.client else "unknown"
     check_rate_limit(db, "onboarding-payment-init-ip", client_ip)
     check_rate_limit(db, "onboarding-payment-init-email", str(data.email).strip().lower())
+    challenge = _onboarding_row(db, data.challenge_id, lock=True)
+    if (challenge.status not in ("verified", "consumed") or not challenge.verified_at or
+        (challenge.email, challenge.plan, challenge.billing_interval) !=
+        (str(data.email).strip().lower(), data.plan.strip().lower(), data.billing_interval)):
+        raise HTTPException(403, "Please complete fresh email verification for this email and plan before payment.")
     if not PAYSTACK_SECRET_KEY:
         raise HTTPException(status_code=503, detail="Payment processing is not configured yet. Please contact support.")
 
@@ -13128,11 +13240,7 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
     if interval not in ("monthly", "annual"):
         interval = "monthly"
 
-    # GATE: the email must be verified through Supabase BEFORE any Paystack
-    # transaction is initialised. Checked against Supabase's own user state on
-    # every call, so this also blocks a direct API request that skips the UI.
-    if _supabase_email_confirmed(str(data.email).strip().lower()) is not True:
-        raise HTTPException(status_code=403, detail="Please verify your email address before continuing to payment.")
+    # Require one fresh server-side challenge, then atomically bind it to payment.
 
     amount_kobo = PAYSTACK_TRIAL_VERIFICATION_AMOUNT_KOBO
     key = str(request.headers.get('Idempotency-Key') or '')
@@ -13141,14 +13249,24 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
     digest = hmac.new(PAYSTACK_SECRET_KEY.encode(), (str(data.email).casefold() + ':' + plan + ':' + interval + ':' + key).encode(), 'sha256').hexdigest()
     reference = 'cauldra_onboard_' + digest[:40]
     existing = db.query(OnboardingAuthorization).filter_by(paystack_reference=reference).first()
+    if existing and existing.email_challenge_id != data.challenge_id:
+        raise HTTPException(403, "This payment attempt belongs to another verification challenge.")
     if existing:
         raise HTTPException(status_code=409, detail={'message': 'This verification attempt already exists. Check its status.', 'reference': reference})
+
+    if (challenge.status != "verified" or not challenge.verified_at or
+        (challenge.email, challenge.plan, challenge.billing_interval) != (str(data.email).strip().lower(), plan, interval)):
+        raise HTTPException(403, "Please complete fresh email verification for this email and plan before payment.")
+
     now = datetime.utcnow()
     row = OnboardingAuthorization(
-        paystack_reference=reference, email=str(data.email), plan=plan, billing_interval=interval,
+        email_challenge_id=challenge.challenge_id,
+        paystack_reference=reference, email=str(data.email).strip().lower(), plan=plan, billing_interval=interval,
         amount_kobo=amount_kobo, status="initialized",
         expires_at=now + timedelta(minutes=ONBOARDING_PAYMENT_SESSION_MINUTES),
     )
+    challenge.status = "consumed"
+    challenge.consumed_at = now
     db.add(row); db.commit()
 
     return initialize_owned_checkout(db, request, row, str(data.email),

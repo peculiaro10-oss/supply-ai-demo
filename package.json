@@ -2,16 +2,18 @@
   "name": "cauldra",
   "version": "1.0.0",
   "private": true,
-  "description": "Cauldra — Inventory & Procurement Management. Native Android/iOS packaging via Capacitor around the existing FastAPI-served web frontend.",
+  "description": "Cauldra \u00e2\u20ac\u201d Inventory & Procurement Management. Native Android/iOS packaging via Capacitor around the existing FastAPI-served web frontend.",
   "scripts": {
     "build:www": "node scripts/build-www.js",
-    "cap:sync": "npm run build:www && npx cap sync",
-    "cap:sync:android": "npm run build:www && npx cap sync android",
+    "cap:sync": "npm run build:www && npx cap sync && node scripts/verify-native-bundle.js",
+    "cap:sync:android": "npm run android:prepare",
     "cap:sync:ios": "npm run build:www && npx cap sync ios",
     "cap:open:android": "npx cap open android",
     "cap:open:ios": "npx cap open ios",
     "cap:add:android": "npx cap add android",
-    "cap:add:ios": "npx cap add ios"
+    "cap:add:ios": "npx cap add ios",
+    "android:prepare": "npm run build:www && npx cap sync android && node scripts/verify-native-bundle.js",
+    "verify:native": "node scripts/verify-native-bundle.js"
   },
   "dependencies": {
     "@capacitor/app": "8.1.1",

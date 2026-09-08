@@ -202,32 +202,16 @@
             return "op-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
         }
 
-        // Shared timeout wrapper for every boot-critical request (startup
-        // reachability check, /auth/refresh, /auth/me, initial core-data
-        // load — see PERMANENT_STARTUP_FIX notes). No boot request may hang
-        // forever just because fetch() itself has no application-level
-        // timeout. A timed-out request rejects the same way a genuinely
-        // unreachable backend does (fetch() throwing), so every existing
-        // catch block that already distinguishes "thrown exception" from
-        // "explicit HTTP response" keeps working unchanged. One helper here
-        // instead of a bespoke AbortController at each call site.
-        async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeoutMs);
-            try {
-                return await fetch(url, { ...options, signal: controller.signal });
-            } finally {
-                clearTimeout(timer);
-            }
-        }
-
         // navigator.onLine only reflects whether the OS thinks a network
         // interface is up — it is NOT proof the backend is reachable. Every
         // sync attempt confirms with an actual short-timeout request first.
         async function isBackendReachable() {
             if (!navigator.onLine) return false;
             try {
-                const res = await fetchWithTimeout(`${API_URL}/health`, { cache: "no-store" }, 4000);
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 4000);
+                const res = await fetch(`${API_URL}/health`, { cache: "no-store", signal: controller.signal });
+                clearTimeout(timer);
                 return res.ok;
             } catch (_) {
                 return false;
@@ -700,49 +684,6 @@
         // Bounds the automatic self-healing retry in runLoadData() below so a
         // backend that never comes back doesn't retry forever.
         let startupReconnectAttempts = 0;
-
-        // ---------------------------------------------------------------
-        // STARTUP / REACHABILITY STATE MACHINE
-        //
-        // "Loading" is never itself a terminal state — every boot attempt
-        // (a cold reload, or the user pressing Retry) must resolve into
-        // exactly one of these. setBootState() is the ONE place that turns
-        // the boot loading banner / server-unavailable panel on or off, so
-        // no other function has to independently guess whether the loader
-        // should still be visible. See runLoadData(), showStartupConnectionIssue(),
-        // enterServerUnavailableState(), and handleAuthenticationFailure().
-        // ---------------------------------------------------------------
-        const BOOT_STATE = Object.freeze({
-            BOOTING: "BOOTING",                       // an attempt is actively in flight (bounded — see fetchWithTimeout())
-            ONLINE: "ONLINE",                          // backend reached; authenticated (or guest) UI is showing real/cached data
-            UNAUTHENTICATED: "UNAUTHENTICATED",        // backend reached, no valid session — normal signed-out UI, not an error
-            SERVER_UNAVAILABLE: "SERVER_UNAVAILABLE",  // backend could not be reached after bounded retries — terminal until Retry/online/visibility
-        });
-        let currentBootState = BOOT_STATE.BOOTING;
-        // Guards the 'online'/visibilitychange auto-reconnect listeners so
-        // they're attached at most once, no matter how many times the app
-        // enters SERVER_UNAVAILABLE over its lifetime.
-        let serverUnavailableAutoRetryBound = false;
-
-        function setBootState(state) {
-            currentBootState = state;
-            const loadingBanner = document.getElementById("global-loading-banner");
-            const unavailablePanel = document.getElementById("server-unavailable-banner");
-            if (state === BOOT_STATE.BOOTING) {
-                loadingBanner?.classList.remove("hidden");
-                unavailablePanel?.classList.add("hidden");
-            } else if (state === BOOT_STATE.SERVER_UNAVAILABLE) {
-                loadingBanner?.classList.add("hidden");
-                unavailablePanel?.classList.remove("hidden");
-            } else {
-                // ONLINE or UNAUTHENTICATED — nothing is in flight and the
-                // backend has given (or been given, for guests) an explicit
-                // answer, so neither the loader nor the unavailable panel
-                // belongs on screen.
-                loadingBanner?.classList.add("hidden");
-                unavailablePanel?.classList.add("hidden");
-            }
-        }
         let currentUserProfile = null;
         // Effective permissions for the CURRENT signed-in user, as computed by
         // the backend's get_effective_permissions() and returned alongside the
@@ -18122,7 +18063,7 @@
             // guest browsing the same tab never sees a previous session's
             // leftover query or filtered results.
             const searchWrap = document.getElementById('header-global-search-wrap');
-            if (searchWrap) { searchWrap.classList.toggle('hidden', !signedIn); searchWrap.classList.toggle('flex', signedIn); }
+            if (searchWrap) { searchWrap.hidden = !signedIn; searchWrap.classList.toggle('hidden', !signedIn); searchWrap.classList.toggle('flex', signedIn); }
             if (!signedIn) {
                 const searchInput = document.getElementById('header-global-search');
                 if (searchInput && searchInput.value) { searchInput.value = ''; syncHeaderSearch(''); }
@@ -18412,7 +18353,7 @@
             dashboardSalesToday = null;
             dashboardSubscriptionWarning = null;
             dashboardPendingReopenCount = 0;
-            setBootState(BOOT_STATE.UNAUTHENTICATED);
+            document.getElementById("global-loading-banner")?.classList.add("hidden");
 
             updateCompanyHeaderDisplay();
             updateWelcomeBanner();
@@ -18615,7 +18556,7 @@
                 document.getElementById("biz-auth-view-payment-email").classList.remove("hidden");
                 titleEl.innerHTML = `<i class="fa-solid fa-envelope-circle-check text-primary"></i> Verify Your Email`;
                 renderPaymentEmailPlanBanner();
-                evShowState(evVerifiedEmail ? 3 : 1);
+                evShowState(evVerifiedEmail ? 3 : (evChallengeId ? 2 : 1));
             } else if (viewName === 'payment-verifying') {
                 document.getElementById("biz-auth-view-payment-verifying").classList.remove("hidden");
                 titleEl.innerHTML = `<i class="fa-solid fa-shield-halved text-primary"></i> Verifying Payment`;
@@ -18650,6 +18591,26 @@
         let publicPlanCatalog = null;           // cached response from GET /plans (server-authoritative pricing)
         let verifiedOnboardingReference = null; // set only after the backend independently confirms Paystack card verification; required to reach/submit registration
         // --- Supabase email verification (gate BEFORE Paystack) ---
+        let evChallengeId = null;
+        let evGeneration = 0;
+        let evSendBusy = false;
+        const evStorageKey = 'cauldra_onboarding_challenge_v2';
+        const evPlatform = () => window.Capacitor?.isNativePlatform?.()
+            ? (window.Capacitor.getPlatform() === 'ios' ? 'native_ios' : 'native_android') : 'web';
+        function evRemember() {
+            try { if (evChallengeId) localStorage.setItem(evStorageKey, evChallengeId); else localStorage.removeItem(evStorageKey); } catch (_) {}
+        }
+        function evAcceptState(data) {
+            if (!/^[a-f0-9]{64}$/.test(data.challenge_id || '') || data.platform !== evPlatform()) return false;
+            evChallengeId = data.challenge_id;
+            onboardingSelectedPlan = data.plan;
+            onboardingSelectedInterval = data.billing_interval;
+            evVerifiedEmail = data.status === 'verified' ? data.email : null;
+            const input = document.getElementById('payment-email-input'); if (input) input.value = data.email;
+            const pending = document.getElementById('ev-email'); if (pending) pending.textContent = data.email;
+            evRemember();
+            return true;
+        }
         let evVerifiedEmail = null;        // the Supabase-verified email; the backend re-checks Supabase before Paystack regardless
         let evResendCooldownUntil = 0;     // epoch ms (frontend guard; Supabase enforces its own per-email cooldown too)
         let evResendTimer = null;
@@ -18786,6 +18747,7 @@
         }
 
         function setOnboardingInterval(interval) {
+            if (onboardingSelectedInterval !== interval) evResetVerification();
             onboardingSelectedInterval = (interval === 'annual') ? 'annual' : 'monthly';
             renderIntervalToggleButtons();
             renderPlanCards();
@@ -18876,9 +18838,9 @@
         // so this can never actually proceed for an unverified email.
         async function startOnboardingPaymentVerification() {
             const email = (evVerifiedEmail || '').trim();
-            if (!email) {evShowState(1); return;}
+            if (!email || !evChallengeId) {evShowState(1); return;}
             if (!onboardingSelectedPlan) {switchBizAuthView('plan'); return;}
-            return CauldraPayments.start('onboarding', {email, plan:onboardingSelectedPlan, billing_interval:onboardingSelectedInterval});
+            return CauldraPayments.start('onboarding', {email, challenge_id:evChallengeId, plan:onboardingSelectedPlan, billing_interval:onboardingSelectedInterval});
         }
         const continueToPaystackAfterVerify = startOnboardingPaymentVerification;
 
@@ -18886,11 +18848,18 @@
             for (let i = 1; i <= 4; i++) document.getElementById('ev-state-' + i)?.classList.toggle('hidden', i !== n);
             if (evPollTimer) { clearInterval(evPollTimer); evPollTimer = null; }
             if (n === 3 && evVerifiedEmail) {
+                clearAuthError();
+                document.querySelector('#business-auth-modal [data-dynamic-status]')?.remove();
                 const e = document.getElementById('ev-email-verified'); if (e) e.textContent = evVerifiedEmail;
             }
             if (n === 2) evPollTimer = setInterval(() => checkEmailVerification(false), 5000);
         }
         function evResetVerification() {
+            const previous = evChallengeId;
+            evGeneration++;
+            evChallengeId = null; evRemember();
+            if (previous) fetch(`${API_URL}/onboarding/email/invalidate`, {method:'POST',
+                headers:{'Content-Type':'application/json'},body:JSON.stringify({challenge_id:previous})}).catch(() => {});
             evVerifiedEmail = null;
             evResendCooldownUntil = 0;
             if (evResendTimer) { clearInterval(evResendTimer); evResendTimer = null; }
@@ -18903,28 +18872,21 @@
         }
         function onPaymentEmailInputChanged() {
             // Per spec: changing the email after verifying makes it unverified again.
-            if (evVerifiedEmail !== null || evResendTimer || evPollTimer) { evResetVerification(); evShowState(1); }
+            if (evChallengeId || evSendBusy || evVerifiedEmail !== null || evResendTimer || evPollTimer) { evResetVerification(); evShowState(1); }
         }
         function evEnsureChannel() {
             if (evVerifyChannel || typeof BroadcastChannel === 'undefined') return;
             try {
                 evVerifyChannel = new BroadcastChannel('cauldra-email-verify');
                 evVerifyChannel.onmessage = (m) => {
-                    const d = (m && m.data) || {};
-                    if (!d.verified || !d.email) return;
-                    const want = (document.getElementById('payment-email-input')?.value || '').trim().toLowerCase();
-                    if (want && d.email.toLowerCase() !== want) return;
-                    evVerifiedEmail = d.email;
-                    if (d.plan && publicPlanCatalog && publicPlanCatalog[d.plan]) onboardingSelectedPlan = d.plan;
-                    if (d.interval === 'annual' || d.interval === 'monthly') onboardingSelectedInterval = d.interval;
-                    if (!document.getElementById('biz-auth-view-payment-email')?.classList.contains('hidden')) evShowState(3);
+                    if (m?.data?.challenge_id === evChallengeId) checkEmailVerification(false);
                 };
             } catch (_) {}
         }
         function evBroadcastVerified() {
             try {
                 evEnsureChannel();
-                evVerifyChannel?.postMessage({ verified: true, email: evVerifiedEmail, plan: onboardingSelectedPlan, interval: onboardingSelectedInterval });
+                evVerifyChannel?.postMessage({ challenge_id: evChallengeId });
             } catch (_) {}
         }
         function evStartResendCooldown(ms) {
@@ -18943,19 +18905,27 @@
         async function evPostVerify(email) {
             const res = await fetch(`${API_URL}/onboarding/email/verify`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, plan: onboardingSelectedPlan, billing_interval: onboardingSelectedInterval })
+                body: JSON.stringify({ email, plan: onboardingSelectedPlan, billing_interval: onboardingSelectedInterval, platform:evPlatform(), challenge_id:evChallengeId || "" })
             });
             const data = await res.json().catch(() => ({}));
             return { res, data };
         }
         async function startEmailVerification() {
+            if (evSendBusy) return;
+            const generation = evGeneration;
             const email = (document.getElementById('payment-email-input')?.value || '').trim();
             if (!email || !email.includes('@')) { showToast(t("common.enterValidEmail"), "error"); return; }
             if (!onboardingSelectedPlan) { switchBizAuthView('plan'); return; }
+            evSendBusy = true;
             const btn = document.getElementById('ev-verify-btn');
             if (btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Sending verification email…`; }
             try {
                 const { res, data } = await evPostVerify(email);
+                if (generation !== evGeneration) {
+                    if (data.challenge_id) fetch(`${API_URL}/onboarding/email/invalidate`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({challenge_id:data.challenge_id})}).catch(()=>{});
+                    return;
+                }
+                if (res.ok && !evAcceptState(data)) throw new Error('Verification returned to the wrong platform.');
                 if (!res.ok) throw new Error(showApiError(res, data, "We couldn't send the verification email. Please try again."));
                 if (data.status === 'verified') { evVerifiedEmail = data.email || email; evShowState(3); return; }
                 const e = document.getElementById('ev-email'); if (e) e.textContent = data.email || email;
@@ -18966,39 +18936,36 @@
             } catch (err) {
                 showToast(friendlyErrorMessage(err?.message || err, "We couldn't send the verification email. Please try again."), "error");
             } finally {
+                evSendBusy = false;
                 if (btn) { btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-envelope-circle-check"></i> Verify Email`; }
             }
         }
         async function resendEmailVerification() {
             if (Date.now() < evResendCooldownUntil) { showToast("Please wait before requesting another verification email.", "info"); return; }
-            const email = (document.getElementById('payment-email-input')?.value || '').trim();
-            if (!email) { evShowState(1); return; }
-            try {
-                const { res, data } = await evPostVerify(email);
-                if (res.status === 429) { evStartResendCooldown(60000); showToast(data.detail || "Please wait before requesting another verification email.", "info"); return; }
-                if (!res.ok) throw new Error(showApiError(res, data, "We couldn't resend the verification email."));
-                if (data.status === 'verified') { evVerifiedEmail = data.email || email; evShowState(3); return; }
-                evStartResendCooldown((data.resend_after_seconds || 60) * 1000);
-                showToast("Verification email sent.", "success");
-            } catch (err) {
-                showToast(friendlyErrorMessage(err?.message || err, "We couldn't resend the verification email."), "error");
-            }
+            await startEmailVerification();
         }
         async function checkEmailVerification(manual) {
             const email = (evVerifiedEmail || document.getElementById('payment-email-input')?.value || '').trim();
-            if (!email) return;
+            if (!evChallengeId) return;
+            const challenge = evChallengeId;
             const btn = document.getElementById('ev-check-btn');
             if (manual && btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Checking…`; }
             try {
                 const res = await fetch(`${API_URL}/onboarding/email/verify/confirm`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ email })
+                    body: JSON.stringify({ challenge_id:challenge })
                 });
                 const data = await res.json().catch(() => ({}));
-                if (res.ok && data.status === 'verified') {
+                if (challenge !== evChallengeId) return;
+                if (res.ok && data.status === 'verified' && evAcceptState(data)) {
                     evVerifiedEmail = data.email || email;
                     evBroadcastVerified();
                     evShowState(3);
+                } else if (res.status === 410 || res.status === 403) {
+                    evChallengeId = null; evVerifiedEmail = null; evRemember();
+                    const message = document.getElementById('ev-state-4-msg');
+                    if (message) message.textContent = data.detail || 'Please request a new verification email.';
+                    evShowState(4);
                 } else if (manual) {
                     showToast(data.detail || "Not verified yet. Open the link in your email, then check again.", "info");
                 }
@@ -19008,54 +18975,63 @@
                 if (manual && btn) { btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-rotate-right"></i> I've verified &mdash; check now`; }
             }
         }
-        // Return from the Supabase verification link: ?cauldra_email_verify=1 plus
-        // the session token in the URL fragment. The token is validated WITH
-        // Supabase server-side; a URL flag alone never counts as verified.
+        // The return URL is routing only. Backend challenge status is authority.
+        async function evResumeChallenge(challenge) {
+            if (!/^[a-f0-9]{64}$/.test(challenge || '')) return;
+            const generation = evGeneration;
+            try {
+                const res = await fetch(`${API_URL}/onboarding/email/verify/confirm`, {method:'POST',
+                    headers:{'Content-Type':'application/json'},body:JSON.stringify({challenge_id:challenge})});
+                const data = await res.json();
+                if (generation !== evGeneration) return;
+                if (!res.ok) {
+                    if (res.status === 409) return; // existing Paystack attempt owns this proof
+                    throw new Error(data.detail || 'Please request a new verification email.');
+                }
+                if (data.platform !== evPlatform()) {
+                    showToast('Return to the Cauldra app where you started verification.', 'info'); return;
+                }
+                if (!evAcceptState(data)) return;
+                await loadPublicPlanCatalog();
+                if (generation !== evGeneration || !openBusinessAuthModal()) return;
+                switchBizAuthView('payment-email');
+                evShowState(data.status === 'verified' ? 3 : 2);
+                if (data.status === 'verified') evBroadcastVerified();
+            } catch (error) {
+                showToast(friendlyErrorMessage(error.message, 'Verification could not be restored. Please try again.'), 'error');
+            }
+        }
         async function handleEmailVerifyReturn() {
             const params = new URLSearchParams(window.location.search);
-            const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
-            const accessToken = hashParams.get('access_token') || '';
-            const evPlan = params.get('ev_plan') || '';
-            const evInterval = params.get('ev_interval') || '';
-            const evPurpose = params.get('ev_purpose') || '';
+            const purpose = params.get('ev_purpose');
+            const challenge = params.get('challenge');
             window.history.replaceState({}, document.title, window.location.pathname);
-            if (evPurpose === 'self_verify') {
-                // An existing user (admin or employee) verifying their OWN current
-                // email from their profile - completely separate from the
-                // onboarding/register-a-new-business flow below.
-                if (!authToken) {
-                    showToast(t("profile.emailVerifiedReturnSignedOut"), "success");
-                    return;
-                }
-                await confirmMyEmailVerify();
+            if (purpose === 'self_verify') {
+                if (authToken) await confirmMyEmailVerify();
+                else showToast(t('profile.emailVerifiedReturnSignedOut'), 'info');
                 return;
             }
-            if (!publicPlanCatalog) { try { await loadPublicPlanCatalog(); } catch (_) {} }
-            if (evPlan && publicPlanCatalog && publicPlanCatalog[evPlan]) onboardingSelectedPlan = evPlan;
-            if (evInterval === 'annual' || evInterval === 'monthly') onboardingSelectedInterval = evInterval;
-            openBusinessAuthModal();
-            if (!onboardingSelectedPlan) { switchBizAuthView('plan'); return; }
-            switchBizAuthView('payment-email');
-            try {
-                const res = await fetch(`${API_URL}/onboarding/email/verify/confirm`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ access_token: accessToken })
-                });
-                const data = await res.json().catch(() => ({}));
-                if (res.ok && data.status === 'verified') {
-                    evVerifiedEmail = data.email;
-                    const inp = document.getElementById('payment-email-input'); if (inp) inp.value = data.email;
-                    evBroadcastVerified();
-                    evShowState(3);
-                    showToast("Email verified successfully.", "success");
-                } else {
-                    const msg = document.getElementById('ev-state-4-msg');
-                    if (msg) msg.textContent = data.detail || "We couldn't confirm this verification link. It may have expired.";
-                    evShowState(4);
-                }
-            } catch (_) {
-                evShowState(4);
+            if (purpose === 'email_change') {
+                if (authToken) await confirmMyEmailChange();
+                else showToast('Sign in and open your profile to confirm the email change.', 'info');
+                return;
             }
+            if (purpose === 'onboarding') await evResumeChallenge(challenge);
+        }
+        async function evInitializeNativeReturn() {
+            if (!window.Capacitor?.isNativePlatform?.() || !window.Capacitor.isPluginAvailable('App')) return;
+            const app = window.Capacitor.registerPlugin('App');
+            const receive = async ({url}) => {
+                try {
+                    const link = new URL(url);
+                    if (link.protocol !== 'cauldra:' || link.hostname !== 'auth' || link.pathname !== '/email-verified'
+                        || link.port || link.username || link.password || link.hash || link.searchParams.get('purpose') !== 'onboarding') return;
+                    await evResumeChallenge(link.searchParams.get('challenge'));
+                } catch (_) {}
+            };
+            await app.addListener('appUrlOpen', receive);
+            await app.addListener('appStateChange', ({isActive}) => { if (isActive && evChallengeId) checkEmailVerification(false); });
+            const launch = await app.getLaunchUrl(); if (launch?.url) await receive(launch);
         }
 
         function renderRegisterPlanBanner() {
@@ -19346,6 +19322,7 @@
                 return;
             }
 
+            let data;
             try {
                 const isAdmin = selectedSignInRole === 'admin';
                 const endpoint = isAdmin ? `${API_URL}/auth/admin-login` : `${API_URL}/auth/employee-login`;
@@ -19359,7 +19336,7 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload)
                 });
-                let data = {};
+                data = {};
                 try {
                     data = await res.json();
                 } catch (_) {
@@ -19376,7 +19353,13 @@
                     return;
                 }
 
-                authToken = data.access_token;
+            } catch (_) {
+                showAuthError("Unable to connect right now. Please check your connection and try again.");
+                return;
+            }
+            if (!data.access_token) { showAuthError("The sign-in response was incomplete. Please try again."); return; }
+            authToken = data.access_token;
+            try {
                 currentUserProfile = {
                     id: data.id || null,
                     username: data.username || username,
@@ -19428,7 +19411,7 @@
                     showToast(t("auth.signedInAsRole", {role: ({admin:t("team.admin"),manager:t("team.manager"),staff:t("team.staff")})[currentUserProfile.role] || currentUserProfile.role}), "success");
                 }
             } catch (e) {
-                showAuthError("Unable to connect right now. Please check your connection and try again.");
+                showToast("You are signed in, but some data could not load. Please retry or reload Cauldra.", "error");
             }
         }
 
@@ -25094,21 +25077,32 @@
             // Same chokepoint, same reasoning, for a business deletion in
             // flight — see businessDeletionInProgress's declaration.
             if (businessDeletionInProgress) return false;
+            // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) -----
+            // Never logs tokens/cookies/passwords — only caller, timing, and
+            // the true/false outcome. Logged to console AND sessionStorage
+            // (the latter survives a reload in case console output is missed
+            // or cleared). Search DevTools console for "auth-diag-frontend".
+            // Remove once the investigation is closed.
+            const __diagCallNum = (window.__refreshDiagCallCount = (window.__refreshDiagCallCount || 0) + 1);
+            const __diagCaller = (new Error().stack || "").split("\n").slice(1, 4).join(" | ");
+            const __diagAlreadyInFlight = !!authRefreshInFlight;
+            console.log(`[auth-diag-frontend] refreshAccessToken() call #${__diagCallNum} START alreadyInFlight=${__diagAlreadyInFlight} caller=${__diagCaller}`);
+            try {
+                const diagLog = JSON.parse(sessionStorage.getItem("__refreshDiag") || "[]");
+                diagLog.push({ n: __diagCallNum, t: Date.now(), phase: "start", alreadyInFlight: __diagAlreadyInFlight, stack: __diagCaller });
+                sessionStorage.setItem("__refreshDiag", JSON.stringify(diagLog));
+            } catch (_) {}
+            // --- END TEMPORARY DEV DIAGNOSTIC (continues at each return below) --
             if (authRefreshInFlight) return authRefreshInFlight;
             authRefreshInFlight = (async () => {
+                let __diagOutcome = "unknown";
                 refreshAccessTokenWasNetworkUnreachable = false;
                 try {
-                    // Boot-critical request — bounded so a hung connection
-                    // can never leave the caller (refreshAccessTokenAtStartup(),
-                    // the 10-minute heartbeat, the visibilitychange refresh)
-                    // waiting forever. A timeout throws, which the catch
-                    // block below already treats identically to any other
-                    // unreachable-backend failure.
-                    const res = await fetchWithTimeout(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include", headers: { "Accept": "application/json" } }, 10000);
-                    if (res.status === 204) { return false; }
-                    if (!res.ok) { return false; }
+                    const res = await fetch(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include", headers: { "Accept": "application/json" } });
+                    if (res.status === 204) { __diagOutcome = "204_no_content"; return false; }
+                    if (!res.ok) { __diagOutcome = `http_${res.status}`; return false; }
                     const data = await res.json();
-                    if (!data.access_token) { return false; }
+                    if (!data.access_token) { __diagOutcome = "200_but_no_access_token_in_body"; return false; }
                     authToken = data.access_token;
                     currentUserProfile = {
                         id: data.id, username: data.username, role: String(data.role || '').toLowerCase(),
@@ -25139,17 +25133,26 @@
                     startPresenceHeartbeat();
                     currentEffectivePermissions = data.permissions || {};
                     scheduleSyncSoon();
+                    __diagOutcome = "success";
                     return true;
                 } catch (e) {
                     // fetch() itself threw — the request never got a response
                     // from the backend at all (connection refused, DNS/reset,
-                    // offline, a fetchWithTimeout() abort, etc.). This is a
-                    // reachability problem, not the backend telling us the
-                    // refresh session is invalid.
+                    // offline, etc.). This is a reachability problem, not the
+                    // backend telling us the refresh session is invalid.
+                    __diagOutcome = "exception:" + (e && e.message);
                     refreshAccessTokenWasNetworkUnreachable = true;
                     return false;
                 }
                 finally {
+                    // --- TEMPORARY DEV DIAGNOSTIC (continued) ---
+                    console.log(`[auth-diag-frontend] refreshAccessToken() call #${__diagCallNum} RESOLVED outcome=${__diagOutcome} authTokenPresentNow=${!!authToken} currentUserProfilePresentNow=${!!currentUserProfile}`);
+                    try {
+                        const diagLog = JSON.parse(sessionStorage.getItem("__refreshDiag") || "[]");
+                        diagLog.push({ n: __diagCallNum, t: Date.now(), phase: "resolved", outcome: __diagOutcome, authTokenPresentNow: !!authToken, currentUserProfilePresentNow: !!currentUserProfile });
+                        sessionStorage.setItem("__refreshDiag", JSON.stringify(diagLog));
+                    } catch (_) {}
+                    // --- END TEMPORARY DEV DIAGNOSTIC ---
                     authRefreshInFlight = null;
                 }
             })();
@@ -25187,98 +25190,27 @@
 
         // Keeps the loading UI (banner + inventory skeleton) up and swaps in a
         // connection-specific message, instead of falling through to the
-        // guest/logged-out rendering, WHILE a bounded startup reconnect
-        // attempt is still in progress. This is deliberately NOT a terminal
-        // state — once MAX_STARTUP_RECONNECT_ATTEMPTS is used up,
-        // scheduleStartupReconnectRetry() below always moves on to the
-        // actual terminal state, enterServerUnavailableState().
+        // guest/logged-out rendering, when the backend could not be reached
+        // during startup after refreshAccessTokenAtStartup()'s retries.
         function showStartupConnectionIssue(loadingBanner) {
-            setBootState(BOOT_STATE.BOOTING);
             if (loadingBanner) {
                 const span = loadingBanner.querySelector("span");
-                if (span) span.textContent = "Still trying to reach the server…";
+                if (span) span.textContent = "Still trying to reach the server… your session will resume automatically once it's back.";
                 loadingBanner.classList.remove("hidden");
             }
             if (!inventoryEverLoaded) renderInventoryLoadingSkeleton();
         }
 
-        // A handful of quick automatic attempts, then the app MUST hand
-        // control back to the user rather than spin forever. This is
-        // intentionally small — enterServerUnavailableState() below is the
-        // real safety net (with its own 'online'/visibilitychange listeners
-        // and a manual Retry button), not this counter.
-        const MAX_STARTUP_RECONNECT_ATTEMPTS = 3;
-
-        // THE root-cause fix: every path through the old version of this
-        // function either scheduled another retry or, once the retry count
-        // was used up, simply `return`ed — leaving the loading banner and
-        // inventory skeleton on screen forever with no active request and no
-        // scheduled retry behind them. That dead end is what produced the
-        // permanent "Still trying to reach the server…" state. Retry
-        // exhaustion now ALWAYS resolves into the explicit terminal state
-        // below instead.
+        // Bounded self-healing retry: tries loadData() again shortly after an
+        // "unreachable backend" startup outcome, so the real session is
+        // restored automatically once the backend comes back — without
+        // requiring the user to manually reload, and without retrying
+        // forever if it never comes back.
         function scheduleStartupReconnectRetry() {
             startupReconnectAttempts++;
-            if (startupReconnectAttempts > MAX_STARTUP_RECONNECT_ATTEMPTS) {
-                enterServerUnavailableState();
-                return;
-            }
+            if (startupReconnectAttempts > 6) return;
             setTimeout(() => { if (!authToken) loadData(); }, 4000);
         }
-
-        // The terminal "backend could not be reached" state. Removes every
-        // spinner/skeleton that would otherwise imply work is still in
-        // progress (per the state-machine rule: loading must never be shown
-        // with no active request and no scheduled retry behind it), and
-        // hands control to the user via the Retry button rendered in
-        // index.html's #server-unavailable-banner — while still listening
-        // for the browser's own recovery signals so a real reconnect doesn't
-        // require the user to notice and click anything.
-        function enterServerUnavailableState() {
-            setBootState(BOOT_STATE.SERVER_UNAVAILABLE);
-            // A neutral empty state, not a loading skeleton — nothing here
-            // is "still loading". If cached inventory already exists this
-            // session, it stays on screen untouched (see runLoadData()'s
-            // "authToken && !validateAuthenticationSession()" fallthrough
-            // and its catch-block cached-data path) — this only applies to
-            // a genuine cold start with nothing to show yet.
-            if (!inventoryEverLoaded) {
-                inventoryEverLoaded = true;
-                renderInventoryTable([]);
-            }
-            bindAutomaticReconnectListeners();
-        }
-
-        // Wires the browser's own connectivity signals to a single
-        // controlled reconnect attempt each. loadData()'s existing
-        // loadDataInFlight guard (see there) is what actually prevents these
-        // from ever overlapping with each other, with a manual Retry click,
-        // or with the auth-refresh heartbeat — so this only ever needs to
-        // decide WHEN to try again, never whether it's safe to do so.
-        function bindAutomaticReconnectListeners() {
-            if (serverUnavailableAutoRetryBound) return;
-            serverUnavailableAutoRetryBound = true;
-            window.addEventListener("online", () => {
-                if (currentBootState === BOOT_STATE.SERVER_UNAVAILABLE) retryServerConnection();
-            });
-            document.addEventListener("visibilitychange", () => {
-                if (!document.hidden && currentBootState === BOOT_STATE.SERVER_UNAVAILABLE) retryServerConnection();
-            });
-        }
-
-        // The Retry button's click handler (see index.html) — and also what
-        // the automatic listeners above call. One controlled reconnect
-        // cycle: SERVER_UNAVAILABLE -> BOOTING -> (health/auth restore/data
-        // load, all inside loadData()) -> ONLINE, or back to
-        // SERVER_UNAVAILABLE if it's still down. No page reload, no stacked
-        // timers — loadDataInFlight already guarantees at most one of these
-        // is ever active at a time.
-        function retryServerConnection() {
-            startupReconnectAttempts = 0;
-            setBootState(BOOT_STATE.BOOTING);
-            loadData({ forceShowLoadingBanner: true });
-        }
-        window.retryServerConnection = retryServerConnection;
 
         function startAuthRefreshHeartbeat() {
             if (businessDeletionInProgress) return; // never (re)start while a deletion is underway
@@ -25295,22 +25227,20 @@
         }
 
         document.addEventListener('visibilitychange', () => {
-            // Returning to an already-authenticated tab: a lightweight
-            // session refresh only — NOT a full cold-start boot. If the
-            // network fails here, refreshAccessToken() just leaves authToken/
-            // currentUserProfile/the current UI untouched (see its catch
-            // block above); only an explicit backend rejection invalidates
-            // the session (see handleAuthenticationFailure()'s call sites).
+            // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) -----
+            console.log(`[auth-diag-frontend] visibilitychange fired hidden=${document.hidden} authTokenPresent=${!!authToken}`);
+            // --- END TEMPORARY DEV DIAGNOSTIC -------------------------------
             if (!document.hidden && authToken) refreshAccessToken();
         });
 
         function handleAuthenticationFailure(message = "") {
-            // The one function that forcibly clears a session client-side
-            // outside of an explicit sign-out — always in response to an
-            // EXPLICIT backend rejection (a 401 after a failed refresh),
-            // never a network/reachability failure. See the callers of this
-            // function and refreshAccessTokenAtStartup()'s "unauthenticated"
-            // vs "unreachable" distinction.
+            // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) -----
+            // This is the ONE function that forcibly clears a session client-side
+            // outside of an explicit sign-out. If the logout happens without any
+            // failed /auth/refresh, this line's caller= will show what actually
+            // triggered it.
+            console.log(`[auth-diag-frontend] handleAuthenticationFailure() CALLED message=${JSON.stringify(message)} caller=` + (new Error().stack || "").split("\n").slice(1, 6).join(" | "));
+            // --- END TEMPORARY DEV DIAGNOSTIC -------------------------------
             stopAuthRefreshHeartbeat();
             authToken = "";
             currentUserProfile = null;
@@ -25343,7 +25273,7 @@
             dashboardSalesToday = null;
             dashboardSubscriptionWarning = null;
             dashboardPendingReopenCount = 0;
-            setBootState(BOOT_STATE.UNAUTHENTICATED);
+            document.getElementById("global-loading-banner")?.classList.add("hidden");
             updateWarehouseUIElements();
             applyRoleRestrictions();
             updateCompanyHeaderDisplay();
@@ -25363,13 +25293,10 @@
             if (signOutInProgress) return false; // don't let a mid-flight validation repopulate the profile a sign-out just cleared
             if (!authToken) return false;
             try {
-                // Boot-critical request — bounded (see fetchWithTimeout()) so
-                // a hung connection can't leave runLoadData() waiting forever
-                // for this to settle.
-                const res = await fetchWithTimeout(`${API_URL}/auth/me`, {
+                const res = await fetch(`${API_URL}/auth/me`, {
                     credentials: "include",
                     headers: { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" }
-                }, 8000);
+                });
                 if (!res.ok) {
                     if (res.status === 401 && await refreshAccessToken()) return true;
                     if (res.status === 401) handleAuthenticationFailure("Your session has expired. Please sign in again.");
@@ -26833,7 +26760,7 @@
             const isColdStart = !coreDataEverLoaded || forceShowLoadingBanner;
             const loadingBanner = document.getElementById("global-loading-banner");
             if (isColdStart) {
-                setBootState(BOOT_STATE.BOOTING);
+                loadingBanner?.classList.remove("hidden");
                 // Restore the banner's normal reassuring text in case an
                 // earlier attempt on this same page load left it showing the
                 // "still trying to reach the server" message below — but only
@@ -26878,28 +26805,32 @@
                 }
                 if (authToken && !(await validateAuthenticationSession())) {
                     if (!authToken) {
+                        // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) --
+                        console.log(`[auth-diag-frontend] runLoadData() EARLY RETURN: authToken empty after failed validateAuthenticationSession()`);
+                        // --- END TEMPORARY DEV DIAGNOSTIC -----------------------------
                         updateDashboardMetrics();
                         renderInventoryTable([]);
                         return;
                     }
                 }
+                // --- TEMPORARY DEV DIAGNOSTIC (reload-logout investigation) ---------
+                // The state of the world right after auth is established/checked,
+                // before any business data is fetched — the key checkpoint for
+                // telling "auth never succeeded" apart from "auth succeeded, then
+                // something later cleared it".
+                console.log(`[auth-diag-frontend] runLoadData() POST-AUTH-CHECKPOINT authTokenPresent=${!!authToken} currentUserProfilePresent=${!!currentUserProfile} username=${currentUserProfile?.username}`);
+                // --- END TEMPORARY DEV DIAGNOSTIC ------------------------------------
                 const headers = authToken ? { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" } : {};
                 if (!authToken) {
                     globalProducts = []; globalSuppliers = []; warehouseRecords = []; customWarehouses = [];
                     productsSuppliersReady = true; warehousesReady = true; inventoryEverLoaded = true; coreDataEverLoaded = true;
-                    setBootState(BOOT_STATE.UNAUTHENTICATED);
                     updateDashboardMetrics(); updateWarehouseUIElements(); renderInventoryTable([]);
                     renderAuthButton(); updateGuestHeaderState(); renderMobileNav();
                     return;
                 }
-                // Boot-critical initial core-data load — bounded (see
-                // fetchWithTimeout()) so a hung connection can't leave the
-                // cold-start banner on screen indefinitely; a timeout here
-                // is caught by the same catch block as any other network
-                // failure below, which already falls back to cached data.
                 const [productRes, supplierRes] = await Promise.all([
-                    fetchWithTimeout(`${API_URL}/products/?limit=500&offset=0`, { credentials: "include", headers }, 15000),
-                    fetchWithTimeout(`${API_URL}/suppliers/?limit=500&offset=0`, { credentials: "include", headers }, 15000)
+                    fetch(`${API_URL}/products/?limit=500&offset=0`, { credentials: "include", headers }),
+                    fetch(`${API_URL}/suppliers/?limit=500&offset=0`, { credentials: "include", headers })
                 ]);
                 if (productRes.status === 401 || supplierRes.status === 401) { handleAuthenticationFailure(); return; }
                 globalProducts = productRes.ok ? await productRes.json() : [];
@@ -26965,7 +26896,7 @@
 
                 await Promise.all([coreBatch, readinessBatch]);
                 coreDataEverLoaded = true;
-                setBootState(BOOT_STATE.ONLINE);
+                loadingBanner?.classList.add("hidden");
 
                 updateWelcomeBanner();
                 updateCompanyHeaderDisplay();
@@ -26993,14 +26924,6 @@
                 updateWarehouseUIElements();
                 refreshInventoryViewFromLocalState();
                 setSyncStatus("offline");
-                // Authenticated (or guest) UI is still up, just showing
-                // cached data with an offline indicator (see
-                // setSyncStatus() above) — this is NOT the cold-start
-                // SERVER_UNAVAILABLE state, which only applies when there
-                // was nothing to show yet at all. Per invariant 4: an
-                // already-loaded app that loses connectivity stays usable,
-                // it does not fall back to a boot screen.
-                setBootState(BOOT_STATE.ONLINE);
             } finally {
                 // Unconditional safety net: whichever way this call ends —
                 // success, a guest/no-session early return, a mid-load 401,
@@ -29187,7 +29110,8 @@
 
         // Initial Data Fetch on Page Load. Authentication restoration must
         // finish before deciding whether a direct Hub/onboarding URL may open.
-        loadData().then(async () => {
+        evInitializeNativeReturn().catch(() => showToast('Email return could not initialize. Reopen Cauldra to retry.', 'error'));
+        loadData().catch(() => {}).then(async () => {
             const params = new URLSearchParams(window.location.search);
             if (params.get('cauldra_email_verify') === '1') {
                 await handleEmailVerifyReturn();
@@ -29198,5 +29122,8 @@
                 await handlePaystackReturn();
                 return;
             }
-            handleHubOnboardingRoute();
+            let savedChallenge = null;
+            try { savedChallenge = localStorage.getItem(evStorageKey); } catch (_) {}
+            if (savedChallenge && !authToken) await evResumeChallenge(savedChallenge);
+            else handleHubOnboardingRoute();
         });

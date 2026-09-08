@@ -52,3 +52,11 @@ try {
 } catch(Exception e) {
     logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
 }
+
+// No outputs/up-to-date shortcut: Android Studio and every variant fail closed
+// if frontend, www, manifest or packaged assets drift. Never invokes Gradle again.
+def verifyCauldraFrontend = tasks.register('verifyCauldraFrontend', Exec) {
+    workingDir rootProject.projectDir.parentFile
+    commandLine 'node', 'scripts/verify-native-bundle.js'
+}
+tasks.named('preBuild').configure { dependsOn verifyCauldraFrontend }
