@@ -1846,6 +1846,21 @@
                 <button type="button" onclick="closeEmployeePermissionsModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div id="employee-permissions-body" class="overflow-y-auto flex-1 pr-1"></div>
+            <!-- Draft-and-save footer (batch permission save — see
+                 handleSaveEmployeePermissions() in app.js). The diff summary
+                 and Save Changes button are the only things that change
+                 state here; every checkbox above stays a purely local
+                 draft edit until this button is pressed. -->
+            <div class="pt-3 mt-3 border-t border-borderCol shrink-0 flex items-center justify-between gap-2">
+                <span id="employee-permissions-diff-summary" class="hidden text-[10px] font-semibold text-primary whitespace-nowrap"></span>
+                <div class="flex items-center gap-2 ml-auto">
+                    <button type="button" onclick="resetEmployeePermissionsDraft()" class="text-[11px] px-3 py-2 rounded-xl bg-bgMain hover:bg-cardHover text-textSec border border-borderCol font-semibold transition cursor-pointer">Reset</button>
+                    <button type="button" id="employee-permissions-save" onclick="handleSaveEmployeePermissions()" disabled
+                        class="text-[11px] px-4 py-2 rounded-xl bg-primary hover:bg-primaryHover disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-primary text-white font-semibold transition shadow-md shadow-primary/20 cursor-pointer">
+                        Save Changes
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 

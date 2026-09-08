@@ -20538,16 +20538,42 @@
         };
 
         let employeePermissionsTargetId = null;
-        let employeePermissionsData = null; // last-loaded { user_id, role, categories } from GET /users/{id}/permissions
+        let employeePermissionsData = null; // last-loaded { user_id, role, categories, version } from GET /users/{id}/permissions
+        // The draft-and-save workflow's two states (spec section 2). Both
+        // are Sets of granted permission codes — cheap to diff, cheap to
+        // copy. `saved` is the last known authoritative state (what the
+        // server would return right now); `draft` is what the checkboxes
+        // currently show, which may differ until Save Changes is clicked.
+        let employeePermissionsSaved = new Set();
+        let employeePermissionsDraft = new Set();
+
+        function employeePermissionsIsDirty() {
+            if (employeePermissionsSaved.size !== employeePermissionsDraft.size) return true;
+            for (const code of employeePermissionsDraft) if (!employeePermissionsSaved.has(code)) return true;
+            return false;
+        }
 
         async function openEmployeePermissionsModal(userId) {
+            // Guard against switching target (or re-opening) while a
+            // previous edit is still unsaved — spec section 4 applies here
+            // too, not just to explicit close/navigate actions.
+            if (employeePermissionsTargetId != null && employeePermissionsTargetId !== userId && employeePermissionsIsDirty()) {
+                const proceed = await showCustomConfirm("Discard unsaved permission changes?", "Unsaved Changes", "Discard Changes", "Keep Editing");
+                if (!proceed) return;
+            }
             employeePermissionsTargetId = userId;
             document.getElementById('employee-permissions-modal')?.classList.remove('hidden');
             await loadEmployeePermissions();
         }
-        function closeEmployeePermissionsModal() {
+
+        async function closeEmployeePermissionsModal() {
+            if (employeePermissionsIsDirty()) {
+                const proceed = await showCustomConfirm("Discard unsaved permission changes?", "Unsaved Changes", "Discard Changes", "Keep Editing");
+                if (!proceed) return;
+            }
             document.getElementById('employee-permissions-modal')?.classList.add('hidden');
             employeePermissionsTargetId = null; employeePermissionsData = null;
+            employeePermissionsSaved = new Set(); employeePermissionsDraft = new Set();
         }
 
         async function loadEmployeePermissions() {
@@ -20559,6 +20585,9 @@
                 const d = await r.json().catch(() => ({}));
                 if (!r.ok) { box.innerHTML = `<div class="p-4 text-center text-xs text-danger">${escapeHtml(friendlyErrorMessage(d, "Could not load permissions."))}</div>`; return; }
                 employeePermissionsData = d;
+                employeePermissionsSaved = new Set();
+                Object.values(d.categories || {}).flat().forEach(row => { if (row.current_effective) employeePermissionsSaved.add(row.code); });
+                employeePermissionsDraft = new Set(employeePermissionsSaved);
                 renderEmployeePermissions();
             } catch (_) {
                 box.innerHTML = `<div class="p-4 text-center text-xs text-danger">Could not load permissions. Please try again.</div>`;
@@ -20576,17 +20605,28 @@
                 </select>
                 <button type="button" onclick="applyEmployeePermissionPreset()" class="text-[11px] px-3 py-1.5 rounded-lg bg-primary/15 text-primary border border-primary/30 font-semibold cursor-pointer whitespace-nowrap">Apply</button>
             </div>
-            <div class="text-[9px] text-textSec mb-3">Presets just tick the boxes below — nothing is saved until you toggle a permission, and every box stays individually editable.</div>`;
+            <div class="text-[9px] text-textSec mb-3">Presets just tick the boxes below — nothing is saved until you click Save Changes, and every box stays individually editable.</div>`;
 
             const groupsHtml = Object.entries(categories).map(([category, rows]) => {
                 const rowsHtml = rows.map(row => {
                     const disabled = !row.editable_by_me;
-                    const stateLabel = disabled ? 'Hard restriction' : (row.is_override ? (row.current_effective ? 'Explicit grant' : 'Explicit denial') : 'Inherited default');
-                    const stateColor = disabled ? 'text-textSec' : (row.is_override ? (row.current_effective ? 'text-success' : 'text-danger') : 'text-textSec');
+                    const draftGranted = employeePermissionsDraft.has(row.code);
+                    // "Explicit grant/denial" vs "Inherited default" reflects
+                    // the DRAFT against this role's default — a live preview
+                    // of what would become an override if saved, not just
+                    // the last-saved state (spec section 2's "checkboxes
+                    // should feel instant" extends to this label too).
+                    const targetRole = String(employeePermissionsData.role || '').toLowerCase();
+                    const roleDefault = targetRole === 'admin' ? row.admin_default
+                        : targetRole === 'manager' ? row.manager_default
+                        : row.staff_default;
+                    const isDraftOverride = draftGranted !== !!roleDefault;
+                    const stateLabel = disabled ? 'Hard restriction' : (isDraftOverride ? (draftGranted ? 'Explicit grant' : 'Explicit denial') : 'Inherited default');
+                    const stateColor = disabled ? 'text-textSec' : (isDraftOverride ? (draftGranted ? 'text-success' : 'text-danger') : 'text-textSec');
                     return `<label class="flex items-center justify-between gap-2 py-1.5 border-b border-borderCol/40 last:border-0 ${disabled ? 'opacity-50' : 'cursor-pointer'}">
                         <span class="flex items-center gap-2 min-w-0">
-                            <input type="checkbox" data-permission-code="${escapeHtml(row.code)}" ${row.current_effective ? 'checked' : ''} ${disabled ? 'disabled' : ''}
-                                onchange="toggleEmployeePermissionCheckbox(this)" class="accent-primary cursor-pointer">
+                            <input type="checkbox" data-permission-code="${escapeHtml(row.code)}" ${draftGranted ? 'checked' : ''} ${disabled ? 'disabled' : ''}
+                                onchange="handleEmployeePermissionCheckboxChange(this)" class="accent-primary cursor-pointer">
                             <span class="text-[11px] text-textMain truncate">${escapeHtml(row.label)}${row.reserved ? ' <span class=\"text-[8px] text-textSec\">(coming soon)</span>' : ''}</span>
                         </span>
                         <span class="text-[9px] ${stateColor} shrink-0">${stateLabel}</span>
@@ -20599,6 +20639,17 @@
             }).join('');
 
             box.innerHTML = presetRow + (groupsHtml || `<div class="py-8 text-center text-xs text-textSec">No permissions to show.</div>`);
+            updateEmployeePermissionsSaveState();
+        }
+
+        // Local-only — updates draftPermissions and re-renders. No backend
+        // call, no reload, no toast, no audit event (spec section 2). The
+        // ONLY thing that talks to the server is Save Changes.
+        function handleEmployeePermissionCheckboxChange(checkbox) {
+            const code = checkbox.dataset.permissionCode;
+            if (checkbox.checked) employeePermissionsDraft.add(code);
+            else employeePermissionsDraft.delete(code);
+            renderEmployeePermissions();
         }
 
         function applyEmployeePermissionPreset() {
@@ -20610,32 +20661,83 @@
             checkboxes.forEach(cb => {
                 if (cb.disabled) return; // never touch a hard-restricted/uneditable row
                 const wants = grantSet.has(cb.dataset.permissionCode);
-                if (cb.checked !== wants) { cb.checked = wants; toggleEmployeePermissionCheckbox(cb); }
+                if (wants) employeePermissionsDraft.add(cb.dataset.permissionCode);
+                else employeePermissionsDraft.delete(cb.dataset.permissionCode);
             });
+            renderEmployeePermissions();
         }
 
-        async function toggleEmployeePermissionCheckbox(checkbox) {
-            const code = checkbox.dataset.permissionCode;
-            const granted = checkbox.checked;
-            checkbox.disabled = true;
+        // Enables/disables Save Changes and renders the compact "N changes
+        // pending" summary (spec section 3 + 13). Called after every draft
+        // mutation via renderEmployeePermissions() — never needs its own
+        // separate call site.
+        function updateEmployeePermissionsSaveState() {
+            const saveBtn = document.getElementById('employee-permissions-save');
+            const summaryEl = document.getElementById('employee-permissions-diff-summary');
+            if (!saveBtn) return;
+            let added = 0, removed = 0;
+            for (const code of employeePermissionsDraft) if (!employeePermissionsSaved.has(code)) added++;
+            for (const code of employeePermissionsSaved) if (!employeePermissionsDraft.has(code)) removed++;
+            const dirty = added > 0 || removed > 0;
+            saveBtn.disabled = !dirty;
+            if (summaryEl) {
+                summaryEl.textContent = dirty ? `${added ? "+" + added : ""}${added && removed ? " / " : ""}${removed ? "-" + removed : ""} pending` : "";
+                summaryEl.classList.toggle('hidden', !dirty);
+            }
+        }
+
+        async function handleSaveEmployeePermissions() {
+            if (!employeePermissionsTargetId || !employeePermissionsIsDirty()) return;
+            const saveBtn = document.getElementById('employee-permissions-save');
+            const originalLabel = saveBtn ? saveBtn.innerHTML : '';
+            if (saveBtn) { saveBtn.disabled = true; saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving…'; }
             try {
                 const r = await fetch(`${API_URL}/users/${employeePermissionsTargetId}/permissions`, {
-                    method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
-                    body: JSON.stringify({ permission: code, granted }),
+                    method: "PUT", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+                    body: JSON.stringify({ permissions: Array.from(employeePermissionsDraft), expected_version: employeePermissionsData?.version || null }),
                 });
                 const d = await r.json().catch(() => ({}));
                 if (!r.ok) {
-                    showToast(friendlyErrorMessage(d, "Could not update this permission."), "error");
-                    checkbox.checked = !granted; // revert — never leave the UI claiming a save that didn't happen
-                } else {
-                    await loadEmployeePermissions(); // re-render from the server's own response, never assume
+                    // Draft state is intentionally left exactly as the user
+                    // left it (spec section 3's failure behavior) — a
+                    // stale-version 409 is common enough (another
+                    // admin/manager editing concurrently) to deserve its
+                    // own copy rather than the generic fallback.
+                    const msg = r.status === 409
+                        ? friendlyErrorMessage(d, "Permissions changed since you opened this editor. Reload the latest permissions before saving.")
+                        : friendlyErrorMessage(d, "Could not save permission changes.");
+                    showToast(msg, "error");
+                    return;
                 }
+                // Server response is the new authoritative baseline — never
+                // assume the request body was accepted unchanged (spec
+                // section 15).
+                employeePermissionsSaved = new Set(d.permissions || []);
+                employeePermissionsDraft = new Set(employeePermissionsSaved);
+                if (employeePermissionsData) employeePermissionsData.version = d.version;
+                // Recompute each row's is_override/current_effective locally
+                // from the fresh saved set + the role-default fields already
+                // present per row — an in-place UI update with no second
+                // network round-trip (spec section 3: "do not force a full
+                // page reload after save").
+                Object.values(employeePermissionsData?.categories || {}).flat().forEach(row => {
+                    row.current_effective = employeePermissionsSaved.has(row.code);
+                });
+                renderEmployeePermissions();
+                const parts = [];
+                if (d.added?.length) parts.push(`+${d.added.length} added`);
+                if (d.removed?.length) parts.push(`-${d.removed.length} removed`);
+                showToast(parts.length ? `Permissions updated (${parts.join(", ")}).` : "Permissions updated.", "success");
             } catch (_) {
-                showToast("Could not update this permission. Please try again.", "error");
-                checkbox.checked = !granted;
+                showToast("Could not save permission changes. Please try again.", "error");
             } finally {
-                checkbox.disabled = false;
+                if (saveBtn) { saveBtn.disabled = !employeePermissionsIsDirty(); saveBtn.innerHTML = originalLabel; }
             }
+        }
+
+        function resetEmployeePermissionsDraft() {
+            employeePermissionsDraft = new Set(employeePermissionsSaved);
+            renderEmployeePermissions();
         }
 
         // Exports exactly the filtered set getFilteredEmployees() already

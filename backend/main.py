@@ -3811,6 +3811,18 @@ def get_effective_permissions(user: User) -> dict:
         effective[code] = bool(overrides[code]) if code in overrides else default
     return effective
 
+def compute_permission_version(target: User) -> str:
+    """Cheap optimistic-concurrency token for the batch permission editor
+    (spec section 16). No new column/migration: this is just a hash of the
+    target's raw override JSON, so ANY change to permission_overrides —
+    from this endpoint, the legacy single-permission one, or a role change
+    that alters what "default" resolves to underneath an unrelated stored
+    override — changes this string. The editor sends back whatever value
+    it was handed at load time; a mismatch at save time means "reload the
+    latest permissions before saving", exactly as the spec asks for."""
+    raw = target.permission_overrides or ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
 def has_permission(user: User, code: str) -> bool:
     if code not in PERMISSIONS:
         return False
@@ -5579,6 +5591,17 @@ class PermissionOverrideUpdate(BaseModel):
     permission: str
     granted: bool
 
+class PermissionBatchUpdate(BaseModel):
+    # The COMPLETE intended set of granted permission codes for the target
+    # user (spec section 5) — never a client-computed added/removed delta.
+    # The server is the only thing allowed to decide what changed.
+    permissions: List[str]
+    # Optimistic-concurrency token from the GET response the editor was
+    # opened with (spec section 16) — omitted (None) skips the check
+    # entirely, which existing/future callers that don't track it can rely
+    # on, but the frontend permission editor always sends it.
+    expected_version: Optional[str] = None
+
 class PriceListUploadRequest(BaseModel):
     supplier_id: int
     product_id: Optional[int] = None
@@ -6812,7 +6835,10 @@ def get_user_permissions(user_id: int, actor: User = Depends(get_current_user), 
             "admin_default": bool(spec.get("admin", False)), "manager_default": bool(spec.get("manager", False)), "staff_default": bool(spec.get("staff", False)),
             "current_effective": effective.get(code, default), "is_override": is_override, "editable_by_me": editable,
         })
-    return {"user_id": target.id, "role": target.role, "categories": groups}
+    # `version` is the batch editor's optimistic-concurrency token (spec
+    # section 16) — the frontend echoes it back unchanged in
+    # PermissionBatchUpdate.expected_version at save time.
+    return {"user_id": target.id, "role": target.role, "categories": groups, "version": compute_permission_version(target)}
 
 @app.post("/users/{user_id}/permissions")
 def update_user_permission(user_id: int, data: PermissionOverrideUpdate, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -6821,6 +6847,136 @@ def update_user_permission(user_id: int, data: PermissionOverrideUpdate, actor: 
     effective = set_permission_override(db, actor, target, data.permission, data.granted)
     db.commit()
     return {"message": "Permission updated.", "permissions": effective}
+
+# -----------------------------------------------------------------------------
+# BATCH PERMISSION SAVE — Team Management > Employee > Access & Permissions'
+# "Save Changes" button. Replaces the old one-request-per-checkbox flow: the
+# editor collects every change locally (no backend write per click — see
+# app.js's employeePermissionsDraft) and sends the COMPLETE intended
+# permission set exactly once. The server independently derives
+# added/removed against its OWN authoritative current state — a client-
+# supplied delta is never trusted — validates the entire batch against
+# can_edit_permission() BEFORE changing anything (so one disallowed code
+# rejects the whole request, never a partial save), and writes exactly one
+# consolidated audit event for the whole save.
+#
+# The legacy POST above is left in place (unused by this app's own frontend
+# as of this pass, but not removed — see CHANGES.md for why) purely for any
+# other integration that might already depend on its single-permission
+# shape; it still writes its own one-audit-row-per-call as it always has.
+# -----------------------------------------------------------------------------
+@app.put("/users/{user_id}/permissions")
+def update_user_permissions_batch(user_id: int, data: PermissionBatchUpdate, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    target = db.query(User).filter(User.id == user_id, User.business_id == actor.business_id).first()
+    if not target: raise HTTPException(status_code=404, detail="Account is unavailable.")
+
+    # Same scope/visibility gate as GET /users/{user_id}/permissions above —
+    # deliberately checked here independent of whether anything in the
+    # requested set actually differs from the current state, so a no-op
+    # save from someone with no business editing this target's permissions
+    # at all is rejected exactly like a real one would be, not silently
+    # allowed through just because nothing changed.
+    if actor.id == target.id:
+        raise HTTPException(status_code=403, detail="You cannot edit your own permissions.")
+    if actor.role == "admin":
+        if target.role not in ("manager", "staff"):
+            raise HTTPException(status_code=403, detail="This account's permissions cannot be edited here.")
+    elif actor.role == "manager":
+        if target.role != "staff":
+            raise HTTPException(status_code=403, detail="Managers can only edit Staff permissions.")
+    else:
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    if data.expected_version is not None and data.expected_version != compute_permission_version(target):
+        raise HTTPException(status_code=409, detail="Permissions changed since you opened this editor. Reload the latest permissions before saving.")
+
+    requested = set(data.permissions or [])
+    unknown = requested - set(PERMISSIONS.keys())
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown permission code(s): {', '.join(sorted(unknown))}")
+
+    before = get_effective_permissions(target)
+    role = (target.role or "staff").lower()
+
+    # PASS 1 — validate the entire intended set against can_edit_permission()
+    # for every code that would actually change. Nothing is written yet.
+    # One disallowed code anywhere in the batch aborts the whole request
+    # (spec section 6) — never a partial save of "the other 11".
+    for code in PERMISSIONS:
+        wants = code in requested
+        if wants == before.get(code, False):
+            continue  # not an actual change — never needs authorization
+        allowed, reason = can_edit_permission(actor, target, code)
+        if not allowed:
+            raise HTTPException(status_code=403, detail=f"{reason} ({PERMISSIONS[code]['label']})")
+
+    # PASS 2 — apply. Same one-key-at-a-time override storage shape as
+    # set_permission_override() (a value matching the role default is
+    # dropped, not stored, so inheritance still works after a future role
+    # change) — just computed as one batch instead of N separate calls.
+    try:
+        overrides = json.loads(target.permission_overrides) if target.permission_overrides else {}
+    except (ValueError, TypeError):
+        overrides = {}
+
+    added, removed = [], []
+    for code, spec in PERMISSIONS.items():
+        wants = code in requested
+        was = before.get(code, False)
+        if wants == was:
+            continue
+        default = bool(spec.get(role, False))
+        if wants == default:
+            overrides.pop(code, None)
+        else:
+            overrides[code] = wants
+        (added if wants else removed).append(code)
+
+    if not added and not removed:
+        # Identical-to-current save (spec section 9): no audit event, no
+        # write at all — just hand back the current authoritative state.
+        # The frontend normally prevents this by keeping Save disabled, but
+        # the backend must be safe even if it's called anyway.
+        return {
+            "user_id": target.id,
+            "permissions": [c for c, v in before.items() if v],
+            "added": [], "removed": [],
+            "version": compute_permission_version(target),
+        }
+
+    target.permission_overrides = json.dumps(overrides) if overrides else None
+
+    # PASS 3 — ONE consolidated audit event for the whole save (spec
+    # section 10/11), never one row per changed permission.
+    description = f"Updated permissions for {target.username}."
+    detail_parts = []
+    if added: detail_parts.append("Added: " + ", ".join(PERMISSIONS[c]["label"] for c in added))
+    if removed: detail_parts.append("Removed: " + ", ".join(PERMISSIONS[c]["label"] for c in removed))
+    if detail_parts: description += " " + " ".join(detail_parts)
+    add_audit(
+        db, actor, "USER_PERMISSIONS_UPDATED", description, target=target,
+        action_category="PERMISSIONS", resource_type="permission", resource_id=None,
+        metadata={"added": added, "removed": removed},
+    )
+
+    # Permission checks already read `permission_overrides` fresh from the
+    # DB on every request via get_effective_permissions() — nothing about
+    # authorization is cached in a JWT claim, so (unlike disable/enable/
+    # password reset elsewhere in this file) there is no stale-session risk
+    # to fix here and therefore no reason to bump auth_version or revoke
+    # sessions (spec section 12: "if permission checks already read
+    # authoritative DB state on every request, do not add unnecessary
+    # session destruction").
+    db.commit()
+    db.refresh(target)
+    after = get_effective_permissions(target)
+
+    return {
+        "user_id": target.id,
+        "permissions": [c for c, v in after.items() if v],
+        "added": added, "removed": removed,
+        "version": compute_permission_version(target),
+    }
 
 # -----------------------------------------------------------------------------
 # ACCOUNT ACTION REQUESTS + AUDIT LOGS
