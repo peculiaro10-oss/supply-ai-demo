@@ -3,6 +3,7 @@ const path = require('path');
 
 const port = Number(process.argv[2] || 9333);
 const outputDir = process.argv[3] || process.cwd();
+const testOrigin = process.argv[4] || 'http://127.0.0.1:8768';
 const viewports = [
   ['mobile', 375, 812, true],
   ['ipad-portrait', 768, 1024, true],
@@ -52,11 +53,11 @@ async function newPage() {
     const cdp = await connect(page.webSocketDebuggerUrl);
     await cdp.call('Page.enable');
     await cdp.call('Runtime.enable');
-    await cdp.call('Storage.clearDataForOrigin', { origin: 'http://127.0.0.1:8768', storageTypes: 'all' });
+    await cdp.call('Storage.clearDataForOrigin', { origin: testOrigin, storageTypes: 'all' });
     await cdp.call('Emulation.setDeviceMetricsOverride', {
       width, height, deviceScaleFactor: 1, mobile, screenWidth: width, screenHeight: height,
     });
-    await cdp.call('Page.navigate', { url: 'http://127.0.0.1:8768/offline-browser-harness.html' });
+    await cdp.call('Page.navigate', { url: `${testOrigin}/offline-browser-harness.html` });
     let state;
     for (let attempt = 0; attempt < 160; attempt += 1) {
       await pause(250);
@@ -68,7 +69,7 @@ async function newPage() {
       if (state.ready) break;
     }
     const measured = await cdp.call('Runtime.evaluate', {
-      expression: `(() => { const dialog=document.getElementById('offline-unlock-dialog'); const rect=dialog?.getBoundingClientRect(); return {ready:document.body.dataset.browserChecks,innerWidth,innerHeight,scrollWidth:document.documentElement.scrollWidth,scrollHeight:document.documentElement.scrollHeight,dialog:rect?{left:rect.left,top:rect.top,right:rect.right,bottom:rect.bottom,width:rect.width,height:rect.height,open:dialog.open}:null,minControlHeight:dialog?Math.min(...[...dialog.querySelectorAll('button,input,select')].map(node=>node.getBoundingClientRect().height)):0,results:[...document.querySelectorAll('#results li')].map(node=>node.textContent)} })()`,
+      expression: `(() => { const dialog=document.getElementById('offline-unlock-dialog'); const rect=dialog?.getBoundingClientRect(); const controls=dialog?[...dialog.querySelectorAll('button:not([hidden]),input:not([hidden]),select:not([hidden])')].filter(node=>node.getClientRects().length):[]; return {ready:document.body.dataset.browserChecks,innerWidth,innerHeight,scrollWidth:document.documentElement.scrollWidth,scrollHeight:document.documentElement.scrollHeight,dialog:rect?{left:rect.left,top:rect.top,right:rect.right,bottom:rect.bottom,width:rect.width,height:rect.height,open:dialog.open}:null,minControlHeight:controls.length?Math.min(...controls.map(node=>node.getBoundingClientRect().height)):0,results:[...document.querySelectorAll('#results li')].map(node=>node.textContent)} })()`,
       returnByValue: true,
     });
     const value = measured.result.value;

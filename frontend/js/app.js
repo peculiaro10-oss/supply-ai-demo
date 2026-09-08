@@ -218,7 +218,7 @@
             if (!navigator.onLine) return false;
             try {
                 const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 1800);
+                const timer = setTimeout(() => controller.abort(), 6000);
                 const res = await fetch(`${API_URL}/health`, { cache: "no-store", signal: controller.signal });
                 clearTimeout(timer);
                 return res.ok;
@@ -17721,8 +17721,11 @@
                 section.innerHTML = `<h4 class="text-[11px] font-bold text-textMain uppercase tracking-wider">Offline Access</h4>
                     <div id="offline-access-summary" class="text-[11px] text-textSec" role="status"></div>
                     <div class="offline-settings-actions">
-                        <button type="button" onclick="openOfflineSetupFromProfile()">Enable / refresh</button>
+                        <button type="button" id="offline-enable-button" onclick="openOfflineSetupFromProfile()">Enable Offline Access · Set PIN</button>
+                        <button type="button" id="offline-refresh-button" onclick="refreshOfflineAccessFromProfile()">Refresh Offline Access</button>
                         <button type="button" onclick="changeOfflinePinFromProfile()">Change offline PIN</button>
+                        <button type="button" id="offline-biometric-enable-button" onclick="enableOfflineBiometricsFromProfile()">Enable Biometrics</button>
+                        <button type="button" id="offline-biometric-disable-button" onclick="disableOfflineBiometricsFromProfile()">Disable Biometrics</button>
                         <button type="button" onclick="disableOfflineAccessFromProfile()">Disable offline access</button>
                         <button type="button" class="offline-danger" onclick="removeOfflineDataFromProfile()">Remove offline data from this device</button>
                     </div>`;
@@ -17732,9 +17735,15 @@
             const identity = (await window.CauldraOffline.listIdentities().catch(() => [])).find((item) => item.scope === scope);
             const summary = document.getElementById("offline-access-summary");
             if (!summary) return;
-            summary.textContent = identity && identity.expires_at > Date.now()
-                ? `Enabled · Last verified ${new Date(identity.last_server_verified_at).toLocaleString()} · Expires ${new Date(identity.expires_at).toLocaleString()} · PIN unlock`
-                : "Not enabled on this device";
+            const biometric = identity ? await window.CauldraOffline.biometricStatus(scope) : { available: false, enabled: false };
+            const enabled = !!(identity && !identity.revoked_locally_at && identity.expires_at > Date.now());
+            summary.textContent = enabled
+                ? `Enabled · Last verified ${new Date(identity.last_server_verified_at).toLocaleString()} · Expires ${new Date(identity.expires_at).toLocaleString()} · PIN required${biometric.enabled ? " · Biometrics enabled with PIN fallback" : ""}`
+                : (identity?.revoked_locally_at ? "Disabled on this device · encrypted local work preserved" : "Not enabled on this device");
+            document.getElementById("offline-enable-button").hidden = !!identity;
+            document.getElementById("offline-refresh-button").hidden = !identity;
+            document.getElementById("offline-biometric-enable-button").hidden = !enabled || !biometric.available || biometric.enabled;
+            document.getElementById("offline-biometric-disable-button").hidden = !biometric.enabled;
         }
 
         async function openOfflineSetupFromProfile() {
@@ -17745,13 +17754,28 @@
             window.CauldraOffline?.openSetup({ apiUrl: API_URL, token: authToken, user: currentUserProfile, business: businessProfile });
         }
 
+        async function refreshOfflineAccessFromProfile() {
+            if (!authToken) { showToast("Internet connection required for this action.", "info"); return; }
+            try {
+                await window.CauldraOffline.refreshAccess({ apiUrl: API_URL, token: authToken, user: currentUserProfile, business: businessProfile });
+                showToast("Offline Access refreshed.", "success"); await renderOfflineAccessSettings();
+            } catch (error) { showToast(error.message, "error"); }
+        }
+
         async function changeOfflinePinFromProfile() {
-            if (!window.CauldraOffline?.isUnlocked()) { showToast("Unlock Offline Access first.", "info"); return; }
-            const oldPin = window.prompt("Enter your current offline PIN");
-            if (oldPin == null) return;
-            const newPin = window.prompt("Enter a new 6–12 digit offline PIN");
-            if (newPin == null) return;
-            try { await window.CauldraOffline.changePin(oldPin, newPin); showToast("Offline PIN changed.", "success"); await renderOfflineAccessSettings(); }
+            try { window.CauldraOffline.openChangePin(); }
+            catch (error) { showToast(error.message, "error"); }
+        }
+
+        async function enableOfflineBiometricsFromProfile() {
+            try { await window.CauldraOffline.openBiometricSetup(false); }
+            catch (error) { showToast(error.message, "info"); }
+        }
+
+        async function disableOfflineBiometricsFromProfile() {
+            if (!(await showCustomConfirm("Disable biometric unlock? Your Offline PIN will remain available.", "Disable Biometrics"))) return;
+            const scope = `${businessProfile?.id || businessProfile?.business_id}:${currentUserProfile?.id}`;
+            try { await window.CauldraOffline.disableBiometrics(scope); showToast("Biometric unlock disabled. Your Offline PIN is unchanged.", "info"); await renderOfflineAccessSettings(); }
             catch (error) { showToast(error.message, "error"); }
         }
 
@@ -25547,6 +25571,8 @@
         async function resumeOfflineVaultForOnlineSession() {
             if (!window.CauldraOffline || !currentUserProfile || !businessProfile) return null;
             const snapshot = await window.CauldraOffline.resumeOnline({ user: currentUserProfile, business: businessProfile });
+            window.CauldraOffline.closeUnlockUi();
+            window.CauldraOffline.setState(window.CauldraOffline.ACCESS_STATES.ONLINE);
             if (snapshot && !coreDataEverLoaded) applyOfflineSnapshot(snapshot, window.CauldraOffline.currentGrant());
             offlineWorkspaceUnlocked = false;
             document.body.classList.remove("offline-mode");
@@ -25554,17 +25580,13 @@
             return snapshot;
         }
 
-        async function maybeOfferOfflineAccess() {
-            if (!authToken || !window.CauldraOffline || isNativeAppShell() === false && location.protocol !== "https:" && location.hostname !== "127.0.0.1" && location.hostname !== "localhost") return;
-            const scope = `${businessProfile?.id || businessProfile?.business_id}:${currentUserProfile?.id}`;
-            const existing = (await window.CauldraOffline.listIdentities().catch(() => [])).some((identity) => identity.scope === scope && identity.expires_at > Date.now());
-            if (existing || sessionStorage.getItem(`cauldra-offline-offered:${scope}`)) return;
-            sessionStorage.setItem(`cauldra-offline-offered:${scope}`, "1");
-            window.CauldraOffline.openSetup({ apiUrl: API_URL, token: authToken, user: currentUserProfile, business: businessProfile });
-        }
-
         window.addEventListener("cauldra-offline-unlocked", (event) => {
             try { applyOfflineSnapshot(event.detail.snapshot, event.detail.grant); } catch (error) { showToast(error.message, "error"); }
+        });
+        window.addEventListener("cauldra-offline-settings-changed", () => renderOfflineAccessSettings().catch(() => {}));
+        window.addEventListener("cauldra-offline-locked", () => {
+            offlineWorkspaceUnlocked = false;
+            document.body.classList.remove("offline-mode");
         });
         window.addEventListener("cauldra-retry-online", () => loadData({ forceShowLoadingBanner: true }));
 
@@ -27252,7 +27274,6 @@
                 updateGuestHeaderState();
                 scheduleSyncSoon();
                 window.CauldraOffline?.refreshSnapshot({ apiUrl: API_URL, token: authToken }).catch(() => {});
-                maybeOfferOfflineAccess().catch(() => {});
             } catch (err) {
                 // Could not reach the server for a fresh snapshot — rather than
                 // wiping the screen blank, fall back to whatever was cached

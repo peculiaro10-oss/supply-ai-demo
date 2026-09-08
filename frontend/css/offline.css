@@ -18,3 +18,15 @@
 @media(min-width:1101px){.offline-dialog{width:min(720px,calc(100vw - 80px));padding:28px}.offline-sync-dialog #offline-conflict-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.offline-sync-dialog article{margin:0}.offline-status-pill{max-width:360px}}
 
 @media(prefers-reduced-motion:reduce){.offline-dialog *{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+
+/* Production Offline Access identity and native-biometric controls. */
+.offline-dialog [hidden]{display:none!important}.offline-brand{display:flex;align-items:center;gap:9px;margin-bottom:10px;font-size:15px;font-weight:800;letter-spacing:.01em}.offline-brand span{display:inline-grid;place-items:center;width:34px;height:34px;border-radius:10px;background:#6ee7b7;color:#0b1c16;font-size:18px}.offline-state-label{display:inline-flex;align-items:center;gap:7px;margin-bottom:16px;padding:5px 9px;border:1px solid #8bb9a5;border-radius:999px;background:#203a2e;color:#d8f9e9;font-size:11px;font-weight:750}.offline-state-label span{color:#f4c96b}.offline-dialog-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}.offline-dialog-actions button{margin:0}.offline-dialog button:disabled{cursor:not-allowed;opacity:.55}.offline-unlock-dialog{box-shadow:0 24px 70px #0009}.offline-unlock-dialog #offline-unlock-copy{color:#d2ded8}.offline-unlock-dialog #offline-unlock-status:empty{display:none}.offline-unlock-dialog #offline-unlock-status:not(:empty){padding:10px 12px;border:1px solid #8b7445;border-radius:9px;background:#392f1e}.offline-settings-actions button[hidden]{display:none!important}
+
+/* Mobile: every decision remains thumb-sized and single-column. */
+@media(max-width:600px){.offline-dialog-actions{display:grid;grid-template-columns:1fr}.offline-dialog-actions button{width:100%}.offline-brand{font-size:14px}.offline-state-label{margin-bottom:12px}}
+
+/* Tablet portrait: full-width fields with compact two-up actions where space permits. */
+@media(min-width:601px) and (max-width:900px) and (orientation:portrait){.offline-dialog-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.offline-dialog-actions button{width:100%}.offline-dialog-actions button:last-child:nth-child(odd){grid-column:1/-1}}
+
+/* Tablet landscape and desktop keep actions readable without stretching controls. */
+@media(min-width:901px){.offline-dialog-actions{justify-content:flex-start}.offline-dialog-actions button{min-width:150px}}

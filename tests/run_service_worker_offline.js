@@ -2,7 +2,8 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const port = Number(process.argv[2] || 9333);
-const origin = 'http://127.0.0.1:8769';
+const originPort = Number(process.argv[3] || 8769);
+const origin = `http://127.0.0.1:${originPort}`;
 const frontend = path.resolve(__dirname, '..', 'frontend');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.woff2': 'font/woff2' };
@@ -40,7 +41,7 @@ async function connect(url) {
 }
 
 (async () => {
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(8769, '127.0.0.1', resolve); });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(originPort, '127.0.0.1', resolve); });
   const created = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' });
   const page = await created.json();
   const cdp = await connect(page.webSocketDebuggerUrl);
@@ -53,6 +54,7 @@ async function connect(url) {
     expression: `(async()=>{await navigator.serviceWorker.register('/sw.js');await Promise.race([navigator.serviceWorker.ready,new Promise((_,reject)=>setTimeout(()=>reject(new Error('service worker ready timeout')),15000))]);return true})()`,
     awaitPromise: true,
   });
+  await pause(1000);
   await cdp.call('Page.reload', { ignoreCache: false });
   await pause(2500);
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -62,7 +64,7 @@ async function connect(url) {
     await pause(2000);
   }
   const cached = await cdp.call('Runtime.evaluate', {
-    expression: `(async()=>{const cache=await caches.open('cauldra-shell-v8-offline-first');const urls=['/','/js/app.js','/js/offline.js','/css/offline.css'];const found={};for(const url of urls)found[url]=!!(await cache.match(url));found.controlled=!!navigator.serviceWorker.controller;return found})()`,
+    expression: `(async()=>{const cacheName='cauldra-shell-v8-offline-first';const cache=await caches.open(cacheName);const urls=['/','/js/app.js','/js/offline.js','/css/offline.css'];const found={};for(const url of urls)found[url]=!!(await cache.match(new Request(location.origin+url)));found.controlled=!!navigator.serviceWorker.controller;found.cacheNames=await caches.keys();found.entries=(await cache.keys()).map(request=>new URL(request.url).pathname);return found})()`,
     awaitPromise: true,
     returnByValue: true,
   });
@@ -74,11 +76,11 @@ async function connect(url) {
     if (opened.result.value) break;
   }
   const state = await cdp.call('Runtime.evaluate', {
-    expression: `({title:document.title,offlineModule:!!window.CauldraOffline,unlockOpen:!!document.getElementById('offline-unlock-dialog')?.open,firstTime:/first time/i.test(document.getElementById('offline-unlock-dialog')?.textContent||''),bodyWidth:document.documentElement.scrollWidth,viewportWidth:innerWidth})`,
+    expression: `({title:document.title,offlineModule:!!window.CauldraOffline,unlockOpen:!!document.getElementById('offline-unlock-dialog')?.open,firstSignInRequired:/internet connection.*required.*first sign-in/i.test(document.getElementById('offline-unlock-dialog')?.textContent||''),bodyWidth:document.documentElement.scrollWidth,viewportWidth:innerWidth})`,
     returnByValue: true,
   });
   const result = { cached: cached.result.value, coldOffline: state.result.value };
-  result.passed = Object.values(result.cached).every(Boolean) && result.coldOffline.offlineModule && result.coldOffline.unlockOpen && result.coldOffline.firstTime && result.coldOffline.bodyWidth <= result.coldOffline.viewportWidth + 1;
+  result.passed = ['/','/js/app.js','/js/offline.js','/css/offline.css'].every(pathname=>result.cached[pathname]) && result.cached.controlled && result.coldOffline.offlineModule && result.coldOffline.unlockOpen && result.coldOffline.firstSignInRequired && result.coldOffline.bodyWidth <= result.coldOffline.viewportWidth + 1;
   console.log(JSON.stringify(result, null, 2));
   await cdp.call('Page.close');
   cdp.close();

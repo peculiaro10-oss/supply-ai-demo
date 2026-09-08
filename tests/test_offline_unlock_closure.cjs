@@ -1,0 +1,24 @@
+'use strict';
+const assert=require('assert'),fs=require('fs'),path=require('path');
+const root=path.resolve(__dirname,'..');
+const read=rel=>fs.readFileSync(path.join(root,rel),'utf8');
+const offline=read('frontend/js/offline.js'),app=read('frontend/js/app.js'),index=read('frontend/index.html');
+const native=read('android/app/src/main/java/com/example/cauldra/CauldraBiometricPlugin.java');
+const main=read('android/app/src/main/java/com/example/cauldra/MainActivity.java');
+const manifest=read('android/app/src/main/AndroidManifest.xml'),gradle=read('android/app/build.gradle');
+
+assert.match(index,/<script src="\/js\/offline\.js"><\/script>/,'production index must load the offline controller');
+assert(!app.includes('maybeOfferOfflineAccess'),'normal online use must not auto-offer PIN setup');
+assert.match(app,/startupOutcome === "unreachable"[\s\S]{0,500}requestColdStart\(\)/,'offline unlock must only branch from an unreachable cold start');
+assert.match(offline,/if \(!\/\^\\d\{6,12\}\$\/\.test\(pin\)\)/,'PIN setup must require 6-12 digits');
+assert.match(offline,/PBKDF2_ITERATIONS = 310000/,'PIN derivation strength must remain explicit');
+assert.match(offline,/function nativeBinding\(record\)[\s\S]{0,100}record\.scope.*record\.device_id/,'native scope must bind business, user, and device');
+for(const state of ['ONLINE','DEGRADED','OFFLINE_LOCKED','OFFLINE_UNLOCKING','OFFLINE_UNLOCKED','SYNCING','OFFLINE_GRANT_EXPIRED','OFFLINE_ACCESS_NOT_PROVISIONED','OFFLINE_ACCESS_REVOKED']) assert(offline.includes(state),`missing explicit state ${state}`);
+for(const marker of ['CauldraBiometric','BiometricPrompt.CryptoObject','AndroidKeyStore','setUserAuthenticationRequired(true)','setInvalidatedByBiometricEnrollment(true)']) assert(native.includes(marker),`native biometric security marker missing: ${marker}`);
+assert(main.includes('registerPlugin(CauldraBiometricPlugin.class)'),'native plugin must be registered');
+assert(manifest.includes('android.permission.USE_BIOMETRIC'),'biometric permission must be declared');
+assert(gradle.includes('androidx.biometric:biometric:1.1.0'),'stable AndroidX Biometric dependency must be pinned');
+assert(!offline.includes('unlockOfflineKey'),'legacy boolean-only biometric stub must not remain');
+assert(!index.includes('offline-browser-harness'),'test harness must not be linked from production HTML');
+assert(!read('scripts/build-www.js').includes('tests'),'production bundle builder must not copy test harnesses');
+console.log('PASS: production PIN, explicit states, online non-interruption, device scope, native biometric cryptography, PIN fallback wiring, and test isolation markers verified.');

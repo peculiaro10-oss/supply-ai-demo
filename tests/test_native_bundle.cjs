@@ -4,7 +4,8 @@ const fs=require('fs'),path=require('path'),os=require('os'),assert=require('ass
 const root=path.resolve(__dirname,'..'),tmp=fs.mkdtempSync(path.join(os.tmpdir(),'cauldra-bundle-test-'));
 function run(){return cp.spawnSync(process.execPath,['scripts/verify-native-bundle.js'],{cwd:tmp,encoding:'utf8'});}
 try{
- for(const dir of ['frontend','www','scripts','android/app/src/main/assets'])fs.cpSync(path.join(root,dir),path.join(tmp,dir),{recursive:true});
+ for(const dir of ['frontend','www','scripts','android/app/src/main'])fs.cpSync(path.join(root,dir),path.join(tmp,dir),{recursive:true});
+ fs.copyFileSync(path.join(root,'android/app/build.gradle'),path.join(tmp,'android/app/build.gradle'));
  for(const f of ['package.json','package-lock.json','capacitor.config.json'])fs.copyFileSync(path.join(root,f),path.join(tmp,f));
  assert.equal(run().status,0,'Prepare the source bundle before running this test');
  for(const rel of ['frontend/index.html','frontend/js/app.js','www/css/base.css','android/app/src/main/assets/public/js/payments.js','www/build-manifest.json','capacitor.config.json']){

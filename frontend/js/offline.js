@@ -6,10 +6,25 @@
     const CLIENT_SCHEMA_VERSION = 2;
     const PBKDF2_ITERATIONS = 310000;
     const LOCK_AFTER_FAILURES = 5;
+    const BACKGROUND_RELOCK_MS = 5 * 60 * 1000;
+    const ACCESS_STATES = Object.freeze({
+        ONLINE: "ONLINE", DEGRADED: "DEGRADED", OFFLINE_LOCKED: "OFFLINE_LOCKED",
+        OFFLINE_UNLOCKING: "OFFLINE_UNLOCKING", OFFLINE_UNLOCKED: "OFFLINE_UNLOCKED", SYNCING: "SYNCING",
+        OFFLINE_GRANT_EXPIRED: "OFFLINE_GRANT_EXPIRED", OFFLINE_ACCESS_NOT_PROVISIONED: "OFFLINE_ACCESS_NOT_PROVISIONED",
+        OFFLINE_ACCESS_REVOKED: "OFFLINE_ACCESS_REVOKED",
+    });
     const textEncoder = new TextEncoder();
     const textDecoder = new TextDecoder();
     let dbPromise = null;
     let active = null;
+    let accessState = ACCESS_STATES.OFFLINE_ACCESS_NOT_PROVISIONED;
+    let backgroundedAt = 0;
+
+    function setAccessState(state) {
+        accessState = state;
+        document.documentElement.dataset.offlineAccessState = state;
+        window.dispatchEvent(new CustomEvent("cauldra-offline-state", { detail: { state } }));
+    }
 
     function bytesToB64(bytes) {
         let value = "";
@@ -28,6 +43,18 @@
         const userId = user && user.id;
         const businessId = (business && (business.id || business.business_id)) || (user && user.business_id);
         return userId && businessId ? `${businessId}:${userId}` : null;
+    }
+
+    function nativeBinding(record) {
+        return `${record.scope}:${record.device_id}`;
+    }
+
+    function keyAad(record) {
+        return record.binding_version === 2 ? `cauldra-key:${nativeBinding(record)}` : `cauldra-key:${record.scope}`;
+    }
+
+    function grantAad(record) {
+        return record.binding_version === 2 ? `cauldra-grant:${nativeBinding(record)}` : `cauldra-grant:${record.scope}`;
     }
 
     function requestToPromise(request) {
@@ -98,8 +125,9 @@
 
     async function listIdentities() {
         const rows = await transaction("offline_identities", "readonly", ({ offline_identities: store }) => requestToPromise(store.getAll()));
-        return (rows || []).map(({ scope, user_id, business_id, display_name, business_name, expires_at, last_server_verified_at }) => ({
-            scope, user_id, business_id, display_name, business_name, expires_at, last_server_verified_at,
+        return (rows || []).map(({ scope, user_id, business_id, device_id, display_name, business_name, expires_at, last_server_verified_at, biometric_enabled, biometric_prompt_dismissed, revoked_locally_at }) => ({
+            scope, user_id, business_id, device_id, display_name, business_name, expires_at, last_server_verified_at,
+            biometric_enabled: !!biometric_enabled, biometric_prompt_dismissed: !!biometric_prompt_dismissed, revoked_locally_at: revoked_locally_at || 0,
         }));
     }
 
@@ -138,6 +166,9 @@
         if (grant.schema_version !== CLIENT_SCHEMA_VERSION || grant.user_id !== record.user_id || grant.business_id !== record.business_id || grant.device_id !== record.device_id) {
             throw new Error("Offline authorization does not match this workspace.");
         }
+        if (Number(grant.auth_version || 0) !== Number(record.auth_version || 0) || grant.role !== record.role) {
+            throw new Error("Offline authorization no longer matches this user.");
+        }
         if (Number(grant.expires_at) * 1000 <= Date.now()) throw new Error("Offline access has expired. Connect to the internet to sign in again.");
         return grant;
     }
@@ -148,7 +179,7 @@
         }
         let protectedGrant;
         try {
-            protectedGrant = await openWithKey(dataKey, record.sealed_grant, `cauldra-grant:${record.scope}`);
+            protectedGrant = await openWithKey(dataKey, record.sealed_grant, grantAad(record));
         } catch (_) {
             throw new Error("Offline authorization failed its integrity check.");
         }
@@ -179,21 +210,37 @@
     async function unlock(scope, pin, options) {
         const record = await getIdentity(scope);
         if (!record) throw new Error("Connect to the internet to sign in on this device for the first time.");
+        if (record.revoked_locally_at) {
+            setAccessState(ACCESS_STATES.OFFLINE_ACCESS_REVOKED);
+            throw new Error("Offline Access was disabled on this device. Connect to the internet to enable it again.");
+        }
+        if (Number(record.expires_at || 0) <= Date.now()) {
+            setAccessState(ACCESS_STATES.OFFLINE_GRANT_EXPIRED);
+            throw new Error("Offline Access has expired. Connect to the internet to refresh it.");
+        }
         if (record.locked_until && record.locked_until > Date.now()) {
             const seconds = Math.ceil((record.locked_until - Date.now()) / 1000);
             throw new Error(`Too many incorrect attempts. Try again in ${seconds} seconds.`);
         }
+        setAccessState(ACCESS_STATES.OFFLINE_UNLOCKING);
         const pinKey = await derivePinKey(pin, b64ToBytes(record.pin_salt));
-        let rawDataKey;
+        let wrappedDataKey;
         try {
-            rawDataKey = await openWithKey(pinKey, record.wrapped_data_key, `cauldra-key:${scope}`);
+            wrappedDataKey = await openWithKey(pinKey, record.wrapped_data_key, keyAad(record));
         } catch (_) {
             const outcome = await recordPinFailure(record);
+            setAccessState(ACCESS_STATES.OFFLINE_LOCKED);
             if (outcome.delay) throw new Error(`Too many incorrect attempts. Offline access is locked for ${Math.ceil(outcome.delay / 1000)} seconds.`);
             throw new Error("That offline PIN is incorrect.");
         }
-        const dataKey = await importDataKey(b64ToBytes(rawDataKey.key));
-        const grant = await openVerifiedGrant(record, dataKey);
+        const rawDataKey = b64ToBytes(wrappedDataKey.key);
+        const dataKey = await importDataKey(rawDataKey);
+        let grant;
+        try { grant = await openVerifiedGrant(record, dataKey); }
+        catch (error) {
+            setAccessState(/expired/i.test(error.message) ? ACCESS_STATES.OFFLINE_GRANT_EXPIRED : ACCESS_STATES.OFFLINE_LOCKED);
+            throw error;
+        }
         try {
             const snapshotRow = await transaction("secure_cache", "readonly", ({ secure_cache: store }) => requestToPromise(store.get(`${scope}:snapshot`)));
             if (!snapshotRow) throw new Error("No synchronized workspace is available on this device.");
@@ -201,9 +248,11 @@
             active = { scope, record: { ...record, failed_attempts: 0, locked_until: 0 }, grant, dataKey, rawDataKey, snapshot, offline: !!(options && options.offline) };
             await putIdentity(active.record);
             await migrateLegacy(scope);
+            setAccessState(active.offline ? ACCESS_STATES.OFFLINE_UNLOCKED : ACCESS_STATES.ONLINE);
             announce("Offline workspace unlocked.");
             return { grant, snapshot, scope };
         } catch (_) {
+            setAccessState(ACCESS_STATES.OFFLINE_LOCKED);
             throw new Error("Offline data failed its integrity check. Connect to the internet to refresh this workspace.");
         }
     }
@@ -224,6 +273,8 @@
             const snapshot = snapshotRow ? await applyWorkingOverlays(scope, record.device_key, await openWithKey(record.device_key, snapshotRow.sealed, `cauldra-cache:${scope}:snapshot`)) : null;
             active = { scope, record, grant, dataKey: record.device_key, rawDataKey: null, snapshot, offline: false };
             await migrateLegacy(scope);
+            closeUnlockUi();
+            setAccessState(ACCESS_STATES.ONLINE);
             return snapshot;
         } catch (_) {
             return null;
@@ -235,6 +286,7 @@
         if (!/^\d{6,12}$/.test(pin)) throw new Error("Use a 6–12 digit offline PIN.");
         const scope = scopeFor(user, business);
         if (!scope) throw new Error("A verified business session is required.");
+        if (await getIdentity(scope)) throw new Error("Offline Access already exists on this device. Refresh it instead of creating a second device key.");
         const deviceId = crypto.randomUUID();
         const headers = { "Authorization": `Bearer ${token}`, "Content-Type": "application/json", "Accept": "application/json" };
         const provisionResponse = await timedFetch(`${apiUrl}/offline/provision`, { method: "POST", credentials: "include", headers, body: JSON.stringify({ device_id: deviceId }) }, 8000);
@@ -249,14 +301,15 @@
         const dataKey = await importDataKey(rawDataKey);
         const salt = crypto.getRandomValues(new Uint8Array(16));
         const pinKey = await derivePinKey(pin, salt);
-        const wrappedDataKey = await sealWithKey(pinKey, { key: bytesToB64(rawDataKey) }, `cauldra-key:${scope}`);
+        const bindingRecord = { scope, device_id: deviceId, binding_version: 2 };
+        const wrappedDataKey = await sealWithKey(pinKey, { key: bytesToB64(rawDataKey) }, keyAad(bindingRecord));
         const sealedGrant = await sealWithKey(dataKey, {
             grant_payload: provisionData.payload,
             signature: provisionData.signature,
             public_key: provisionData.public_key,
-        }, `cauldra-grant:${scope}`);
+        }, grantAad(bindingRecord));
         const record = {
-            schema_version: CLIENT_SCHEMA_VERSION, scope, user_id: user.id, business_id: Number(business.id || business.business_id),
+            schema_version: CLIENT_SCHEMA_VERSION, binding_version: 2, scope, user_id: user.id, business_id: Number(business.id || business.business_id),
             device_id: deviceId, display_name: [user.firstname, user.lastname].filter(Boolean).join(" ") || user.username,
             business_name: business.company_name || "Business", role: user.role, auth_version: Number(user.auth_version || 1),
             expires_at: Number(grant.expires_at) * 1000, last_server_verified_at: Number(grant.last_server_verified) * 1000,
@@ -272,7 +325,47 @@
         });
         active = { scope, record, grant, dataKey, rawDataKey, snapshot, offline: false };
         await migrateLegacy(scope);
+        setAccessState(ACCESS_STATES.ONLINE);
         announce("Offline access enabled. This device can open Cauldra without internet.");
+        return snapshot;
+    }
+
+    async function refreshAccess({ apiUrl, token, user, business }) {
+        if (!token) throw new Error("Internet connection required for this action.");
+        const scope = scopeFor(user, business);
+        const record = scope ? await getIdentity(scope) : null;
+        if (!record?.device_key) throw new Error("Set an Offline PIN before refreshing Offline Access.");
+        const headers = { "Authorization": `Bearer ${token}`, "Content-Type": "application/json", "Accept": "application/json" };
+        const provisionResponse = await timedFetch(`${apiUrl}/offline/provision`, {
+            method: "POST", credentials: "include", headers, body: JSON.stringify({ device_id: record.device_id }),
+        }, 8000);
+        const provisionData = await provisionResponse.json().catch(() => ({}));
+        if (!provisionResponse.ok) throw new Error(messageFromResponse(provisionData, "Offline Access could not be refreshed."));
+        const snapshotResponse = await timedFetch(`${apiUrl}/offline/snapshot`, { credentials: "include", headers }, 15000);
+        const snapshot = await snapshotResponse.json().catch(() => ({}));
+        if (!snapshotResponse.ok) throw new Error(messageFromResponse(snapshot, "The offline workspace could not be refreshed."));
+        const grant = JSON.parse(textDecoder.decode(b64ToBytes(provisionData.payload)));
+        record.sealed_grant = await sealWithKey(record.device_key, {
+            grant_payload: provisionData.payload, signature: provisionData.signature, public_key: provisionData.public_key,
+        }, grantAad(record));
+        record.role = user.role;
+        record.auth_version = Number(user.auth_version || 1);
+        record.expires_at = Number(grant.expires_at) * 1000;
+        record.last_server_verified_at = Number(grant.last_server_verified) * 1000;
+        record.revoked_locally_at = 0;
+        record.failed_attempts = 0;
+        record.locked_until = 0;
+        await openVerifiedGrant(record, record.device_key);
+        const sealedSnapshot = await sealWithKey(record.device_key, snapshot, `cauldra-cache:${scope}:snapshot`);
+        await transaction(["offline_identities", "secure_cache"], "readwrite", async ({ offline_identities, secure_cache }) => {
+            await requestToPromise(offline_identities.put(record));
+            await requestToPromise(secure_cache.put({ key: `${scope}:snapshot`, scope, kind: "snapshot", schema_version: CLIENT_SCHEMA_VERSION,
+                updated_at: Date.now(), sealed: sealedSnapshot }));
+        });
+        active = { scope, record, grant, dataKey: record.device_key, rawDataKey: null, snapshot, offline: false };
+        closeUnlockUi();
+        setAccessState(ACCESS_STATES.ONLINE);
+        announce("Offline Access refreshed.");
         return snapshot;
     }
 
@@ -393,12 +486,122 @@
         active.record.revoked_locally_at = Date.now();
         await putIdentity(active.record);
         active = null;
+        setAccessState(ACCESS_STATES.OFFLINE_ACCESS_REVOKED);
         announce("Offline access was locked because your account or permissions changed.");
+    }
+
+    function nativePlugin() {
+        const plugin = window.Capacitor?.Plugins?.CauldraBiometric;
+        return plugin && typeof plugin.getStatus === "function" ? plugin : null;
+    }
+
+    async function biometricStatus(scope) {
+        const record = scope ? await getIdentity(scope) : active?.record;
+        const plugin = nativePlugin();
+        if (!record || !plugin) return { available: false, enabled: false, reason: "platform_unavailable" };
+        try {
+            const result = await plugin.getStatus({ scope: nativeBinding(record) });
+            return { available: !!result?.available, enabled: !!(record.biometric_enabled && result?.enabled), reason: result?.reason || "" };
+        } catch (_) {
+            return { available: false, enabled: false, reason: "platform_unavailable" };
+        }
+    }
+
+    async function rawKeyFromPin(record, pin, countFailure = true) {
+        const pinKey = await derivePinKey(pin, b64ToBytes(record.pin_salt));
+        try {
+            const opened = await openWithKey(pinKey, record.wrapped_data_key, keyAad(record));
+            return b64ToBytes(opened.key);
+        } catch (_) {
+            if (countFailure) await recordPinFailure(record);
+            throw new Error("That offline PIN is incorrect.");
+        }
+    }
+
+    async function enableBiometrics(pin = "") {
+        if (!active) throw new Error("Unlock Offline Access first.");
+        const plugin = nativePlugin();
+        if (!plugin || typeof plugin.enable !== "function") throw new Error("Biometric unlock is unavailable on this device.");
+        let rawDataKey = active.rawDataKey;
+        if (!rawDataKey) {
+            if (!pin) throw new Error("Enter your Offline PIN to enable biometrics.");
+            rawDataKey = await rawKeyFromPin(active.record, pin);
+        }
+        const result = await plugin.enable({ scope: nativeBinding(active.record), secret: bytesToB64(rawDataKey) });
+        if (result?.status !== "success") {
+            if (result?.status === "cancelled") throw new Error("Biometric setup was cancelled. Your Offline PIN is unchanged.");
+            throw new Error("Biometric unlock is unavailable. Your Offline PIN is still available.");
+        }
+        active.rawDataKey = rawDataKey;
+        active.record.biometric_enabled = true;
+        active.record.biometric_prompt_dismissed = false;
+        await putIdentity(active.record);
+        announce("Biometric unlock enabled. Your Offline PIN remains available.");
+        return true;
+    }
+
+    async function disableBiometrics(scope = active?.scope) {
+        const record = scope ? await getIdentity(scope) : null;
+        if (!record) return false;
+        const plugin = nativePlugin();
+        if (plugin && typeof plugin.disable === "function") {
+            try { await plugin.disable({ scope: nativeBinding(record) }); } catch (_) {}
+        }
+        record.biometric_enabled = false;
+        record.biometric_prompt_dismissed = true;
+        await putIdentity(record);
+        if (active?.scope === scope) active.record = record;
+        announce("Biometric unlock disabled. Your Offline PIN is unchanged.");
+        return true;
+    }
+
+    async function dismissBiometricOffer() {
+        if (!active) return;
+        active.record.biometric_prompt_dismissed = true;
+        await putIdentity(active.record);
+    }
+
+    async function unlockWithBiometric(scope) {
+        const record = await getIdentity(scope);
+        if (!record || !record.biometric_enabled) return { status: "unavailable" };
+        if (record.revoked_locally_at) return { status: "revoked" };
+        if (Number(record.expires_at || 0) <= Date.now()) return { status: "expired" };
+        const plugin = nativePlugin();
+        if (!plugin || typeof plugin.unlock !== "function") return { status: "unavailable" };
+        setAccessState(ACCESS_STATES.OFFLINE_UNLOCKING);
+        let result;
+        try { result = await plugin.unlock({ scope: nativeBinding(record) }); }
+        catch (_) { result = { status: "unavailable" }; }
+        if (result?.status !== "success" || !result.secret || result.scope !== nativeBinding(record)) {
+            if (result?.status === "invalidated") {
+                record.biometric_enabled = false;
+                await putIdentity(record);
+            }
+            setAccessState(ACCESS_STATES.OFFLINE_LOCKED);
+            return { status: result?.status || "unavailable" };
+        }
+        try {
+            const rawDataKey = b64ToBytes(result.secret);
+            const dataKey = await importDataKey(rawDataKey);
+            const grant = await openVerifiedGrant(record, dataKey);
+            const snapshotRow = await transaction("secure_cache", "readonly", ({ secure_cache: store }) => requestToPromise(store.get(`${scope}:snapshot`)));
+            if (!snapshotRow) throw new Error("No synchronized workspace is available on this device.");
+            const snapshot = await applyWorkingOverlays(scope, dataKey, await openWithKey(dataKey, snapshotRow.sealed, `cauldra-cache:${scope}:snapshot`));
+            active = { scope, record, grant, dataKey, rawDataKey, snapshot, offline: true };
+            await migrateLegacy(scope);
+            setAccessState(ACCESS_STATES.OFFLINE_UNLOCKED);
+            announce("Offline workspace unlocked with device biometrics.");
+            return { status: "success", grant, snapshot, scope };
+        } catch (_) {
+            setAccessState(ACCESS_STATES.OFFLINE_LOCKED);
+            return { status: "invalidated" };
+        }
     }
 
     async function removeCurrentData() {
         if (!active) throw new Error("Unlock this offline workspace first.");
         const scope = active.scope;
+        await disableBiometrics(scope);
         const rows = await listOutbox();
         if (rows.some((row) => !["synced"].includes(row.status))) {
             const confirmed = window.confirm(`${rows.length} local change${rows.length === 1 ? " has" : "s have"} not synced. Remove it permanently from this device?`);
@@ -417,6 +620,7 @@
             tx.onerror = () => reject(tx.error);
         });
         active = null;
+        setAccessState(ACCESS_STATES.OFFLINE_ACCESS_NOT_PROVISIONED);
         announce("Offline data removed from this device.");
         return true;
     }
@@ -424,16 +628,11 @@
     async function changePin(oldPin, newPin) {
         if (!active) throw new Error("Unlock this offline workspace first.");
         if (!/^\d{6,12}$/.test(newPin)) throw new Error("Use a 6–12 digit offline PIN.");
-        let rawDataKey = active.rawDataKey;
-        if (!rawDataKey) {
-            const oldKey = await derivePinKey(oldPin, b64ToBytes(active.record.pin_salt));
-            const opened = await openWithKey(oldKey, active.record.wrapped_data_key, `cauldra-key:${active.scope}`);
-            rawDataKey = b64ToBytes(opened.key);
-        }
+        const rawDataKey = await rawKeyFromPin(active.record, oldPin);
         const salt = crypto.getRandomValues(new Uint8Array(16));
         const pinKey = await derivePinKey(newPin, salt);
         active.record.pin_salt = bytesToB64(salt);
-        active.record.wrapped_data_key = await sealWithKey(pinKey, { key: bytesToB64(rawDataKey) }, `cauldra-key:${active.scope}`);
+        active.record.wrapped_data_key = await sealWithKey(pinKey, { key: bytesToB64(rawDataKey) }, keyAad(active.record));
         active.record.failed_attempts = 0;
         active.record.locked_until = 0;
         active.rawDataKey = rawDataKey;
@@ -449,10 +648,12 @@
             }, 8000);
             if (!response.ok) throw new Error("Offline access could not be disabled on the server.");
         }
+        await disableBiometrics(active.scope);
         active.record.expires_at = 0;
         active.record.revoked_locally_at = Date.now();
         await putIdentity(active.record);
         active = null;
+        setAccessState(ACCESS_STATES.OFFLINE_ACCESS_REVOKED);
         announce("Offline access disabled. Preserved local changes remain quarantined on this device.");
     }
 
@@ -461,16 +662,6 @@
         const estimate = await navigator.storage.estimate();
         const remaining = Math.max(0, Number(estimate.quota || 0) - Number(estimate.usage || 0));
         return { usage: Number(estimate.usage || 0), quota: Number(estimate.quota || 0), remaining, low: estimate.quota > 0 && remaining / estimate.quota < 0.1 };
-    }
-
-    async function tryNativeBiometric(scope) {
-        const plugin = window.Capacitor?.Plugins?.CauldraBiometric;
-        if (!plugin || typeof plugin.unlockOfflineKey !== "function") return { available: false };
-        // The native plugin contract returns the already-protected PIN/key
-        // material from Keychain/Keystore; this web layer never labels a
-        // checkbox as biometric and never receives a biometric template.
-        const result = await plugin.unlockOfflineKey({ scope });
-        return { available: true, unlocked: !!result?.unlocked };
     }
 
     function timedFetch(url, options, timeoutMs) {
@@ -493,15 +684,16 @@
         if (document.getElementById("offline-unlock-dialog")) return;
         document.body.insertAdjacentHTML("beforeend", `
             <div id="offline-live-region" class="sr-only" role="status" aria-live="polite"></div>
-            <dialog id="offline-unlock-dialog" class="offline-dialog" aria-labelledby="offline-unlock-title">
-                <form method="dialog"><button class="offline-dialog-close" value="cancel" aria-label="Close">×</button></form>
-                <h2 id="offline-unlock-title">Open Cauldra offline</h2>
+            <dialog id="offline-unlock-dialog" class="offline-dialog offline-unlock-dialog" aria-labelledby="offline-unlock-title" data-mandatory="true">
+                <div class="offline-brand" aria-label="Cauldra"><span aria-hidden="true">C</span> Cauldra</div>
+                <div class="offline-state-label"><span aria-hidden="true">●</span> Offline Access</div>
+                <h2 id="offline-unlock-title">Open your offline workspace</h2>
                 <p id="offline-unlock-copy">Choose a previously verified workspace and enter its offline PIN.</p>
                 <form id="offline-unlock-form">
-                    <label for="offline-identity">Workspace</label><select id="offline-identity"></select>
-                    <label for="offline-pin">Offline PIN</label><input id="offline-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="off" required>
+                    <div id="offline-workspace-fields"><label for="offline-identity">Workspace</label><select id="offline-identity"></select>
+                    <label for="offline-pin">Offline PIN</label><input id="offline-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="off" required></div>
                     <p id="offline-unlock-status" role="status"></p>
-                    <button type="submit">Unlock offline</button><button type="button" id="offline-retry-online">Retry internet</button>
+                    <div class="offline-dialog-actions"><button type="button" id="offline-biometric-unlock" hidden>Use fingerprint or face</button><button type="submit" id="offline-pin-unlock">Unlock with PIN</button><button type="button" id="offline-retry-online">Retry internet</button></div>
                 </form>
             </dialog>
             <dialog id="offline-setup-dialog" class="offline-dialog" aria-labelledby="offline-setup-title">
@@ -512,6 +704,26 @@
                     <label for="offline-setup-pin">Create a 6–12 digit offline PIN</label><input id="offline-setup-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="new-password" required>
                     <label for="offline-setup-confirm">Confirm offline PIN</label><input id="offline-setup-confirm" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="new-password" required>
                     <p id="offline-setup-status" role="status"></p><button type="submit">Enable on this device</button>
+                </form>
+            </dialog>
+            <dialog id="offline-change-pin-dialog" class="offline-dialog" aria-labelledby="offline-change-pin-title">
+                <form method="dialog"><button class="offline-dialog-close" value="cancel" aria-label="Close">×</button></form>
+                <h2 id="offline-change-pin-title">Change Offline PIN</h2>
+                <form id="offline-change-pin-form">
+                    <label for="offline-current-pin">Current Offline PIN</label><input id="offline-current-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" autocomplete="off" required>
+                    <label for="offline-new-pin">New 6–12 digit Offline PIN</label><input id="offline-new-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="new-password" required>
+                    <label for="offline-new-pin-confirm">Confirm new Offline PIN</label><input id="offline-new-pin-confirm" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="new-password" required>
+                    <p id="offline-change-pin-status" role="status"></p><button type="submit">Change Offline PIN</button>
+                </form>
+            </dialog>
+            <dialog id="offline-biometric-dialog" class="offline-dialog" aria-labelledby="offline-biometric-title">
+                <form method="dialog"><button class="offline-dialog-close" value="cancel" aria-label="Close">×</button></form>
+                <h2 id="offline-biometric-title">Use fingerprint or face unlock?</h2>
+                <p>Android will show its secure system prompt. Cauldra never receives fingerprint or face data. Your Offline PIN will always remain available as fallback.</p>
+                <form id="offline-biometric-form">
+                    <div id="offline-biometric-pin-wrap"><label for="offline-biometric-pin">Confirm your Offline PIN</label><input id="offline-biometric-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" autocomplete="off"></div>
+                    <p id="offline-biometric-status" role="status"></p>
+                    <div class="offline-dialog-actions"><button type="submit">Enable Biometrics</button><button type="button" id="offline-biometric-not-now">Not Now</button></div>
                 </form>
             </dialog>
             <dialog id="offline-sync-dialog" class="offline-dialog offline-sync-dialog" aria-labelledby="offline-sync-title">
@@ -531,8 +743,81 @@
                 window.dispatchEvent(new CustomEvent("cauldra-offline-unlocked", { detail: result }));
             } catch (error) { status.textContent = error.message; }
         });
+        document.getElementById("offline-unlock-dialog").addEventListener("cancel", (event) => {
+            if (event.currentTarget.dataset.mandatory === "true") event.preventDefault();
+        });
+        document.getElementById("offline-identity").addEventListener("change", () => configureBiometricButton());
+        document.getElementById("offline-biometric-unlock").addEventListener("click", () => attemptBiometricFromDialog());
         document.getElementById("offline-retry-online").addEventListener("click", () => window.dispatchEvent(new Event("cauldra-retry-online")));
         document.getElementById("offline-sync-retry").addEventListener("click", () => window.dispatchEvent(new Event("cauldra-manual-sync")));
+        document.getElementById("offline-change-pin-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const status = document.getElementById("offline-change-pin-status");
+            const oldPin = document.getElementById("offline-current-pin").value;
+            const newPin = document.getElementById("offline-new-pin").value;
+            const confirmPin = document.getElementById("offline-new-pin-confirm").value;
+            if (newPin !== confirmPin) { status.textContent = "PINs do not match."; return; }
+            status.textContent = "Changing PIN…";
+            try {
+                await changePin(oldPin, newPin);
+                event.currentTarget.reset(); document.getElementById("offline-change-pin-dialog").close(); status.textContent = "";
+                window.dispatchEvent(new Event("cauldra-offline-settings-changed"));
+            } catch (error) { status.textContent = error.message; }
+        });
+        document.getElementById("offline-biometric-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const status = document.getElementById("offline-biometric-status");
+            status.textContent = "Waiting for Android’s secure biometric prompt…";
+            try {
+                await enableBiometrics(document.getElementById("offline-biometric-pin").value);
+                event.currentTarget.reset(); document.getElementById("offline-biometric-dialog").close(); status.textContent = "";
+                window.dispatchEvent(new Event("cauldra-offline-settings-changed"));
+            } catch (error) { status.textContent = error.message; }
+        });
+        document.getElementById("offline-biometric-not-now").addEventListener("click", async () => {
+            await dismissBiometricOffer(); document.getElementById("offline-biometric-dialog").close();
+            window.dispatchEvent(new Event("cauldra-offline-settings-changed"));
+        });
+    }
+
+    function closeUnlockUi() {
+        const dialog = document.getElementById("offline-unlock-dialog");
+        if (dialog?.open) dialog.close();
+        const pin = document.getElementById("offline-pin");
+        if (pin) pin.value = "";
+    }
+
+    async function configureBiometricButton() {
+        const select = document.getElementById("offline-identity");
+        const button = document.getElementById("offline-biometric-unlock");
+        const identity = (await listIdentities()).find((item) => item.scope === select?.value);
+        const status = identity ? await biometricStatus(identity.scope) : { enabled: false };
+        button.hidden = !status.enabled;
+        return status.enabled;
+    }
+
+    function biometricFallbackMessage(status) {
+        if (status === "cancelled") return "Biometric unlock was cancelled. Use your Offline PIN.";
+        if (status === "lockout") return "Biometric unlock is temporarily unavailable. Use your Offline PIN.";
+        if (status === "invalidated") return "Biometric unlock needs to be enabled again. Use your Offline PIN.";
+        if (status === "expired") return "Offline Access has expired. Connect to the internet to refresh it.";
+        if (status === "revoked") return "Offline Access was disabled on this device. Connect to the internet to enable it again.";
+        return "Biometric unlock is unavailable. Use your Offline PIN.";
+    }
+
+    async function attemptBiometricFromDialog() {
+        const scope = document.getElementById("offline-identity").value;
+        const status = document.getElementById("offline-unlock-status");
+        status.textContent = "Waiting for Android’s secure biometric prompt…";
+        const result = await unlockWithBiometric(scope);
+        if (result.status === "success") {
+            closeUnlockUi(); status.textContent = "";
+            window.dispatchEvent(new CustomEvent("cauldra-offline-unlocked", { detail: result }));
+            return true;
+        }
+        status.textContent = biometricFallbackMessage(result.status);
+        document.getElementById("offline-pin").focus();
+        return false;
     }
 
     async function requestColdStart() {
@@ -541,21 +826,42 @@
         const dialog = document.getElementById("offline-unlock-dialog");
         const select = document.getElementById("offline-identity");
         const copy = document.getElementById("offline-unlock-copy");
+        const workspaceFields = document.getElementById("offline-workspace-fields");
+        const pinButton = document.getElementById("offline-pin-unlock");
+        const biometricButton = document.getElementById("offline-biometric-unlock");
         select.innerHTML = "";
         if (!identities.length) {
-            copy.textContent = "Connect to the internet to sign in on this device for the first time.";
+            copy.textContent = "Internet connection is required for first sign-in on this device.";
+            workspaceFields.hidden = true; pinButton.hidden = true; biometricButton.hidden = true;
             document.getElementById("offline-pin").disabled = true;
-            dialog.showModal();
+            setAccessState(ACCESS_STATES.OFFLINE_ACCESS_NOT_PROVISIONED);
+            if (!dialog.open) dialog.showModal();
+            return false;
+        }
+        const valid = identities.filter((identity) => !identity.revoked_locally_at && Number(identity.expires_at || 0) > Date.now());
+        if (!valid.length) {
+            const revoked = identities.some((identity) => identity.revoked_locally_at);
+            copy.textContent = revoked
+                ? "Offline Access was disabled on this device. Connect to the internet to enable it again."
+                : "Offline Access has expired. Connect to the internet to refresh it.";
+            workspaceFields.hidden = true; pinButton.hidden = true; biometricButton.hidden = true;
+            document.getElementById("offline-pin").disabled = true;
+            setAccessState(revoked ? ACCESS_STATES.OFFLINE_ACCESS_REVOKED : ACCESS_STATES.OFFLINE_GRANT_EXPIRED);
+            if (!dialog.open) dialog.showModal();
             return false;
         }
         copy.textContent = "Choose a previously verified workspace and enter its offline PIN.";
+        workspaceFields.hidden = false; pinButton.hidden = false;
         document.getElementById("offline-pin").disabled = false;
-        for (const identity of identities) {
+        for (const identity of valid) {
             const option = document.createElement("option"); option.value = identity.scope;
             option.textContent = `${identity.display_name} — ${identity.business_name}`; select.appendChild(option);
         }
-        dialog.showModal();
-        setTimeout(() => document.getElementById("offline-pin").focus(), 50);
+        setAccessState(ACCESS_STATES.OFFLINE_LOCKED);
+        if (!dialog.open) dialog.showModal();
+        const biometricEnabled = await configureBiometricButton();
+        if (biometricEnabled) setTimeout(() => attemptBiometricFromDialog(), 100);
+        else setTimeout(() => document.getElementById("offline-pin").focus(), 50);
         return true;
     }
 
@@ -574,10 +880,37 @@
                 await provision({ ...context, pin });
                 form.reset(); dialog.close(); status.textContent = "";
                 window.dispatchEvent(new Event("cauldra-offline-settings-changed"));
+                const nativeStatus = await biometricStatus(active?.scope);
+                if (nativeStatus.available && !active.record.biometric_prompt_dismissed) await openBiometricSetup(true);
             } catch (error) { status.textContent = error.message; }
         };
         dialog.showModal();
         setTimeout(() => document.getElementById("offline-setup-pin").focus(), 50);
+    }
+
+    function openChangePin() {
+        installUi();
+        if (!active) throw new Error("Unlock Offline Access first.");
+        const form = document.getElementById("offline-change-pin-form");
+        form.reset(); document.getElementById("offline-change-pin-status").textContent = "";
+        document.getElementById("offline-change-pin-dialog").showModal();
+        setTimeout(() => document.getElementById("offline-current-pin").focus(), 50);
+    }
+
+    async function openBiometricSetup(isInitialOffer = false) {
+        installUi();
+        if (!active) throw new Error("Unlock Offline Access first.");
+        const status = await biometricStatus(active.scope);
+        if (!status.available) throw new Error("Biometric unlock is unavailable on this device.");
+        const dialog = document.getElementById("offline-biometric-dialog");
+        const pinWrap = document.getElementById("offline-biometric-pin-wrap");
+        const pin = document.getElementById("offline-biometric-pin");
+        pinWrap.hidden = !!active.rawDataKey;
+        pin.required = !active.rawDataKey;
+        document.getElementById("offline-biometric-not-now").textContent = isInitialOffer ? "Not Now" : "Cancel";
+        document.getElementById("offline-biometric-status").textContent = "";
+        if (!dialog.open) dialog.showModal();
+        setTimeout(() => (pin.required ? pin : dialog.querySelector('button[type="submit"]')).focus(), 50);
     }
 
     async function openSyncDetails() {
@@ -603,12 +936,38 @@
         return String(value == null ? "" : value).replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
     }
 
-    document.addEventListener("DOMContentLoaded", installUi);
+    function lockWorkspace() {
+        const wasOffline = !!active?.offline;
+        active = null;
+        if (wasOffline) setAccessState(ACCESS_STATES.OFFLINE_LOCKED);
+    }
+
+    function handleAppActivity(isActive) {
+        if (!isActive) { backgroundedAt = Date.now(); return; }
+        if (active?.offline && backgroundedAt && Date.now() - backgroundedAt >= BACKGROUND_RELOCK_MS) {
+            lockWorkspace();
+            requestColdStart().catch(() => {});
+            window.dispatchEvent(new Event("cauldra-offline-locked"));
+        }
+        backgroundedAt = 0;
+    }
+
+    function installLifecycle() {
+        document.addEventListener("visibilitychange", () => handleAppActivity(!document.hidden));
+        const appPlugin = window.Capacitor?.Plugins?.App;
+        if (appPlugin && typeof appPlugin.addListener === "function") {
+            appPlugin.addListener("appStateChange", ({ isActive }) => handleAppActivity(!!isActive)).catch(() => {});
+        }
+    }
+
+    document.addEventListener("DOMContentLoaded", () => { installUi(); installLifecycle(); });
 
     window.CauldraOffline = Object.freeze({
-        DB_VERSION, CLIENT_SCHEMA_VERSION, openDb, listIdentities, requestColdStart, unlock, resumeOnline, provision, refreshSnapshot,
-        cacheWrite, cacheRead, enqueue, listOutbox, updateOutbox, removeOutbox, openSetup, openSyncDetails,
-        removeCurrentData, changePin, disable, storageStatus, tryNativeBiometric, quarantineActive, lock() { active = null; },
+        DB_VERSION, CLIENT_SCHEMA_VERSION, ACCESS_STATES, openDb, listIdentities, requestColdStart, unlock, unlockWithBiometric,
+        resumeOnline, provision, refreshAccess, refreshSnapshot, cacheWrite, cacheRead, enqueue, listOutbox, updateOutbox, removeOutbox,
+        openSetup, openChangePin, openBiometricSetup, openSyncDetails, biometricStatus, enableBiometrics, disableBiometrics,
+        removeCurrentData, changePin, disable, storageStatus, quarantineActive, closeUnlockUi, lock: lockWorkspace,
+        setState(state) { if (Object.values(ACCESS_STATES).includes(state)) setAccessState(state); }, currentState() { return accessState; },
         isUnlocked() { return !!active; }, isOffline() { return !!(active && active.offline); },
         currentScope() { return active && active.scope; }, currentDeviceId() { return active && active.record.device_id; },
         currentSnapshot() { return active && active.snapshot; }, currentGrant() { return active && active.grant; },

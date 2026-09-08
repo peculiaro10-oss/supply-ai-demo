@@ -29,6 +29,7 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(CauldraBiometricPlugin.class);
         super.onCreate(savedInstanceState);
 
         CookieManager cookieManager = CookieManager.getInstance();

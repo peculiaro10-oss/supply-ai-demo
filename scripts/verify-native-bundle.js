@@ -67,6 +67,17 @@ function verify(native = true) {
             for (const name of ['@capacitor/app','@capacitor/inappbrowser']) {
                 if (!plugins.some(plugin => plugin.pkg === name)) failures.push('Missing native plugin '+name+'; run npm ci before sync');
             }
+            const javaRoot = path.join(root,'android/app/src/main/java/com/example/cauldra');
+            const mainActivity = fs.readFileSync(path.join(javaRoot,'MainActivity.java'),'utf8');
+            const biometricPlugin = fs.readFileSync(path.join(javaRoot,'CauldraBiometricPlugin.java'),'utf8');
+            const androidManifest = fs.readFileSync(path.join(root,'android/app/src/main/AndroidManifest.xml'),'utf8');
+            const appGradle = fs.readFileSync(path.join(root,'android/app/build.gradle'),'utf8');
+            if (!mainActivity.includes('registerPlugin(CauldraBiometricPlugin.class)')) failures.push('CauldraBiometric native plugin is not registered');
+            for (const marker of ['@CapacitorPlugin(name = "CauldraBiometric")','BiometricPrompt.CryptoObject','AndroidKeyStore','setUserAuthenticationRequired(true)']) {
+                if (!biometricPlugin.includes(marker)) failures.push('CauldraBiometricPlugin missing security marker: '+marker);
+            }
+            if (!androidManifest.includes('android.permission.USE_BIOMETRIC')) failures.push('Android biometric permission missing');
+            if (!appGradle.includes('androidx.biometric:biometric:1.1.0')) failures.push('Stable AndroidX Biometric dependency missing');
         } catch (_) { failures.push('Android Capacitor config/plugin metadata missing'); }
     }
     if (failures.length) throw new Error(failures.join('\n')+'\nRun npm run android:prepare from the repository root.');
