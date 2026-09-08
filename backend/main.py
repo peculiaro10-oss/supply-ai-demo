@@ -347,6 +347,7 @@ if ALLOWED_ORIGINS:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "Accept"],
+        expose_headers=["Retry-After"],
     )
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -13045,6 +13046,24 @@ def _validated_onboarding_plan_interval(plan, interval):
     i = str(interval or "monthly").strip().lower()
     return p, (i if i in ("monthly", "annual") else "monthly")
 
+def _onboarding_check_rate_limit(db: Session, scope: str, key: str, reason: str, message: str):
+    """Preserve the existing AuthFailure enforcement while exposing a safe,
+    machine-readable reason and exact server-authoritative retry duration."""
+    try:
+        check_rate_limit(db, scope, key)
+    except HTTPException as exc:
+        if exc.status_code != 429:
+            raise
+        retry_after = None
+        raw = str((exc.headers or {}).get("Retry-After") or "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            retry_after = int(raw)
+        detail = {"message": message, "reason": reason}
+        if retry_after is not None:
+            detail["retry_after_seconds"] = retry_after
+        headers = {"Retry-After": str(retry_after)} if retry_after is not None else None
+        raise HTTPException(status_code=429, detail=detail, headers=headers)
+
 # Onboarding uses a unique S256 PKCE verifier for EACH challenge. An old
 # Supabase user/session/token cannot complete a new challenge. The verifier is
 # derived server-side and never returned to clients or stored in URLs.
@@ -13065,15 +13084,49 @@ def _onboarding_provider_post(path, body, params=None):
     except requests.RequestException:
         raise HTTPException(502, "Email verification could not connect. Please try again.")
     if response.status_code == 429:
-        # Preserve a provider-supplied Retry-After when Supabase gives one.
-        # If it does not, do not invent a countdown the server cannot know.
-        retry_after = str(response.headers.get("Retry-After") or "").strip()
-        headers = {"Retry-After": retry_after} if retry_after.isdigit() and int(retry_after) > 0 else None
-        raise HTTPException(
-            status_code=429,
-            detail="Please wait before requesting another verification email.",
-            headers=headers,
-        )
+        # Supabase can throttle independently of Cauldra. Surface that as a
+        # distinct reason. Only expose a countdown when Supabase itself supplied
+        # an explicit duration; never invent one.
+        retry_after_seconds = None
+        raw_retry = str(response.headers.get("Retry-After") or "").strip()
+        if raw_retry.isdigit() and int(raw_retry) > 0:
+            retry_after_seconds = int(raw_retry)
+        if retry_after_seconds is None:
+            try:
+                provider_body = response.json()
+            except ValueError:
+                provider_body = {}
+            for field in ("retry_after_seconds", "retry_after"):
+                value = provider_body.get(field) if isinstance(provider_body, dict) else None
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    value = 0
+                if value > 0:
+                    retry_after_seconds = value
+                    break
+            if retry_after_seconds is None and isinstance(provider_body, dict):
+                provider_message = str(
+                    provider_body.get("msg")
+                    or provider_body.get("message")
+                    or provider_body.get("error_description")
+                    or ""
+                )
+                match = re.search(r"(?i)\b(\d+)\s*(seconds?|secs?|minutes?|mins?)\b", provider_message)
+                if match:
+                    amount = int(match.group(1))
+                    unit = match.group(2).lower()
+                    retry_after_seconds = amount * 60 if unit.startswith(("min", "minute")) else amount
+
+        detail = {
+            "message": "The email provider is temporarily rate limiting verification requests.",
+            "reason": "provider_rate_limit",
+        }
+        headers = None
+        if retry_after_seconds is not None:
+            detail["retry_after_seconds"] = retry_after_seconds
+            headers = {"Retry-After": str(retry_after_seconds)}
+        raise HTTPException(status_code=429, detail=detail, headers=headers)
     if not 200 <= response.status_code < 300:
         raise HTTPException(400 if response.status_code < 500 else 502,
             "The verification link could not be processed. Please request a new email.")
@@ -13119,8 +13172,16 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
     from urllib.parse import urlencode
     ip = request.client.host if request.client else "unknown"
     email = str(data.email).strip().lower()
-    check_rate_limit(db, "onboarding-email-verify-ip", ip)
-    check_rate_limit(db, "onboarding-email-verify-email", email)
+    _onboarding_check_rate_limit(
+        db, "onboarding-email-verify-ip", ip,
+        "ip_rate_limit",
+        "Too many verification emails were requested from this connection.",
+    )
+    _onboarding_check_rate_limit(
+        db, "onboarding-email-verify-email", email,
+        "email_rate_limit",
+        "Too many verification emails were requested for this email address.",
+    )
     plan, interval = _validated_onboarding_plan_interval(data.plan, data.billing_interval)
     if data.billing_interval not in ("monthly", "annual") or data.platform not in ("web", "native_android", "native_ios"):
         raise HTTPException(400, "Invalid onboarding platform or billing interval.")
@@ -13128,22 +13189,29 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
     if data.challenge_id:
         old = _onboarding_row(db, data.challenge_id, lock=True)
         exact = (old.email, old.plan, old.billing_interval, old.platform) == (email, plan, interval, data.platform)
-        if exact and old.status == "verified":
-            return _onboarding_state(old)
-        if old.status == "consumed":
-            raise HTTPException(409, "This email verification is already bound to a payment attempt.")
-        resend_elapsed = (now - old.created_at).total_seconds()
-        if resend_elapsed < ONBOARDING_EMAIL_RESEND_SECONDS:
-            retry_after = max(1, int(math.ceil(ONBOARDING_EMAIL_RESEND_SECONDS - resend_elapsed)))
-            raise HTTPException(
-                status_code=429,
-                detail=f"Please wait {retry_after} seconds before requesting another verification email.",
-                headers={"Retry-After": str(retry_after)},
-            )
-        old.status = "invalidated"
-    # Count attempts, including successful sends, in the existing rate limiter.
-    record_failure(db, "onboarding-email-verify-ip", ip)
-    record_failure(db, "onboarding-email-verify-email", email)
+        if exact:
+            if old.status == "verified":
+                return _onboarding_state(old)
+            if old.status == "consumed":
+                raise HTTPException(409, "This email verification is already bound to a payment attempt.")
+            resend_elapsed = (now - old.created_at).total_seconds()
+            if resend_elapsed < ONBOARDING_EMAIL_RESEND_SECONDS:
+                retry_after = max(1, int(math.ceil(ONBOARDING_EMAIL_RESEND_SECONDS - resend_elapsed)))
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "message": f"Please wait {retry_after} seconds before requesting another verification email.",
+                        "reason": "email_resend_cooldown",
+                        "retry_after_seconds": retry_after,
+                    },
+                    headers={"Retry-After": str(retry_after)},
+                )
+            old.status = "invalidated"
+        elif old.status not in ("consumed", "verified"):
+            # Changing email/plan/platform starts a genuinely new verification
+            # attempt. Do not make the new identity inherit the old challenge's
+            # resend timer.
+            old.status = "invalidated"
     base = _onboarding_web_base()
     callback_base = os.getenv("ONBOARDING_EMAIL_CALLBACK_BASE_URL", "https://cauldra.up.railway.app").rstrip("/")
     from urllib.parse import urlsplit
@@ -13164,6 +13232,11 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
     except HTTPException:
         row.status = "invalidated"; db.commit()
         raise
+
+    # Count provider-accepted sends for abuse protection. Provider rejections
+    # (especially Supabase 429s) must not also increase Cauldra's own limiter.
+    record_failure(db, "onboarding-email-verify-ip", ip)
+    record_failure(db, "onboarding-email-verify-email", email)
     return {**_onboarding_state(row), "status":"sent", "resend_after_seconds":ONBOARDING_EMAIL_RESEND_SECONDS}
 
 class OnboardingEmailConfirmRequest(BaseModel):

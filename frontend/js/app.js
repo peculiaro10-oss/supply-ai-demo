@@ -18896,12 +18896,21 @@
             return minutes > 0 ? `${minutes}m ${String(remainder).padStart(2, '0')}s` : `${remainder}s`;
         }
         function evRetryAfterSeconds(res, data) {
-            // Retry-After is authoritative when present. Do not manufacture a
-            // countdown if neither our backend nor the upstream provider supplied one.
+            // Retry-After is authoritative when present. The structured JSON
+            // fallback exists for native/web parity and proxies that strip headers.
             const header = Number.parseInt(res?.headers?.get('Retry-After') || '', 10);
             if (Number.isFinite(header) && header > 0) return header;
             const body = Number(data?.retry_after_seconds ?? data?.detail?.retry_after_seconds);
             return Number.isFinite(body) && body > 0 ? Math.ceil(body) : null;
+        }
+        function evRateLimitReason(data) {
+            return String(data?.reason ?? data?.detail?.reason ?? '').trim();
+        }
+        function evRateLimitMessage(data) {
+            const detail = data?.detail;
+            if (detail && typeof detail === 'object' && detail.message) return String(detail.message);
+            if (typeof detail === 'string' && detail.trim()) return detail.trim();
+            return '';
         }
         function evStartResendCooldown(ms) {
             evResendCooldownUntil = Date.now() + Math.max(1000, ms || 60000);
@@ -18960,10 +18969,26 @@
                 if (!res.ok) {
                     if (res.status === 429) {
                         const retryAfter = evRetryAfterSeconds(res, data);
+                        const reason = evRateLimitReason(data);
+                        const serverMessage = evRateLimitMessage(data);
                         if (retryAfter) {
                             evStartResendCooldown(retryAfter * 1000);
-                            throw new Error(`Please wait ${evFormatRetryTime(retryAfter)} before trying again.`);
+                            const remaining = evFormatRetryTime(retryAfter);
+                            if (reason === 'ip_rate_limit') {
+                                throw new Error(`Too many verification emails were requested from this connection. Try again in ${remaining}.`);
+                            }
+                            if (reason === 'email_rate_limit' || reason === 'email_resend_cooldown') {
+                                throw new Error(`Please wait ${remaining} before requesting another verification email.`);
+                            }
+                            if (reason === 'provider_rate_limit') {
+                                throw new Error(`The email provider is rate limiting verification requests. Try again in ${remaining}.`);
+                            }
+                            throw new Error(serverMessage || `Please wait ${remaining} before trying again.`);
                         }
+                        if (reason === 'provider_rate_limit') {
+                            throw new Error('The email provider is temporarily rate limiting verification requests. It did not provide an exact retry time.');
+                        }
+                        throw new Error(serverMessage || showApiError(res, data, "We couldn't send the verification email. Please try again."));
                     }
                     throw new Error(showApiError(res, data, "We couldn't send the verification email. Please try again."));
                 }
@@ -18984,7 +19009,11 @@
             }
         }
         async function resendEmailVerification() {
-            if (Date.now() < evResendCooldownUntil) { showToast("Please wait before requesting another verification email.", "info"); return; }
+            if (Date.now() < evResendCooldownUntil) {
+                const left = Math.max(1, Math.ceil((evResendCooldownUntil - Date.now()) / 1000));
+                showToast(`Try again in ${evFormatRetryTime(left)}.`, "info");
+                return;
+            }
             await startEmailVerification();
         }
         async function checkEmailVerification(manual) {
