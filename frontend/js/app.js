@@ -18889,15 +18889,46 @@
                 evVerifyChannel?.postMessage({ challenge_id: evChallengeId });
             } catch (_) {}
         }
+        function evFormatRetryTime(seconds) {
+            const safe = Math.max(0, Math.ceil(Number(seconds) || 0));
+            const minutes = Math.floor(safe / 60);
+            const remainder = safe % 60;
+            return minutes > 0 ? `${minutes}m ${String(remainder).padStart(2, '0')}s` : `${remainder}s`;
+        }
+        function evRetryAfterSeconds(res, data) {
+            // Retry-After is authoritative when present. Do not manufacture a
+            // countdown if neither our backend nor the upstream provider supplied one.
+            const header = Number.parseInt(res?.headers?.get('Retry-After') || '', 10);
+            if (Number.isFinite(header) && header > 0) return header;
+            const body = Number(data?.retry_after_seconds ?? data?.detail?.retry_after_seconds);
+            return Number.isFinite(body) && body > 0 ? Math.ceil(body) : null;
+        }
         function evStartResendCooldown(ms) {
             evResendCooldownUntil = Date.now() + Math.max(1000, ms || 60000);
-            const btn = document.getElementById('ev-resend-btn');
-            const label = document.getElementById('ev-resend-label');
             if (evResendTimer) clearInterval(evResendTimer);
             const tick = () => {
                 const left = Math.ceil((evResendCooldownUntil - Date.now()) / 1000);
-                if (left > 0) { if (btn) btn.disabled = true; if (label) label.textContent = `Resend in ${left}s`; }
-                else { clearInterval(evResendTimer); evResendTimer = null; if (btn) btn.disabled = false; if (label) label.textContent = 'Resend verification email'; }
+                const resendBtn = document.getElementById('ev-resend-btn');
+                const resendLabel = document.getElementById('ev-resend-label');
+                const verifyBtn = document.getElementById('ev-verify-btn');
+                if (left > 0) {
+                    const remaining = evFormatRetryTime(left);
+                    if (resendBtn) resendBtn.disabled = true;
+                    if (resendLabel) resendLabel.textContent = `Try again in ${remaining}`;
+                    if (verifyBtn) {
+                        verifyBtn.disabled = true;
+                        verifyBtn.innerHTML = `<i class="fa-solid fa-clock"></i> Try again in ${remaining}`;
+                    }
+                } else {
+                    clearInterval(evResendTimer);
+                    evResendTimer = null;
+                    if (resendBtn) resendBtn.disabled = false;
+                    if (resendLabel) resendLabel.textContent = 'Resend verification email';
+                    if (verifyBtn) {
+                        verifyBtn.disabled = false;
+                        verifyBtn.innerHTML = `<i class="fa-solid fa-envelope-circle-check"></i> Verify Email`;
+                    }
+                }
             };
             tick();
             evResendTimer = setInterval(tick, 1000);
@@ -18926,7 +18957,16 @@
                     return;
                 }
                 if (res.ok && !evAcceptState(data)) throw new Error('Verification returned to the wrong platform.');
-                if (!res.ok) throw new Error(showApiError(res, data, "We couldn't send the verification email. Please try again."));
+                if (!res.ok) {
+                    if (res.status === 429) {
+                        const retryAfter = evRetryAfterSeconds(res, data);
+                        if (retryAfter) {
+                            evStartResendCooldown(retryAfter * 1000);
+                            throw new Error(`Please wait ${evFormatRetryTime(retryAfter)} before trying again.`);
+                        }
+                    }
+                    throw new Error(showApiError(res, data, "We couldn't send the verification email. Please try again."));
+                }
                 if (data.status === 'verified') { evVerifiedEmail = data.email || email; evShowState(3); return; }
                 const e = document.getElementById('ev-email'); if (e) e.textContent = data.email || email;
                 evEnsureChannel();
@@ -18937,7 +18977,10 @@
                 showToast(friendlyErrorMessage(err?.message || err, "We couldn't send the verification email. Please try again."), "error");
             } finally {
                 evSendBusy = false;
-                if (btn) { btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-envelope-circle-check"></i> Verify Email`; }
+                if (btn && Date.now() >= evResendCooldownUntil) {
+                    btn.disabled = false;
+                    btn.innerHTML = `<i class="fa-solid fa-envelope-circle-check"></i> Verify Email`;
+                }
             }
         }
         async function resendEmailVerification() {

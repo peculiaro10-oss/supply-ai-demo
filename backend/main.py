@@ -4116,8 +4116,14 @@ def check_rate_limit(db: Session, scope: str, key: str):
     if not row:
         return
     if row.locked_until and row.locked_until > now:
-        seconds = int((row.locked_until - now).total_seconds())
-        raise HTTPException(status_code=429, detail=f"Too many attempts. Please wait {max(1, seconds)} seconds and try again.")
+        # Ceil instead of floor so the client is never told to retry a fraction
+        # of a second before the authoritative server-side lock actually expires.
+        seconds = max(1, int(math.ceil((row.locked_until - now).total_seconds())))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many attempts. Please wait {seconds} seconds and try again.",
+            headers={"Retry-After": str(seconds)},
+        )
     if (now - row.window_started_at).total_seconds() > RATE_LIMIT_WINDOW_SECONDS:
         row.failures = 0
         row.window_started_at = now
@@ -13059,7 +13065,15 @@ def _onboarding_provider_post(path, body, params=None):
     except requests.RequestException:
         raise HTTPException(502, "Email verification could not connect. Please try again.")
     if response.status_code == 429:
-        raise HTTPException(429, "Please wait before requesting another verification email.")
+        # Preserve a provider-supplied Retry-After when Supabase gives one.
+        # If it does not, do not invent a countdown the server cannot know.
+        retry_after = str(response.headers.get("Retry-After") or "").strip()
+        headers = {"Retry-After": retry_after} if retry_after.isdigit() and int(retry_after) > 0 else None
+        raise HTTPException(
+            status_code=429,
+            detail="Please wait before requesting another verification email.",
+            headers=headers,
+        )
     if not 200 <= response.status_code < 300:
         raise HTTPException(400 if response.status_code < 500 else 502,
             "The verification link could not be processed. Please request a new email.")
@@ -13118,8 +13132,14 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
             return _onboarding_state(old)
         if old.status == "consumed":
             raise HTTPException(409, "This email verification is already bound to a payment attempt.")
-        if (now - old.created_at).total_seconds() < ONBOARDING_EMAIL_RESEND_SECONDS:
-            raise HTTPException(429, "Please wait before requesting another verification email.")
+        resend_elapsed = (now - old.created_at).total_seconds()
+        if resend_elapsed < ONBOARDING_EMAIL_RESEND_SECONDS:
+            retry_after = max(1, int(math.ceil(ONBOARDING_EMAIL_RESEND_SECONDS - resend_elapsed)))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Please wait {retry_after} seconds before requesting another verification email.",
+                headers={"Retry-After": str(retry_after)},
+            )
         old.status = "invalidated"
     # Count attempts, including successful sends, in the existing rate limiter.
     record_failure(db, "onboarding-email-verify-ip", ip)
