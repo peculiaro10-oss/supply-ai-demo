@@ -19217,7 +19217,17 @@
                 evShowState(data.status === 'verified' ? 3 : 2);
                 if (data.status === 'verified') evBroadcastVerified();
             } catch (error) {
-                showToast(friendlyErrorMessage(error.message, 'Verification could not be restored. Please try again.'), 'error');
+                // This branch is reached only after a concrete verification
+                // challenge was identified. Keep the failure inside the email
+                // verification/onboarding context instead of leaking a global
+                // infrastructure banner onto an unrelated Dashboard/Guest view.
+                try {
+                    if (openBusinessAuthModal()) {
+                        switchBizAuthView('payment-email');
+                        evShowState(2);
+                    }
+                } catch (_) {}
+                showToast(friendlyErrorMessage(error.message, "Cauldra couldn't finish checking this verification link. Please try again."), 'error');
             }
         }
         async function handleEmailVerifyReturn() {
@@ -19237,20 +19247,44 @@
             }
             if (purpose === 'onboarding') await evResumeChallenge(challenge);
         }
+        async function routeNativeReturnUrl(rawUrl) {
+            try {
+                const link = new URL(rawUrl || '');
+                const clean = !link.port && !link.username && !link.password && !link.hash;
+                if (!clean) return false;
+
+                const isEmailReturn = link.protocol === 'cauldra:' && link.hostname === 'auth' &&
+                    link.pathname === '/email-verified' && link.searchParams.get('purpose') === 'onboarding';
+                if (isEmailReturn) {
+                    const challenge = link.searchParams.get('challenge');
+                    if (!/^[a-f0-9]{64}$/.test(challenge || '')) return false;
+                    console.info('EMAIL_RETURN_RECEIVED');
+                    await evResumeChallenge(challenge);
+                    console.info('EMAIL_RETURN_PROCESSED');
+                    return true;
+                }
+
+                const isPaymentReturn = link.protocol === 'cauldra:' && link.hostname === 'payment-return' &&
+                    (link.pathname === '' || link.pathname === '/');
+                if (isPaymentReturn) {
+                    const reference = link.searchParams.get('reference') || link.searchParams.get('trxref');
+                    if (!/^[A-Za-z0-9_.=-]{1,200}$/.test(reference || '')) return false;
+                    console.info('PAYSTACK_RETURN_RECEIVED');
+                    await window.CauldraPayments?.resumeReturn(reference);
+                    return true;
+                }
+                return false;
+            } catch (_) {
+                return false;
+            }
+        }
         async function evInitializeNativeReturn() {
             if (!window.Capacitor?.isNativePlatform?.() || !window.Capacitor.isPluginAvailable('App')) return;
             const app = window.Capacitor.registerPlugin('App');
-            const receive = async ({url}) => {
-                try {
-                    const link = new URL(url);
-                    if (link.protocol !== 'cauldra:' || link.hostname !== 'auth' || link.pathname !== '/email-verified'
-                        || link.port || link.username || link.password || link.hash || link.searchParams.get('purpose') !== 'onboarding') return;
-                    await evResumeChallenge(link.searchParams.get('challenge'));
-                } catch (_) {}
-            };
-            await app.addListener('appUrlOpen', receive);
+            await app.addListener('appUrlOpen', ({url}) => routeNativeReturnUrl(url));
             await app.addListener('appStateChange', ({isActive}) => { if (isActive && evChallengeId) checkEmailVerification(false); });
-            const launch = await app.getLaunchUrl(); if (launch?.url) await receive(launch);
+            const launch = await app.getLaunchUrl();
+            if (launch?.url) await routeNativeReturnUrl(launch.url);
         }
 
         function renderRegisterPlanBanner() {
@@ -29495,7 +29529,13 @@
 
         // Initial Data Fetch on Page Load. Authentication restoration must
         // finish before deciding whether a direct Hub/onboarding URL may open.
-        evInitializeNativeReturn().catch(() => showToast('Email return could not initialize. Reopen Cauldra to retry.', 'error'));
+        // Deep-link integration is infrastructure, not itself an email-return
+        // event. A normal native launch has no verification return to process,
+        // so listener/getLaunchUrl setup failure must stay silent. A genuine
+        // recognized return is handled contextually inside evResumeChallenge().
+        evInitializeNativeReturn().catch(() => {
+            console.info('EMAIL_RETURN_NOT_PRESENT');
+        });
         async function bootstrapApplication() {
             const reachable = await isBackendReachable();
             if (!reachable) {

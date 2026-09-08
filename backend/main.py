@@ -13468,7 +13468,14 @@ class OnboardingPaymentInitRequest(BaseModel):
 def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request, db: Session = Depends(get_db)):
     """Step 1: begin card verification for a guest who has not registered a
     business yet. Only ever charges the same small, refundable verification
-    amount used by the existing trial flow — never the plan's actual price."""
+    amount used by the existing trial flow — never the plan's actual price.
+
+    A previous *initialization* is not a payment. If Paystack definitively says
+    that an earlier checkout was abandoned/failed before verification, release
+    only that dead attempt and let the same verified email challenge start a
+    fresh checkout. Pending/successful provider states remain locked to their
+    existing reference so retry can never create a second charge blindly.
+    """
     client_ip = request.client.host if request and request.client else "unknown"
     check_rate_limit(db, "onboarding-payment-init-ip", client_ip)
     check_rate_limit(db, "onboarding-payment-init-email", str(data.email).strip().lower())
@@ -13489,8 +13496,44 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
     if interval not in ("monthly", "annual"):
         interval = "monthly"
 
-    # Require one fresh server-side challenge, then atomically bind it to payment.
+    # A prior attempt may have consumed the email challenge before Paystack
+    # initialization returned to the device. Reconcile that server-owned row
+    # before deciding whether a genuinely fresh initialization is safe.
+    prior = db.query(OnboardingAuthorization).filter(
+        OnboardingAuthorization.email_challenge_id == challenge.challenge_id
+    ).with_for_update().first()
+    if challenge.status == "consumed" and prior:
+        releasable = prior.status == "failed" or datetime.utcnow() > prior.expires_at
+        if not releasable and prior.status in ("initialized", "pending"):
+            try:
+                prior_tx = paystack_verify_transaction(prior.paystack_reference)
+                prior_provider_status = str(prior_tx.get("status") or "").lower()
+            except Exception:
+                raise HTTPException(status_code=409, detail={
+                    "message": "The previous Paystack checkout is still being reconciled. Check its status before trying again.",
+                    "reference": prior.paystack_reference, "status": "pending"})
+            if prior_provider_status in ("abandoned", "failed"):
+                releasable = True
+            else:
+                raise HTTPException(status_code=409, detail={
+                    "message": "The previous Paystack checkout must be checked before another can start.",
+                    "reference": prior.paystack_reference,
+                    "status": "pending" if prior_provider_status in ("pending", "processing", "ongoing", "queued") else prior_provider_status})
+        elif not releasable:
+            raise HTTPException(status_code=409, detail={
+                "message": "This verification attempt already has a Paystack checkout. Check its status.",
+                "reference": prior.paystack_reference, "status": prior.status})
 
+        if releasable:
+            # Keep the old row for audit/reconciliation but detach its unique
+            # challenge binding. No card data or provider authorization is moved.
+            prior.status = "failed"
+            prior.email_challenge_id = None
+            challenge.status = "verified"
+            challenge.consumed_at = None
+            db.commit()
+
+    # Require one fresh server-side challenge, then atomically bind it to payment.
     amount_kobo = PAYSTACK_TRIAL_VERIFICATION_AMOUNT_KOBO
     key = str(request.headers.get('Idempotency-Key') or '')
     if not re.fullmatch(r'[A-Za-z0-9_-]{16,100}', key):
@@ -13498,10 +13541,10 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
     digest = hmac.new(PAYSTACK_SECRET_KEY.encode(), (str(data.email).casefold() + ':' + plan + ':' + interval + ':' + key).encode(), 'sha256').hexdigest()
     reference = 'cauldra_onboard_' + digest[:40]
     existing = db.query(OnboardingAuthorization).filter_by(paystack_reference=reference).first()
-    if existing and existing.email_challenge_id != data.challenge_id:
-        raise HTTPException(403, "This payment attempt belongs to another verification challenge.")
     if existing:
-        raise HTTPException(status_code=409, detail={'message': 'This verification attempt already exists. Check its status.', 'reference': reference})
+        raise HTTPException(status_code=409, detail={
+            'message': 'This Paystack initialization key has already been used. Check that attempt before retrying.',
+            'reference': reference, 'status': existing.status})
 
     if (challenge.status != "verified" or not challenge.verified_at or
         (challenge.email, challenge.plan, challenge.billing_interval) != (str(data.email).strip().lower(), plan, interval)):
@@ -13560,8 +13603,26 @@ def onboarding_payment_confirm(data: OnboardingPaymentConfirmRequest, request: R
     except Exception:
         raise HTTPException(status_code=502, detail="We couldn't verify that payment method with Paystack right now. Please try again.")
 
-    if tx.get('status') in ('pending', 'processing', 'ongoing', 'queued', 'abandoned'):
+    provider_status = str(tx.get('status') or '').lower()
+    if provider_status in ('pending', 'processing', 'ongoing', 'queued'):
         return JSONResponse(status_code=202, content={'status': 'pending', 'reference': reference})
+    if provider_status in ('abandoned', 'failed'):
+        # Paystack has definitively classified this checkout as non-successful.
+        # Release the verified email challenge so an explicit user retry can
+        # create a new reference without reusing or duplicating this attempt.
+        challenge = None
+        if row.email_challenge_id:
+            challenge = db.query(OnboardingEmailChallenge).filter(
+                OnboardingEmailChallenge.challenge_id == row.email_challenge_id
+            ).with_for_update().first()
+        row.status = 'failed'
+        row.email_challenge_id = None
+        if challenge and challenge.status == 'consumed':
+            challenge.status = 'verified'
+            challenge.consumed_at = None
+        db.commit()
+        return JSONResponse(status_code=200 if provider_status == 'abandoned' else 400,
+            content={'status': 'cancelled' if provider_status == 'abandoned' else 'failed', 'reference': reference})
     if not transaction_id_available(db, tx, row):
         raise HTTPException(status_code=409, detail='This payment could not be verified for this attempt.')
     if (tx.get("status") != "success" or int(tx.get("amount") or 0) != row.amount_kobo

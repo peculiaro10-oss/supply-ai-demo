@@ -13,17 +13,34 @@ window.CauldraPayments = (() => {
         method: ['/subscription/payment-method/init', '/subscription/payment-method/confirm']
     };
     const storageKey = 'cauldra_payment_attempt_v1';
+    const PHASE = Object.freeze({
+        INITIALIZING: 'initializing', CHECKOUT_READY: 'checkout_ready', CHECKOUT_OPEN: 'checkout_open',
+        RETURNED: 'returned', VERIFYING: 'verifying', VERIFIED: 'verified', CANCELLED: 'cancelled',
+        PENDING: 'pending', FAILED: 'error'
+    });
     let active = null, busy = false, verifying = false, providerOpen = false;
     let popup = null, sdkPromise = null, listeners = [], returnFocus = null;
     let savedOverflow = '', refreshTimer = null, checking = null;
     const el = id => document.getElementById(id);
     const native = () => !!window.Capacitor?.isNativePlatform?.();
     const owner = () => typeof authToken === 'string' && authToken ? `${currentUserProfile?.business_id || ''}:${currentUserProfile?.id || ''}` : 'onboarding';
+
+    function trace(event, fields = {}) {
+        const safe = {};
+        for (const [key, value] of Object.entries(fields || {})) {
+            if (['kind','phase','status','native','hasReference','checkoutOpened','httpStatus'].includes(key)) safe[key] = value;
+        }
+        console.info(`[CAULDRA_PAYMENT] ${event}`, safe);
+    }
     function remember() {
         if (!active) return;
-        // Keep only routing/retry state, never provider authorization or access code.
-        const {kind, reference, key, values, ownerId} = active;
-        sessionStorage.setItem(storageKey, JSON.stringify({kind, reference, key, values, ownerId}));
+        // Keep only routing/retry state. Never persist provider authorization URL,
+        // access code, card data, authorization codes, or provider secrets.
+        const {kind, reference, key, values, ownerId, phase, checkoutOpened, canRestart} = active;
+        sessionStorage.setItem(storageKey, JSON.stringify({kind, reference, key, values, ownerId, phase, checkoutOpened:!!checkoutOpened, canRestart:!!canRestart}));
+    }
+    function forget() {
+        sessionStorage.removeItem(storageKey);
     }
     function restore() {
         try {
@@ -33,13 +50,16 @@ window.CauldraPayments = (() => {
         return null;
     }
     function status(phase, message) {
+        if (active) active.phase = phase;
         el('payment-overlay').dataset.state = phase;
         el('payment-status').textContent = message;
-        const retryable = ['pending', 'cancelled', 'error'].includes(phase);
+        const retryable = [PHASE.PENDING, PHASE.CANCELLED, PHASE.FAILED].includes(phase);
         el('payment-check').hidden = !retryable || !active?.reference;
         el('payment-resume').hidden = !retryable || !active?.access_code;
-        el('payment-spinner').hidden = !['initializing', 'verifying', 'opening'].includes(phase);
+        el('payment-retry-init').hidden = !active?.canRestart;
+        el('payment-spinner').hidden = ![PHASE.INITIALIZING, PHASE.VERIFYING, 'opening'].includes(phase);
         el('payment-close').disabled = providerOpen;
+        remember();
     }
     function show() {
         returnFocus = document.activeElement;
@@ -73,150 +93,214 @@ window.CauldraPayments = (() => {
         });
         await sdkPromise;
     }
+    function newAttempt(kind, values) {
+        return {kind, values, key: crypto.randomUUID(), ownerId: owner(), phase:PHASE.INITIALIZING, checkoutOpened:false, canRestart:false};
+    }
+    function validateInitialization(data) {
+        if (!data || typeof data !== 'object' || !data.reference || !data.access_code || !data.authorization_url) throw new Error('invalid_initialization_payload');
+        const provider = new URL(data.authorization_url);
+        if (provider.protocol !== 'https:' || provider.hostname !== 'checkout.paystack.com' || provider.username || provider.password) throw new Error('invalid_checkout');
+    }
+    async function initializeCurrent() {
+        trace('PAYSTACK_INIT_REQUEST_STARTED', {kind:active.kind, phase:PHASE.INITIALIZING, native:native(), hasReference:!!active.reference});
+        status(PHASE.INITIALIZING, 'Preparing your secure payment…');
+        const response = await fetch(`${API_URL}${endpoints[active.kind][0]}`, {
+            method:'POST', credentials:'include', headers:headers(active.kind, active.key), body:JSON.stringify(active.values)
+        });
+        let data = {};
+        try { data = await response.json(); } catch (_) {}
+        if (!response.ok) {
+            if (data.detail?.reference) active.reference = data.detail.reference;
+            trace('PAYSTACK_INIT_FAILED', {kind:active.kind, phase:PHASE.FAILED, httpStatus:response.status, hasReference:!!active.reference});
+            throw Object.assign(new Error('initialization_failed'), {response, data});
+        }
+        validateInitialization(data);
+        Object.assign(active, data, {phase:PHASE.CHECKOUT_READY, canRestart:false});
+        remember();
+        trace('PAYSTACK_INIT_SUCCESS', {kind:active.kind, phase:PHASE.CHECKOUT_READY, native:native(), hasReference:true});
+        el('payment-plan').textContent = `${data.plan || 'Payment method'} · ${data.billing_interval === 'annual' ? 'Annual' : 'Monthly'}`;
+        el('payment-amount').textContent = new Intl.NumberFormat('en-NG', {style:'currency',currency:data.currency || 'NGN'}).format(data.amount_kobo / 100);
+        el('payment-explanation').textContent = ['method','trial','onboarding'].includes(active.kind)
+            ? 'This small card verification charge will be submitted for refund after verification. Paystack handles your payment details.'
+            : 'Paystack handles your payment details. Your plan updates after Cauldra confirms the payment.';
+        await launch();
+    }
     async function start(kind, values = {}) {
-        if (busy || providerOpen || verifying) return;
+        if (busy || providerOpen || verifying || !endpoints[kind]) return;
         const saved = active || restore();
         if (saved && saved.ownerId === owner()) {
             active = saved; show();
-            status('pending', 'An earlier payment is still open. Check its status before starting another.');
-            if (saved.reference) await verify(false);
+            // A pre-initialization record is not a payment and must never be called
+            // pending/unresolved. Let the user safely retry initialization.
+            if (!saved.reference) {
+                active.canRestart = true;
+                status(PHASE.FAILED, "Paystack couldn't be opened right now. Please try again.");
+                return;
+            }
+            if (!saved.checkoutOpened) {
+                status(PHASE.VERIFYING, 'Checking the previous checkout setup…');
+                await verify(false, false, true);
+                return;
+            }
+            status(PHASE.PENDING, 'A previous Paystack checkout needs to be checked before another payment can start.');
+            await verify(false);
             return;
         }
         busy = true;
-        active = {kind, values, key: crypto.randomUUID(), ownerId: owner()};
+        active = newAttempt(kind, values);
         remember(); show();
         el('payment-plan').textContent = kind === 'method' ? 'Update payment method' : 'Secure checkout';
         el('payment-amount').textContent = 'Calculating securely…';
-        status('initializing', 'Preparing your secure payment…');
         try {
-            const response = await fetch(`${API_URL}${endpoints[kind][0]}`, {
-                method: 'POST', credentials: 'include', headers: headers(kind, active.key), body: JSON.stringify(values)
-            });
-            const data = await response.json();
-            if (!response.ok) {
-                if (data.detail?.reference) {active.reference = data.detail.reference; remember();}
-                if ([400, 401, 403, 422, 503].includes(response.status) && !active.reference) {
-                    sessionStorage.removeItem(storageKey); active = null;
-                }
-                throw new Error('initialization_failed');
-            }
-            Object.assign(active, data); remember();
-            el('payment-plan').textContent = `${data.plan || 'Payment method'} · ${data.billing_interval === 'annual' ? 'Annual' : 'Monthly'}`;
-            el('payment-amount').textContent = new Intl.NumberFormat('en-NG', {style:'currency',currency:data.currency || 'NGN'}).format(data.amount_kobo / 100);
-            el('payment-explanation').textContent = ['method','trial','onboarding'].includes(kind)
-                ? 'This small card verification charge will be submitted for refund after verification. Paystack handles your payment details.'
-                : 'Paystack handles your payment details. Your plan updates after Cauldra confirms the payment.';
-            await launch();
-        } catch (_) {
-            status('error', 'Secure checkout could not open. Check your connection and payment status before trying again.');
+            await initializeCurrent();
+        } catch (error) {
+            // A server-owned reference may represent an initialization whose
+            // transport outcome is uncertain. Do not manufacture another charge.
+            // If no reference exists, no server-owned payment attempt exists and
+            // a fresh initialization is safe.
+            active.canRestart = !active?.reference;
+            status(PHASE.FAILED, "Paystack couldn't be opened right now. Please try again.");
             el('payment-resume').hidden = !active?.access_code;
-            el('payment-retry-init').hidden = !!active?.reference || !active;
         } finally { busy = false; }
     }
     async function retryInitialization() {
-        if (busy || !active || active.reference) return;
-        busy = true; status('initializing', 'Checking the same payment attempt…');
+        if (busy || providerOpen || verifying || !active || !active.canRestart) return;
+        const {kind, values} = active;
+        // Fresh idempotency key is intentional here. canRestart is only granted
+        // when the client never received/opened a Paystack checkout, or after the
+        // backend has definitively classified the previous attempt cancelled/failed.
+        active = newAttempt(kind, values || {});
+        remember();
+        busy = true;
         try {
-            const response = await fetch(`${API_URL}${endpoints[active.kind][0]}`, {method:'POST', credentials:'include',
-                headers:headers(active.kind, active.key), body:JSON.stringify(active.values)});
-            const data = await response.json();
-            if (!response.ok) {
-                if (data.detail?.reference) {active.reference=data.detail.reference; remember();}
-                throw new Error('pending');
-            }
-            Object.assign(active,data); remember(); await launch();
-        } catch (_) {status('pending','The payment attempt has not been resolved. Check status or contact support; no new charge has been started.');}
-        finally {busy=false;}
+            await initializeCurrent();
+        } catch (_) {
+            active.canRestart = !active?.reference;
+            status(PHASE.FAILED, "Paystack couldn't be opened right now. Please try again.");
+        } finally {busy=false;}
     }
     async function clearNativeListeners() {
         for (const listener of listeners.splice(0)) await listener.remove().catch(() => {});
     }
     function matchesReturn(url) {
         try {
-            const actual = new URL(url), expected = new URL(active.callback_url);
-            const trusted = (actual.origin === expected.origin && actual.pathname === expected.pathname)
-                || (actual.protocol === 'cauldra:' && actual.hostname === 'payment-return');
-            return trusted && (actual.searchParams.get('reference') || actual.searchParams.get('trxref')) === active.reference;
+            if (!active?.reference) return false;
+            const actual = new URL(url);
+            if (actual.protocol === 'cauldra:' && actual.hostname === 'payment-return') {
+                return !actual.port && !actual.username && !actual.password &&
+                    (actual.searchParams.get('reference') || actual.searchParams.get('trxref')) === active.reference;
+            }
+            if (!active.callback_url) return false;
+            const expected = new URL(active.callback_url);
+            return actual.origin === expected.origin && actual.pathname === expected.pathname &&
+                (actual.searchParams.get('reference') || actual.searchParams.get('trxref')) === active.reference;
         } catch (_) {return false;}
     }
     async function launchNative() {
-        if (!window.Capacitor.isPluginAvailable('InAppBrowser')) throw new Error('native_checkout_unavailable');
+        if (!window.Capacitor?.isPluginAvailable?.('InAppBrowser')) throw new Error('native_checkout_unavailable');
         const browser = window.Capacitor.registerPlugin('InAppBrowser');
         await clearNativeListeners();
         listeners.push(await browser.addListener('browserClosed', onCancel));
         listeners.push(await browser.addListener('browserPageNavigationCompleted', async ({url}) => {
             if (!matchesReturn(url)) return;
+            trace('PAYSTACK_RETURN_RECEIVED', {kind:active?.kind, phase:PHASE.RETURNED, native:true, hasReference:!!active?.reference, checkoutOpened:!!active?.checkoutOpened});
             await clearNativeListeners();
-            await browser.close(); providerOpen = false; await verify(true);
+            await browser.close().catch(() => {}); providerOpen = false; await verify(true);
         }));
-        if (window.Capacitor.isPluginAvailable('App')) {
-            const app = window.Capacitor.registerPlugin('App');
-            listeners.push(await app.addListener('appUrlOpen', async ({url}) => {
-                if (matchesReturn(url)) {await clearNativeListeners(); await browser.close(); providerOpen=false; await verify(true);}
-            }));
-            listeners.push(await app.addListener('appStateChange', ({isActive}) => {if (isActive && active?.reference && !providerOpen) verify(false);}));
-        }
         const url = new URL(active.authorization_url);
-        if (url.protocol !== 'https:' || url.host !== 'checkout.paystack.com') throw new Error('invalid_checkout');
+        if (url.protocol !== 'https:' || url.hostname !== 'checkout.paystack.com' || url.username || url.password) throw new Error('invalid_checkout');
+        trace('PAYSTACK_CHECKOUT_OPEN_REQUESTED', {kind:active.kind, phase:PHASE.CHECKOUT_READY, native:true, hasReference:true});
+        providerOpen = true; el('payment-overlay').hidden = true;
         await browser.openInWebView({url:url.href, options:{showURL:false,showToolbar:true,closeButtonText:'Back to Cauldra',
             toolbarPosition:0,showNavigationButtons:true,clearCache:false,clearSessionCache:false,
             mediaPlaybackRequiresUserAction:true,leftToRight:false,
             android:{allowZoom:false,hardwareBack:true,pauseMedia:true},iOS:{allowOverScroll:true,enableViewportScale:false,allowInLineMediaPlayback:false,surpressIncrementalRendering:false,viewStyle:2,animationEffect:2,allowsBackForwardNavigationGestures:true}}});
+        active.checkoutOpened = true;
+        active.phase = PHASE.CHECKOUT_OPEN;
+        remember();
+        trace('PAYSTACK_CHECKOUT_OPENED', {kind:active.kind, phase:PHASE.CHECKOUT_OPEN, native:true, hasReference:true, checkoutOpened:true});
     }
     async function launch() {
         if (!active?.access_code || providerOpen) return;
         status('opening', 'Opening Paystack secure checkout…');
         try {
             if (native()) {
-                providerOpen = true; el('payment-overlay').hidden=true; await launchNative();
+                await launchNative();
             } else {
                 await loadSdk();
                 popup = new window.PaystackPop();
+                trace('PAYSTACK_CHECKOUT_OPEN_REQUESTED', {kind:active.kind, phase:PHASE.CHECKOUT_READY, native:false, hasReference:true});
                 providerOpen = true;
-                // Remove Cauldra's modal from the accessibility tree while the
-                // provider owns focus. Never trap keystrokes over its frame.
                 el('payment-overlay').hidden = true;
                 popup.resumeTransaction(active.access_code, {
-                    onSuccess: () => {providerOpen=false; verify(true);},
+                    onSuccess: () => {providerOpen=false; trace('PAYSTACK_RETURN_RECEIVED',{kind:active?.kind,phase:PHASE.RETURNED,native:false,hasReference:!!active?.reference,checkoutOpened:true}); verify(true);},
                     onCancel,
-                    onError: () => {providerOpen=false; el('payment-overlay').hidden=false; status('error','Paystack could not load this payment. You can check its status or resume securely.');}
+                    onError: () => {providerOpen=false; el('payment-overlay').hidden=false; status(PHASE.FAILED,'Paystack could not load this payment. You can resume securely or check its status.');}
                 });
+                active.checkoutOpened = true;
+                active.phase = PHASE.CHECKOUT_OPEN;
+                remember();
+                trace('PAYSTACK_CHECKOUT_OPENED', {kind:active.kind, phase:PHASE.CHECKOUT_OPEN, native:false, hasReference:true, checkoutOpened:true});
             }
         } catch (_) {
             providerOpen=false; el('payment-overlay').hidden=false;
-            status('error','Secure checkout is unavailable on this device. Your payment has not been marked as failed.');
+            trace('PAYSTACK_CHECKOUT_OPEN_FAILED', {kind:active?.kind, phase:PHASE.FAILED, native:native(), hasReference:!!active?.reference, checkoutOpened:!!active?.checkoutOpened});
+            status(PHASE.FAILED,'Paystack could not open on this device. You can resume the same secure checkout or check its status.');
         }
     }
     async function onCancel() {
         providerOpen=false; await clearNativeListeners(); el('payment-overlay').hidden=false;
-        status('cancelled','Checkout closed. Your plan stays unchanged until payment is verified.');
+        trace('PAYSTACK_RETURN_RECEIVED', {kind:active?.kind, phase:PHASE.CANCELLED, native:native(), hasReference:!!active?.reference, checkoutOpened:!!active?.checkoutOpened});
+        status(PHASE.CANCELLED,"Payment verification wasn't completed.");
         await verify(false, true);
     }
-    async function verify(poll = false, cancelled = false) {
+    async function verify(poll = false, cancelled = false, setupOnly = false) {
         if (verifying || !active?.reference || active.ownerId !== owner()) return checking;
         verifying=true; el('payment-overlay').hidden=false;
         const attempt = active;
         checking=(async () => {
-            if (!cancelled) status('verifying','Confirming your payment securely…');
+            if (!cancelled) status(PHASE.VERIFYING, setupOnly ? 'Checking the previous checkout setup…' : 'Confirming your payment securely…');
+            trace('PAYSTACK_CONFIRM_REQUESTED', {kind:attempt.kind, phase:PHASE.VERIFYING, native:native(), hasReference:true, checkoutOpened:!!attempt.checkoutOpened});
             try {
                 const response=await fetch(`${API_URL}${endpoints[attempt.kind][1]}`, {method:'POST',credentials:'include',
                     headers:headers(attempt.kind),body:JSON.stringify({reference:attempt.reference})});
-                const data=await response.json();
+                let data={}; try {data=await response.json();} catch (_) {}
                 if (active !== attempt || attempt.ownerId !== owner()) return;
+                if (data.status === 'cancelled') {
+                    trace('PAYSTACK_CONFIRM_FAILED', {kind:attempt.kind, phase:PHASE.CANCELLED, httpStatus:response.status, hasReference:true, checkoutOpened:!!attempt.checkoutOpened});
+                    attempt.reference = null; attempt.access_code = null; attempt.authorization_url = null; attempt.callback_url = null;
+                    attempt.checkoutOpened = false; attempt.canRestart = true;
+                    status(PHASE.CANCELLED, "Payment verification wasn't completed. You can try Paystack again.");
+                    return;
+                }
                 if (response.status===202 || data.status==='pending') {
-                    status(cancelled?'cancelled':'pending',cancelled?'Checkout closed. Payment is unconfirmed; you can resume or check again.':'Payment is still being confirmed. Do not pay again.');
+                    trace('PAYSTACK_CONFIRM_PENDING', {kind:attempt.kind, phase:PHASE.PENDING, httpStatus:response.status, hasReference:true, checkoutOpened:!!attempt.checkoutOpened});
+                    // If checkout was never opened, this is provider reconciliation,
+                    // not evidence the user submitted payment. Say exactly that.
+                    status(PHASE.PENDING, attempt.checkoutOpened
+                        ? 'Payment is still being confirmed. Do not pay again.'
+                        : 'Paystack is still reconciling the checkout setup. No new charge has been started.');
                     if (poll) {clearTimeout(refreshTimer); refreshTimer=setTimeout(()=>verify(false),5000);}
                     return;
                 }
                 if (!response.ok || !['success','verified','trialing'].includes(data.status)) {
-                    if (data.status==='failed') {sessionStorage.removeItem(storageKey); active=null;}
-                    status('error', data.status==='requires_action' ? 'Your card needs a billing review. Contact support before retrying. Your previous payment details have been retained.' : 'Payment could not be confirmed. Check again or contact support before paying again.');
+                    trace('PAYSTACK_CONFIRM_FAILED', {kind:attempt.kind, phase:PHASE.FAILED, httpStatus:response.status, hasReference:true, checkoutOpened:!!attempt.checkoutOpened});
+                    if (data.status==='failed') {
+                        attempt.reference = null; attempt.access_code = null; attempt.authorization_url = null; attempt.callback_url = null;
+                        attempt.checkoutOpened = false; attempt.canRestart = true;
+                    }
+                    status(PHASE.FAILED, data.status==='requires_action'
+                        ? 'Your card needs a billing review. Contact support before retrying.'
+                        : (attempt.canRestart ? "Paystack couldn't complete this attempt. Please try again." : 'Payment could not be confirmed. Check again before paying again.'));
                     return;
                 }
-                sessionStorage.removeItem(storageKey);
+                trace('PAYSTACK_CONFIRM_SUCCESS', {kind:attempt.kind, phase:PHASE.VERIFIED, httpStatus:response.status, hasReference:true, checkoutOpened:!!attempt.checkoutOpened});
+                forget();
                 ['checkout','trial','onboarding'].forEach(k=>sessionStorage.removeItem(`cauldra_pending_${k}_reference`));
                 active=null; await clearNativeListeners();
-                status('success', attempt.kind==='method'?'Payment method updated.':'Payment successful');
+                el('payment-overlay').dataset.state = PHASE.VERIFIED;
+                el('payment-status').textContent = attempt.kind==='method'?'Payment method updated.':'Payment successful';
+                el('payment-spinner').hidden = true;
                 const refund = data.refund_status === 'succeeded' ? 'Verification charge refund succeeded.'
                     : data.refund_status === 'failed' ? 'Verification charge refund failed. Contact support for a safe retry.'
                     : data.refund_status ? 'Verification charge refund is pending Paystack processing.' : '';
@@ -230,26 +314,50 @@ window.CauldraPayments = (() => {
                     close(); openBusinessAuthModal(); switchBizAuthView('register');
                     showToast('Payment method verified. Complete your business details. '+refund,'success');
                 } else {
-                    // Both feature permissions and AI entitlement refresh from
-                    // the server; preserve the user's Billing destination.
                     await loadData(); openBillingModal(); await loadBillingPanel();
                     checkSubscriptionWarningForDashboard();
                 }
                 const url=new URL(location.href); url.searchParams.delete('reference'); url.searchParams.delete('trxref');
                 history.replaceState(history.state,'',url.pathname+url.search+url.hash);
-            } catch (_) {status('pending','Payment verification is unavailable. Check your connection and try checking again; do not pay again.');}
-            finally {verifying=false;}
+            } catch (_) {
+                trace('PAYSTACK_CONFIRM_PENDING', {kind:attempt.kind, phase:PHASE.PENDING, hasReference:true, checkoutOpened:!!attempt.checkoutOpened});
+                status(PHASE.PENDING, attempt.checkoutOpened
+                    ? 'Payment verification is temporarily unavailable. Check again; do not pay again.'
+                    : 'Paystack checkout status is temporarily unavailable. No new charge has been started.');
+            } finally {verifying=false;}
         })();
         return checking;
     }
     async function resumeReturn(reference) {
         active=restore();
         if (!active) {
-            let kind=reference?.startsWith('cauldra_onboard_')?'onboarding':reference?.startsWith('cauldra_trialcard_')?'trial':reference?.startsWith('cauldra_method_')?'method':'checkout';
+            const kind=reference?.startsWith('cauldra_onboard_')?'onboarding':reference?.startsWith('cauldra_trialcard_')?'trial':reference?.startsWith('cauldra_method_')?'method':'checkout';
             if (!reference || (kind!=='onboarding' && !authToken)) return;
-            active={kind,reference,ownerId:owner()};
+            active={kind,reference,ownerId:owner(),phase:PHASE.RETURNED,checkoutOpened:true,canRestart:false};
+        } else if (reference && active.reference && reference !== active.reference) {
+            return; // never let an unrelated app link retarget an existing attempt
+        } else if (reference) {
+            active.reference = reference;
         }
-        // The URL is only a routing hint; confirmation is always tenant-scoped.
+
+        // A stored initialization record is not itself a provider return. This
+        // path also runs during normal bootstrap when sessionStorage contains an
+        // interrupted setup, so classify it before setting RETURNED.
+        if (!reference) {
+            show();
+            if (!active.reference) {
+                active.canRestart = true;
+                status(PHASE.FAILED, "Paystack couldn't be opened right now. Please try again.");
+                return;
+            }
+            await verify(false, false, !active.checkoutOpened);
+            return;
+        }
+
+        active.checkoutOpened = true;
+        active.phase = PHASE.RETURNED;
+        remember();
+        trace('PAYSTACK_RETURN_RECEIVED', {kind:active.kind, phase:PHASE.RETURNED, native:native(), hasReference:!!active.reference, checkoutOpened:true});
         show(); await verify(true);
     }
     document.addEventListener('DOMContentLoaded', () => {
@@ -263,6 +371,7 @@ window.CauldraPayments = (() => {
             if (event.key==='Tab') {
                 const controls=[...el('payment-overlay').querySelectorAll('button:not([hidden]):not(:disabled)')];
                 const first=controls[0], last=controls[controls.length-1];
+                if (!first || !last) return;
                 if (event.shiftKey && document.activeElement===first) {event.preventDefault(); last.focus();}
                 else if (!event.shiftKey && document.activeElement===last) {event.preventDefault(); first.focus();}
             }

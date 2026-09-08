@@ -15,17 +15,26 @@ if not exist "%JAVA_HOME%\bin\java.exe" goto :jdk_error
 if not exist "%JAVA_HOME%\bin\javac.exe" goto :jdk_error
 if not exist "%JAVA_HOME%\bin\jlink.exe" goto :jdk_error
 
+set "JAVA_VERSION_FILE=%TEMP%\cauldra-java-version-%RANDOM%-%RANDOM%.txt"
+set "JAVA_VERSION_LINE="
 set "JAVA_VERSION="
-for /f "tokens=2 delims=\"" %%V in ('"%JAVA_HOME%\bin\java.exe" -version 2^>^&1') do (
-    if not defined JAVA_VERSION set "JAVA_VERSION=%%V"
-)
+set "JAVA_MAJOR="
 
+"%JAVA_HOME%\bin\javac.exe" -version > "%JAVA_VERSION_FILE%" 2>&1
+if errorlevel 1 goto :jdk_cleanup_error
+
+set /p JAVA_VERSION_LINE=<"%JAVA_VERSION_FILE%"
+del /q "%JAVA_VERSION_FILE%" >nul 2>&1
+
+if not defined JAVA_VERSION_LINE goto :jdk_error
+
+for /f "tokens=2" %%V in ("%JAVA_VERSION_LINE%") do set "JAVA_VERSION=%%V"
 if not defined JAVA_VERSION goto :jdk_error
 
 for /f "tokens=1 delims=." %%M in ("%JAVA_VERSION%") do set "JAVA_MAJOR=%%M"
 if not "%JAVA_MAJOR%"=="21" goto :jdk_error
 
-echo Detected Java %JAVA_VERSION%
+echo Detected javac %JAVA_VERSION%
 echo JDK 21 check passed.
 echo.
 
@@ -73,11 +82,16 @@ echo Build complete.
 pause
 exit /b 0
 
+:jdk_cleanup_error
+if exist "%JAVA_VERSION_FILE%" del /q "%JAVA_VERSION_FILE%" >nul 2>&1
+goto :jdk_error
+
 :jdk_error
 echo.
 echo ERROR: JAVA_HOME must point to a complete JDK 21 installation.
 echo Current JAVA_HOME=%JAVA_HOME%
 if exist "%JAVA_HOME%\bin\java.exe" "%JAVA_HOME%\bin\java.exe" -version
+if exist "%JAVA_HOME%\bin\javac.exe" "%JAVA_HOME%\bin\javac.exe" -version
 goto :failed
 
 :missing_apk
