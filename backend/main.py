@@ -15836,6 +15836,19 @@ def serve_platform_panel_js():
     return FileResponse(str(path), media_type="application/javascript")
 
 # -----------------------------------------------------------------------------
+# OFFLINE DEVICE AUTHORIZATION + CONFLICT-SAFE REPLAY
+# Installed only after every domain handler exists so replay delegates to the
+# same permission, tenant, stock, Location, Business Day, currency, and audit
+# logic used by ordinary online requests. The migration owns table creation.
+# -----------------------------------------------------------------------------
+try:
+    from .offline_access import install as install_offline_access
+except ImportError:  # direct `python backend/main.py` / `uvicorn main:app`
+    from offline_access import install as install_offline_access
+
+OfflineDevice = install_offline_access(globals())
+
+# -----------------------------------------------------------------------------
 # PRODUCTION ROOT / HEALTH
 # -----------------------------------------------------------------------------
 @app.get("/health")

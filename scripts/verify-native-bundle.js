@@ -27,7 +27,7 @@ function sourceManifest() {
 }
 function verify(native = true) {
     const expected = sourceManifest(), failures = [];
-    for (const rel of ['index.html','js/app.js','js/payments.js','css/base.css','css/payments.css'])
+    for (const rel of ['index.html','js/app.js','js/payments.js','js/offline.js','css/base.css','css/payments.css','css/offline.css','sw.js'])
         if (!expected.files[rel]) failures.push('frontend/' + rel + ' missing');
     const dirs = ['www'];
     if (native) dirs.push('android/app/src/main/assets/public');

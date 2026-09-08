@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cauldra offline browser verification</title><link rel="stylesheet" href="/css/offline.css">
+<style>body{margin:0;min-height:100vh;background:#0d1713;color:#f5f7f6;font:15px/1.5 system-ui}.results{box-sizing:border-box;padding:16px;max-width:900px;margin:auto;overflow-wrap:anywhere}.pass{color:#86efac}.fail{color:#fca5a5}</style></head>
+<body><main class="results"><h1>Offline-first browser checks</h1><ol id="results" aria-live="polite"></ol></main>
+<script src="/js/offline.js"></script><script>
+(async()=>{const list=document.getElementById('results');const report=(name,ok,detail='')=>{const li=document.createElement('li');li.className=ok?'pass':'fail';li.textContent=`${ok?'PASS':'FAIL'} — ${name}${detail?' — '+detail:''}`;list.appendChild(li)};
+try{
+ if(document.readyState==='loading')await new Promise(resolve=>addEventListener('DOMContentLoaded',resolve,{once:true}));
+ const preflightDialog=document.getElementById('offline-unlock-dialog');if(!preflightDialog.open)preflightDialog.showModal();
+ await CauldraOffline.requestColdStart();report('first-time offline device exposes no workspace',/first time/i.test(preflightDialog.textContent));
+ const user={id:10,business_id:1,username:'admin',firstname:'Ada',lastname:'Okafor',role:'admin',auth_version:1};
+ const business={id:1,business_id:1,company_name:'Cauldra Test Shop',currency:'NGN',timezone:'Africa/Lagos'};
+ await CauldraOffline.provision({apiUrl:'',token:'test',user,business,pin:'123456'}); report('signed grant and encrypted snapshot provisioned',true);
+ CauldraOffline.lock();const realNow=Date.now;Date.now=()=>realNow()+8*24*60*60*1000;let expired=false;try{await CauldraOffline.unlock('1:10','123456',{offline:true})}catch(e){expired=/expired/.test(e.message)}Date.now=realNow;report('expired offline authorization requires internet',expired);
+ let wrong=false;try{await CauldraOffline.unlock('1:10','000000',{offline:true})}catch(e){wrong=/incorrect/.test(e.message)} report('wrong PIN rejected',wrong);
+ for(let attempt=0;attempt<4;attempt+=1){try{await CauldraOffline.unlock('1:10','000000',{offline:true})}catch(_){}}
+ let locked=false;try{await CauldraOffline.unlock('1:10','123456',{offline:true})}catch(e){locked=/too many|locked/i.test(e.message)}report('repeated wrong PIN attempts trigger temporary lockout',locked);
+ await CauldraOffline.provision({apiUrl:'',token:'test',user,business,pin:'123456'});
+ const unlocked=await CauldraOffline.unlock('1:10','123456',{offline:true});report('cold-start PIN unlock returns scoped workspace',unlocked.snapshot.business.id===1);
+ const grantDb=await CauldraOffline.openDb();await new Promise((resolve,reject)=>{const tx=grantDb.transaction('offline_identities','readwrite');const store=tx.objectStore('offline_identities');const get=store.get('1:10');get.onsuccess=()=>{const row=get.result;row.sealed_grant.data=row.sealed_grant.data.slice(0,-2)+'AA';store.put(row)};tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});
+ CauldraOffline.lock();let grantTamper=false;try{await CauldraOffline.unlock('1:10','123456',{offline:true})}catch(e){grantTamper=/integrity/.test(e.message)}report('tampered offline authorization rejected',grantTamper);
+ await CauldraOffline.provision({apiUrl:'',token:'test',user,business,pin:'123456'});await CauldraOffline.unlock('1:10','123456',{offline:true});
+ await CauldraOffline.enqueue({op_id:crypto.randomUUID(),type:'sale_checkout',payload:{items:[]},created_at:Date.now()});
+ const rows=await CauldraOffline.listOutbox();await CauldraOffline.updateOutbox(rows[0].op_id,{status:'conflict',conflict_code:'STOCK_CHANGED',last_error:'Server stock is lower than the saved offline sale.'});
+ report('encrypted durable outbox round-trip',rows.length===1);
+ if(preflightDialog.open)preflightDialog.close();await CauldraOffline.openSyncDetails();report('accessible conflict center rendered',document.querySelectorAll('#offline-conflict-list article').length===1);
+ document.getElementById('offline-sync-dialog').close();
+ const db=await CauldraOffline.openDb();await new Promise((resolve,reject)=>{const tx=db.transaction('secure_cache','readwrite');const store=tx.objectStore('secure_cache');const get=store.get('1:10:snapshot');get.onsuccess=()=>{const row=get.result;row.sealed.data=row.sealed.data.slice(0,-2)+'AA';store.put(row)};tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});
+ CauldraOffline.lock();let tamper=false;try{await CauldraOffline.unlock('1:10','123456',{offline:true})}catch(e){tamper=/integrity/.test(e.message)}report('tampered encrypted cache rejected',tamper);
+ await CauldraOffline.requestColdStart();const dialog=document.getElementById('offline-unlock-dialog');report('responsive offline unlock dialog rendered',dialog.open);
+ const rect=dialog.getBoundingClientRect();const controls=[...dialog.querySelectorAll('button,input,select')];const layoutOk=document.documentElement.scrollWidth<=innerWidth+1&&rect.left>=-1&&rect.right<=innerWidth+1&&rect.top>=-1&&rect.bottom<=innerHeight+1&&controls.every(control=>control.getBoundingClientRect().height>=43);
+ report(`viewport ${innerWidth}x${innerHeight} has no overflow and usable controls`,layoutOk);document.body.dataset.viewport=`${innerWidth}x${innerHeight}`;
+ document.body.dataset.browserChecks='complete';
+}catch(e){report('harness completed',false,e.message);document.body.dataset.browserChecks='failed'}})();
+</script></body></html>

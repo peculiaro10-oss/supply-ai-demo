@@ -16,7 +16,7 @@
 // below deletes every cache whose name doesn't match the current one, which
 // is the only thing standing between a fixed startup bug and a browser
 // silently keeping the old broken app.js around after the fix ships.
-const SHELL_CACHE = "cauldra-shell-v7-startup-fix";
+const SHELL_CACHE = "cauldra-shell-v8-offline-first";
 
 // Precached at install time. Kept small and static-only — anything dynamic
 // (products, sales, etc.) never belongs in this cache.
@@ -29,7 +29,9 @@ const SHELL_CACHE = "cauldra-shell-v7-startup-fix";
 const SHELL_DOCUMENTS = [
     "/js/app.js",
     "/js/payments.js",
+    "/js/offline.js",
     "/css/payments.css",
+    "/css/offline.css",
     "/js/heartbeat.js",
     "/css/base.css",
     "/css/dashboard-fixes.css",
@@ -45,6 +47,9 @@ const SHELL_ASSETS = [
     "/assets/icon-512.png",
     "/assets/vendor/tailwindcss-3.4.17.js",
     "/assets/vendor/fontawesome/css/all.min.css",
+    "/assets/vendor/fontawesome/webfonts/fa-solid-900.woff2",
+    "/assets/vendor/fontawesome/webfonts/fa-regular-400.woff2",
+    "/assets/vendor/fontawesome/webfonts/fa-brands-400.woff2",
     "/assets/vendor/html5-qrcode-2.3.8.min.js",
     "/assets/vendor/zxing.umd.js",
     ...SHELL_DOCUMENTS,
