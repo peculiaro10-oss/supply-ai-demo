@@ -8,7 +8,7 @@ const main=read('android/app/src/main/java/com/example/cauldra/MainActivity.java
 const manifest=read('android/app/src/main/AndroidManifest.xml'),gradle=read('android/app/build.gradle');
 
 assert.match(index,/<script src="\/js\/offline\.js"><\/script>/,'production index must load the offline controller');
-assert(!app.includes('maybeOfferOfflineAccess'),'normal online use must not auto-offer PIN setup');
+assert.match(app,/maybeOfferOrMaintainOfflineAccess[\s\S]*offerOptIn/,'authenticated online entry must offer exact-scope Offline Access once');
 assert.match(app,/startupOutcome === "unreachable"[\s\S]{0,500}requestColdStart\(\)/,'offline unlock must only branch from an unreachable cold start');
 assert.match(offline,/if \(!\/\^\\d\{6,12\}\$\/\.test\(pin\)\)/,'PIN setup must require 6-12 digits');
 assert.match(offline,/PBKDF2_ITERATIONS = 310000/,'PIN derivation strength must remain explicit');
@@ -21,4 +21,4 @@ assert(gradle.includes('androidx.biometric:biometric:1.1.0'),'stable AndroidX Bi
 assert(!offline.includes('unlockOfflineKey'),'legacy boolean-only biometric stub must not remain');
 assert(!index.includes('offline-browser-harness'),'test harness must not be linked from production HTML');
 assert(!read('scripts/build-www.js').includes('tests'),'production bundle builder must not copy test harnesses');
-console.log('PASS: production PIN, explicit states, online non-interruption, device scope, native biometric cryptography, PIN fallback wiring, and test isolation markers verified.');
+console.log('PASS: production PIN, explicit states, one-time online opt-in, device scope, native biometric cryptography, PIN fallback wiring, and test isolation markers verified.');

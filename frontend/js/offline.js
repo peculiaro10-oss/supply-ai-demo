@@ -39,14 +39,34 @@
         return Uint8Array.from(raw, (character) => character.charCodeAt(0));
     }
 
-    function scopeFor(user, business) {
+    function principalFor(user, business) {
         const userId = user && user.id;
         const businessId = (business && (business.id || business.business_id)) || (user && user.business_id);
         return userId && businessId ? `${businessId}:${userId}` : null;
     }
 
+    async function installationDeviceId(principal) {
+        const key = "installation_device_id";
+        const stored = await transaction("meta", "readonly", ({ meta }) => requestToPromise(meta.get(key)));
+        if (stored?.value) return stored.value;
+        // A v2 principal-scoped identity proves which device id belongs to
+        // this exact business/user and can be adopted without guessing.
+        const legacy = principal ? await getIdentity(principal) : null;
+        const value = legacy?.device_id || crypto.randomUUID();
+        await transaction("meta", "readwrite", ({ meta }) => requestToPromise(meta.put({ key, value })));
+        return value;
+    }
+
+    async function scopeFor(user, business) {
+        const principal = principalFor(user, business);
+        if (!principal) return null;
+        const legacy = await getIdentity(principal);
+        const deviceId = legacy?.device_id || await installationDeviceId(principal);
+        return `${principal}:${deviceId}`;
+    }
+
     function nativeBinding(record) {
-        return `${record.scope}:${record.device_id}`;
+        return String(record.scope).endsWith(`:${record.device_id}`) ? record.scope : `${record.scope}:${record.device_id}`;
     }
 
     function keyAad(record) {
@@ -133,6 +153,65 @@
 
     async function putIdentity(identity) {
         return transaction("offline_identities", "readwrite", ({ offline_identities: store }) => requestToPromise(store.put(identity)));
+    }
+
+    async function migratePrincipalIdentity(principal, exactScope) {
+        if (!principal || !exactScope || principal === exactScope) return getIdentity(exactScope);
+        const legacy = await getIdentity(principal);
+        if (!legacy || !legacy.device_key || exactScope !== `${principal}:${legacy.device_id}`) return null;
+        const cacheRows = await transaction("secure_cache", "readonly", ({ secure_cache }) => requestToPromise(secure_cache.index("by_scope").getAll(principal)));
+        const outboxRows = await transaction("secure_outbox", "readonly", ({ secure_outbox }) => requestToPromise(secure_outbox.index("by_scope").getAll(principal)));
+        const migratedCaches = [];
+        for (const row of cacheRows || []) {
+            const value = await openWithKey(legacy.device_key, row.sealed, `cauldra-cache:${principal}:${row.kind}`);
+            migratedCaches.push({ ...row, key: `${exactScope}:${row.kind}`, scope: exactScope,
+                sealed: await sealWithKey(legacy.device_key, value, `cauldra-cache:${exactScope}:${row.kind}`) });
+        }
+        const migratedOutbox = [];
+        for (const row of outboxRows || []) {
+            const value = await openWithKey(legacy.device_key, row.sealed, `cauldra-outbox:${principal}:${row.op_id}`);
+            migratedOutbox.push({ ...row, scope: exactScope,
+                sealed: await sealWithKey(legacy.device_key, value, `cauldra-outbox:${exactScope}:${row.op_id}`) });
+        }
+        const migrated = { ...legacy, scope: exactScope };
+        await transaction(["offline_identities", "secure_cache", "secure_outbox"], "readwrite", async ({ offline_identities, secure_cache, secure_outbox }) => {
+            await requestToPromise(offline_identities.put(migrated));
+            for (const row of migratedCaches) await requestToPromise(secure_cache.put(row));
+            for (const row of migratedOutbox) await requestToPromise(secure_outbox.put(row));
+            await requestToPromise(offline_identities.delete(principal));
+            for (const row of cacheRows || []) await requestToPromise(secure_cache.delete(row.key));
+        });
+        return migrated;
+    }
+
+    async function identityForSession(user, business) {
+        const principal = principalFor(user, business);
+        const scope = await scopeFor(user, business);
+        if (!scope) return { scope: null, record: null };
+        let record = await getIdentity(scope);
+        if (!record) record = await migratePrincipalIdentity(principal, scope);
+        return { scope, record };
+    }
+
+    function optInKey(scope) { return `offline_opt_in:${scope}`; }
+
+    async function getOptInState(scope) {
+        if (!scope) return "never_prompted";
+        const row = await transaction("meta", "readonly", ({ meta }) => requestToPromise(meta.get(optInKey(scope))));
+        if (row?.value === "declined" || row?.value === "enabled") return row.value;
+        return "never_prompted";
+    }
+
+    async function setOptInState(scope, value) {
+        if (!scope || !["declined", "enabled"].includes(value)) return;
+        await transaction("meta", "readwrite", ({ meta }) => requestToPromise(meta.put({ key: optInKey(scope), value, updated_at: Date.now() })));
+    }
+
+    async function sessionStatus(user, business) {
+        const { scope, record } = await identityForSession(user, business);
+        if (record) await setOptInState(scope, "enabled");
+        return { scope, identity: record ? (await listIdentities()).find((item) => item.scope === scope) || null : null,
+            opt_in_state: record ? "enabled" : await getOptInState(scope) };
     }
 
     async function derivePinKey(pin, salt) {
@@ -258,9 +337,8 @@
     }
 
     async function resumeOnline({ user, business }) {
-        const scope = scopeFor(user, business);
+        const { scope, record } = await identityForSession(user, business);
         if (!scope) return null;
-        const record = await getIdentity(scope);
         if (!record || !record.device_key) return null;
         try {
             const grant = await openVerifiedGrant(record, record.device_key);
@@ -284,10 +362,10 @@
     async function provision({ apiUrl, token, user, business, pin }) {
         if (!crypto || !crypto.subtle) throw new Error("Secure offline access is not supported on this device.");
         if (!/^\d{6,12}$/.test(pin)) throw new Error("Use a 6–12 digit offline PIN.");
-        const scope = scopeFor(user, business);
+        const scope = await scopeFor(user, business);
         if (!scope) throw new Error("A verified business session is required.");
         if (await getIdentity(scope)) throw new Error("Offline Access already exists on this device. Refresh it instead of creating a second device key.");
-        const deviceId = crypto.randomUUID();
+        const deviceId = scope.split(":").slice(2).join(":");
         const headers = { "Authorization": `Bearer ${token}`, "Content-Type": "application/json", "Accept": "application/json" };
         const provisionResponse = await timedFetch(`${apiUrl}/offline/provision`, { method: "POST", credentials: "include", headers, body: JSON.stringify({ device_id: deviceId }) }, 8000);
         const provisionData = await provisionResponse.json().catch(() => ({}));
@@ -324,6 +402,7 @@
                 updated_at: Date.now(), sealed: sealedSnapshot }));
         });
         active = { scope, record, grant, dataKey, rawDataKey, snapshot, offline: false };
+        await setOptInState(scope, "enabled");
         await migrateLegacy(scope);
         setAccessState(ACCESS_STATES.ONLINE);
         announce("Offline access enabled. This device can open Cauldra without internet.");
@@ -332,8 +411,7 @@
 
     async function refreshAccess({ apiUrl, token, user, business }) {
         if (!token) throw new Error("Internet connection required for this action.");
-        const scope = scopeFor(user, business);
-        const record = scope ? await getIdentity(scope) : null;
+        const { scope, record } = await identityForSession(user, business);
         if (!record?.device_key) throw new Error("Set an Offline PIN before refreshing Offline Access.");
         const headers = { "Authorization": `Bearer ${token}`, "Content-Type": "application/json", "Accept": "application/json" };
         const provisionResponse = await timedFetch(`${apiUrl}/offline/provision`, {
@@ -466,10 +544,12 @@
 
     async function migrateLegacy(scope) {
         if (!active || active.scope !== scope) return;
-        const parts = scope.split(":").map(Number);
+        const parts = scope.split(":");
         const rows = await transaction("outbox", "readonly", ({ outbox: store }) => requestToPromise(store.getAll()));
         for (const row of rows || []) {
-            if (Number(row.business_id) !== parts[0] || Number(row.user_id) !== parts[1]) continue;
+            // A business-only row (or one without the exact device id) is
+            // ambiguous and remains quarantined in the legacy store.
+            if (Number(row.business_id) !== Number(parts[0]) || Number(row.user_id) !== Number(parts[1]) || row.device_id !== active.record.device_id) continue;
             try {
                 await enqueue({ ...row, status: row.status === "syncing" ? "pending" : row.status });
                 await transaction("outbox", "readwrite", ({ outbox: store }) => requestToPromise(store.delete(row.op_id)));
@@ -598,31 +678,68 @@
         }
     }
 
-    async function removeCurrentData() {
+    let removeInFlight = false;
+    async function deleteCurrentData(scope) {
+        if (removeInFlight) return false;
+        removeInFlight = true;
+        const button = document.getElementById("offline-remove-confirm");
+        const status = document.getElementById("offline-remove-status");
+        if (button) { button.disabled = true; button.textContent = "Removing…"; }
+        if (status) status.textContent = "";
+        try {
+            const recordBeingRemoved = active.record;
+            const db = await openDb();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction(["offline_identities", "secure_cache", "secure_outbox"], "readwrite");
+                tx.objectStore("offline_identities").delete(scope);
+                for (const storeName of ["secure_cache", "secure_outbox"]) {
+                    const cursorRequest = tx.objectStore(storeName).index("by_scope").openCursor(IDBKeyRange.only(scope));
+                    cursorRequest.onsuccess = () => { const cursor = cursorRequest.result; if (cursor) { cursor.delete(); cursor.continue(); } };
+                }
+                tx.oncomplete = resolve;
+                tx.onerror = () => reject(tx.error);
+                tx.onabort = () => reject(tx.error || new Error("Offline data removal was cancelled."));
+            });
+            // Best-effort native cleanup after the local transaction commits;
+            // a storage failure therefore leaves the entire workspace intact.
+            const plugin = nativePlugin();
+            if (plugin && recordBeingRemoved) {
+                try { await plugin.disable({ scope: nativeBinding(recordBeingRemoved) }); } catch (_) {}
+            }
+            active = null;
+            await setOptInState(scope, "declined");
+            setAccessState(ACCESS_STATES.OFFLINE_ACCESS_NOT_PROVISIONED);
+            announce("Offline data removed from this device.");
+            return true;
+        } catch (error) {
+            if (status) status.textContent = error.message || "Offline data could not be removed.";
+            throw error;
+        } finally {
+            removeInFlight = false;
+            if (button) { button.disabled = false; button.textContent = button.dataset.label || "Remove Offline Data"; }
+        }
+    }
+
+    async function removeCurrentData(expectedScope) {
         if (!active) throw new Error("Unlock this offline workspace first.");
         const scope = active.scope;
-        await disableBiometrics(scope);
+        if (expectedScope && expectedScope !== scope) throw new Error("This offline workspace does not match the signed-in account on this device.");
         const rows = await listOutbox();
-        if (rows.some((row) => !["synced"].includes(row.status))) {
-            const confirmed = window.confirm(`${rows.length} local change${rows.length === 1 ? " has" : "s have"} not synced. Remove it permanently from this device?`);
-            if (!confirmed) return false;
-        }
-        const db = await openDb();
-        await new Promise((resolve, reject) => {
-            const tx = db.transaction(["offline_identities", "secure_cache", "secure_outbox"], "readwrite");
-            tx.objectStore("offline_identities").delete(scope);
-            for (const storeName of ["secure_cache", "secure_outbox"]) {
-                const index = tx.objectStore(storeName).index("by_scope");
-                const cursorRequest = index.openCursor(IDBKeyRange.only(scope));
-                cursorRequest.onsuccess = () => { const cursor = cursorRequest.result; if (cursor) { cursor.delete(); cursor.continue(); } };
-            }
-            tx.oncomplete = resolve;
-            tx.onerror = () => reject(tx.error);
-        });
-        active = null;
-        setAccessState(ACCESS_STATES.OFFLINE_ACCESS_NOT_PROVISIONED);
-        announce("Offline data removed from this device.");
-        return true;
+        const pending = rows.filter((row) => row.status !== "synced");
+        const dialog = document.getElementById("offline-remove-dialog");
+        const body = document.getElementById("offline-remove-copy");
+        const cancel = document.getElementById("offline-remove-cancel");
+        const confirm = document.getElementById("offline-remove-confirm");
+        body.textContent = pending.length
+            ? `This account has ${pending.length} unsynced change${pending.length === 1 ? "" : "s"} on this device. Removing its local workspace will permanently discard ${pending.length === 1 ? "that change" : "those changes"} before ${pending.length === 1 ? "it reaches" : "they reach"} the server. Your existing online business data will not be deleted.`
+            : "This will remove the encrypted offline workspace and cached data for this Cauldra account on this device. Your online account and business data will not be deleted.";
+        cancel.textContent = pending.length ? "Keep Data" : "Cancel";
+        confirm.textContent = pending.length ? "Remove Anyway" : "Remove Offline Data";
+        confirm.dataset.label = confirm.textContent;
+        dialog.dataset.scope = scope;
+        if (!dialog.open) dialog.showModal();
+        setTimeout(() => cancel.focus(), 0);
+        return false;
     }
 
     async function changePin(oldPin, newPin) {
@@ -680,10 +797,28 @@
         if (region) region.textContent = message;
     }
 
+    let optInContext = null;
+
+    async function offerOptIn(context) {
+        if (!context?.token || !navigator.onLine) return false;
+        const state = await sessionStatus(context.user, context.business);
+        if (!state.scope || state.identity || state.opt_in_state !== "never_prompted") return false;
+        optInContext = { ...context, scope: state.scope };
+        const dialog = document.getElementById("offline-opt-in-dialog");
+        if (!dialog.open) dialog.showModal();
+        setTimeout(() => document.getElementById("offline-opt-in-not-now")?.focus(), 0);
+        return true;
+    }
+
     function installUi() {
         if (document.getElementById("offline-unlock-dialog")) return;
         document.body.insertAdjacentHTML("beforeend", `
             <div id="offline-live-region" class="sr-only" role="status" aria-live="polite"></div>
+            <dialog id="offline-opt-in-dialog" class="offline-dialog offline-opt-in-dialog" aria-labelledby="offline-opt-in-title">
+                <h2 id="offline-opt-in-title">Keep Cauldra available offline?</h2>
+                <p>Use Cauldra on this trusted device when your internet connection is unavailable.</p>
+                <div class="offline-dialog-actions"><button type="button" id="offline-opt-in-enable" class="offline-primary">Enable Offline Access</button><button type="button" id="offline-opt-in-not-now">Not Now</button></div>
+            </dialog>
             <dialog id="offline-unlock-dialog" class="offline-dialog offline-unlock-dialog" aria-labelledby="offline-unlock-title" data-mandatory="true">
                 <div class="offline-brand" aria-label="Cauldra"><span aria-hidden="true">C</span> Cauldra</div>
                 <div class="offline-state-label"><span aria-hidden="true">●</span> Offline Access</div>
@@ -730,7 +865,38 @@
                 <form method="dialog"><button class="offline-dialog-close" value="cancel" aria-label="Close">×</button></form>
                 <h2 id="offline-sync-title">Sync details</h2><p id="offline-sync-summary" role="status"></p>
                 <div id="offline-conflict-list"></div><button type="button" id="offline-sync-retry">Retry sync</button>
+            </dialog>
+            <dialog id="offline-remove-dialog" class="offline-dialog offline-remove-dialog" aria-labelledby="offline-remove-title">
+                <h2 id="offline-remove-title">Remove offline data?</h2>
+                <p id="offline-remove-copy"></p><p id="offline-remove-status" role="status"></p>
+                <div class="offline-dialog-actions"><button type="button" id="offline-remove-cancel">Cancel</button><button type="button" id="offline-remove-confirm" class="offline-danger">Remove Offline Data</button></div>
             </dialog>`);
+        document.getElementById("offline-opt-in-not-now").addEventListener("click", async () => {
+            if (optInContext?.scope) await setOptInState(optInContext.scope, "declined");
+            optInContext = null; document.getElementById("offline-opt-in-dialog").close();
+        });
+        document.getElementById("offline-opt-in-enable").addEventListener("click", () => {
+            const context = optInContext; optInContext = null;
+            document.getElementById("offline-opt-in-dialog").close();
+            if (context) openSetup(context);
+        });
+        document.getElementById("offline-opt-in-dialog").addEventListener("cancel", async (event) => {
+            event.preventDefault();
+            if (optInContext?.scope) await setOptInState(optInContext.scope, "declined");
+            optInContext = null; event.currentTarget.close();
+        });
+        document.getElementById("offline-remove-cancel").addEventListener("click", () => document.getElementById("offline-remove-dialog").close());
+        document.getElementById("offline-remove-dialog").addEventListener("cancel", (event) => { if (!removeInFlight) event.currentTarget.close(); else event.preventDefault(); });
+        document.getElementById("offline-remove-confirm").addEventListener("click", async () => {
+            const dialog = document.getElementById("offline-remove-dialog");
+            if (removeInFlight || !active || dialog.dataset.scope !== active.scope) return;
+            try {
+                if (await deleteCurrentData(dialog.dataset.scope)) {
+                    dialog.close();
+                    window.dispatchEvent(new Event("cauldra-offline-data-removed"));
+                }
+            } catch (_) { /* status remains visible and data is preserved */ }
+        });
         document.getElementById("offline-unlock-form").addEventListener("submit", async (event) => {
             event.preventDefault();
             const status = document.getElementById("offline-unlock-status");
@@ -966,7 +1132,7 @@
         DB_VERSION, CLIENT_SCHEMA_VERSION, ACCESS_STATES, openDb, listIdentities, requestColdStart, unlock, unlockWithBiometric,
         resumeOnline, provision, refreshAccess, refreshSnapshot, cacheWrite, cacheRead, enqueue, listOutbox, updateOutbox, removeOutbox,
         openSetup, openChangePin, openBiometricSetup, openSyncDetails, biometricStatus, enableBiometrics, disableBiometrics,
-        removeCurrentData, changePin, disable, storageStatus, quarantineActive, closeUnlockUi, lock: lockWorkspace,
+        removeCurrentData, changePin, disable, storageStatus, quarantineActive, closeUnlockUi, offerOptIn, sessionStatus, lock: lockWorkspace,
         setState(state) { if (Object.values(ACCESS_STATES).includes(state)) setAccessState(state); }, currentState() { return accessState; },
         isUnlocked() { return !!active; }, isOffline() { return !!(active && active.offline); },
         currentScope() { return active && active.scope; }, currentDeviceId() { return active && active.record.device_id; },

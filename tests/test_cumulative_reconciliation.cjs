@@ -1,0 +1,25 @@
+'use strict';
+const assert=require('assert'),fs=require('fs'),path=require('path');
+const root=path.resolve(__dirname,'..'),read=p=>fs.readFileSync(path.join(root,p),'utf8');
+const offline=read('frontend/js/offline.js'),app=read('frontend/js/app.js'),html=read('frontend/index.html'),backend=read('backend/main.py');
+
+assert.match(offline,/offline_opt_in:\$\{scope\}/);
+assert.match(offline,/return `\$\{principal\}:\$\{deviceId\}`/);
+assert.match(offline,/row\.device_id !== active\.record\.device_id/);
+assert(!/idbTx\("products_cache", "readwrite"/.test(app));
+assert(!/idbTx\("suppliers_cache", "readwrite"/.test(app));
+assert(!/idbTx\("outbox", "readwrite"/.test(app));
+assert.match(app,/function cancelOfflineSync\(\)/);
+assert.match(app,/syncReplayAbortController\?\.abort\(\)/);
+assert.match(app,/if \(generation !== syncGeneration \|\| !authToken\) break/);
+assert.match(app,/function quiesceAuthenticatedActivity\(\) \{\s*cancelOfflineSync\(\)/);
+assert.match(offline,/offline-remove-dialog/);
+assert.match(offline,/setTimeout\(\(\) => cancel\.focus\(\)/);
+assert.match(offline,/if \(removeInFlight/);
+assert(!html.includes('id="location-currency-input"'));
+assert(!html.includes('id="location-timezone-input"'));
+assert.match(html,/id="location-region-input"/);
+assert.match(backend,/def resolve_location_context/);
+assert.match(backend,/location_id: int/);
+assert(!/def create_warehouse[\s\S]{0,1800}get_default_location/.test(backend));
+console.log('PASS: exact offline scope, no new legacy sensitive writes, confirmation safety, and Location authority markers verified.');

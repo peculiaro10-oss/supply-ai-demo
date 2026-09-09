@@ -197,12 +197,10 @@
             });
         }
 
-        // Every offline record is stamped with the business currently signed
-        // in, and every read/write is filtered to it — so switching to a
-        // different business on the same browser never mixes their offline
-        // data, and one business's queued-but-unsynced work is preserved
-        // (not deleted) if a different business signs in first.
-        function currentOfflineScope() {
+        // Business id is payload metadata only. The storage boundary is owned
+        // by offline.js and is always business:user:device; app.js must never
+        // fall back to the old business-only stores when that vault is locked.
+        function currentBusinessId() {
             return (businessProfile && businessProfile.id) || currentUserProfile?.business_id || null;
         }
 
@@ -255,10 +253,8 @@
         }
 
         async function getOutboxForCurrentBusiness() {
-            if (window.CauldraOffline?.isUnlocked()) return window.CauldraOffline.listOutbox();
-            const business_id = currentOfflineScope();
-            const all = await idbTx("outbox", "readonly", (store) => idbRequest(store.getAll()));
-            return (all || []).filter((op) => op.business_id === business_id);
+            if (!window.CauldraOffline?.isUnlocked()) return [];
+            return window.CauldraOffline.listOutbox();
         }
 
         async function countPendingOutbox() {
@@ -267,17 +263,13 @@
         }
 
         async function updateOutboxOp(op_id, patch) {
-            if (window.CauldraOffline?.isUnlocked()) return window.CauldraOffline.updateOutbox(op_id, patch);
-            await idbTx("outbox", "readwrite", async (store) => {
-                const existing = await idbRequest(store.get(op_id));
-                if (!existing) return;
-                await idbRequest(store.put({ ...existing, ...patch }));
-            });
+            if (!window.CauldraOffline?.isUnlocked()) throw new Error("The scoped offline workspace is locked.");
+            return window.CauldraOffline.updateOutbox(op_id, patch);
         }
 
         async function removeOutboxOp(op_id) {
-            if (window.CauldraOffline?.isUnlocked()) return window.CauldraOffline.removeOutbox(op_id);
-            await idbTx("outbox", "readwrite", (store) => idbRequest(store.delete(op_id)));
+            if (!window.CauldraOffline?.isUnlocked()) throw new Error("The scoped offline workspace is locked.");
+            return window.CauldraOffline.removeOutbox(op_id);
         }
 
         // ---- Products / Suppliers read cache --------------------------------
@@ -285,61 +277,49 @@
         // synchronized data while offline. Reconciled with server data every
         // time loadData() succeeds.
         async function cacheProductsLocally(products) {
-            const business_id = currentOfflineScope();
-            if (!business_id || !Array.isArray(products)) return;
+            if (!currentBusinessId() || !Array.isArray(products)) return;
             try {
-                if (window.CauldraOffline?.isUnlocked()) {
-                    await window.CauldraOffline.cacheWrite("products", products);
-                    return;
-                }
-                await idbTx("products_cache", "readwrite", async (store) => {
-                    const existing = await idbRequest(store.index("by_business").getAll(IDBKeyRange.only(business_id)));
-                    for (const row of (existing || [])) await idbRequest(store.delete(row.id));
-                    for (const p of products) await idbRequest(store.put({ ...p, business_id }));
-                });
+                if (window.CauldraOffline?.isUnlocked()) await window.CauldraOffline.cacheWrite("products", products);
             } catch (_) {}
         }
 
         async function getCachedProducts() {
-            const business_id = currentOfflineScope();
-            if (!business_id) return [];
+            if (!currentBusinessId()) return [];
             try {
                 if (window.CauldraOffline?.isUnlocked()) return (await window.CauldraOffline.cacheRead("products")) || [];
-                const rows = await idbTx("products_cache", "readonly", (store) => idbRequest(store.index("by_business").getAll(IDBKeyRange.only(business_id))));
-                return (rows || []).map(({ business_id, ...rest }) => rest);
             } catch (_) { return []; }
+            return [];
         }
 
         async function cacheSuppliersLocally(suppliers) {
-            const business_id = currentOfflineScope();
-            if (!business_id || !Array.isArray(suppliers)) return;
+            if (!currentBusinessId() || !Array.isArray(suppliers)) return;
             try {
-                if (window.CauldraOffline?.isUnlocked()) {
-                    await window.CauldraOffline.cacheWrite("suppliers", suppliers);
-                    return;
-                }
-                await idbTx("suppliers_cache", "readwrite", async (store) => {
-                    const existing = await idbRequest(store.index("by_business").getAll(IDBKeyRange.only(business_id)));
-                    for (const row of (existing || [])) await idbRequest(store.delete(row.id));
-                    for (const s of suppliers) await idbRequest(store.put({ ...s, business_id }));
-                });
+                if (window.CauldraOffline?.isUnlocked()) await window.CauldraOffline.cacheWrite("suppliers", suppliers);
             } catch (_) {}
         }
 
         async function getCachedSuppliers() {
-            const business_id = currentOfflineScope();
-            if (!business_id) return [];
+            if (!currentBusinessId()) return [];
             try {
                 if (window.CauldraOffline?.isUnlocked()) return (await window.CauldraOffline.cacheRead("suppliers")) || [];
-                const rows = await idbTx("suppliers_cache", "readonly", (store) => idbRequest(store.index("by_business").getAll(IDBKeyRange.only(business_id))));
-                return (rows || []).map(({ business_id, ...rest }) => rest);
             } catch (_) { return []; }
+            return [];
         }
 
         // ---- Sync engine -----------------------------------------------------
         let syncInFlight = false;
         let syncStatusState = "idle"; // idle | offline | syncing | synced | pending
         let syncDebounceTimer = null;
+        let syncGeneration = 0;
+        let syncReplayAbortController = null;
+
+        function cancelOfflineSync() {
+            syncGeneration += 1;
+            clearTimeout(syncDebounceTimer);
+            syncDebounceTimer = null;
+            syncReplayAbortController?.abort();
+            syncReplayAbortController = null;
+        }
 
         function scheduleSyncSoon() {
             clearTimeout(syncDebounceTimer);
@@ -349,9 +329,11 @@
         async function runSync() {
             if (syncInFlight) return;
             if (!authToken) return; // never sync for a session that isn't authenticated
+            const generation = syncGeneration;
             syncInFlight = true;
             try {
                 const reachable = await isBackendReachable();
+                if (generation !== syncGeneration || !authToken) return;
                 if (!reachable) { setSyncStatus("offline"); return; }
 
                 let rows = (await getOutboxForCurrentBusiness())
@@ -365,6 +347,7 @@
                 let syncedCount = 0;
                 for (const opSnapshot of rows) {
                     if (!(await isBackendReachable())) { setSyncStatus("offline"); break; }
+                    if (generation !== syncGeneration || !authToken) break;
 
                     // Re-read the current record rather than trusting the
                     // start-of-pass snapshot: an earlier op processed THIS
@@ -372,7 +355,7 @@
                     // see resolveOutboxDependenciesOnProductSynced()) may have
                     // rewritten this op's payload/dependencies since `rows`
                     // was captured.
-                    const op = await idbTx("outbox", "readonly", (store) => idbRequest(store.get(opSnapshot.op_id)));
+                    const op = (await getOutboxForCurrentBusiness()).find((row) => row.op_id === opSnapshot.op_id);
                     if (!op || op.status === "synced" || op.status === "conflict") continue;
 
                     // Dependency ordering (see completePOSCheckoutOffline() /
@@ -384,7 +367,7 @@
                     if (Array.isArray(op.depends_on_op_ids) && op.depends_on_op_ids.length) {
                         let stillOutstanding = false;
                         for (const depId of op.depends_on_op_ids) {
-                            const dep = await idbTx("outbox", "readonly", (store) => idbRequest(store.get(depId)));
+                            const dep = (await getOutboxForCurrentBusiness()).find((row) => row.op_id === depId);
                             if (dep) { stillOutstanding = true; break; }
                         }
                         if (stillOutstanding) {
@@ -404,8 +387,9 @@
                     // recorded, so outbox rows queued before this field
                     // existed are never retroactively treated as a mismatch.
                     const identityMismatch =
-                        op.business_id !== currentOfflineScope()
+                        op.business_id !== currentBusinessId()
                         || op.user_id !== (currentUserProfile?.id ?? null)
+                        || op.device_id !== window.CauldraOffline?.currentDeviceId()
                         || (op.auth_version != null && currentUserProfile?.auth_version != null && op.auth_version !== currentUserProfile.auth_version);
                     if (identityMismatch) {
                         await updateOutboxOp(op.op_id, { status: "conflict", last_error: "This offline change belongs to a different or expired signed-in account and was not sent." });
@@ -414,6 +398,8 @@
 
                     await updateOutboxOp(op.op_id, { status: "syncing" });
                     try {
+                        if (generation !== syncGeneration || !authToken) break;
+                        syncReplayAbortController = new AbortController();
                         const res = await fetch(`${API_URL}/offline/replay`, {
                             method: "POST",
                             headers: {
@@ -432,7 +418,10 @@
                                 captured_at: op.captured_at || new Date(op.created_at).toISOString(),
                                 payload: op.payload,
                             }),
+                            signal: syncReplayAbortController.signal,
                         });
+                        syncReplayAbortController = null;
+                        if (generation !== syncGeneration || !authToken) break;
                         const data = await res.json().catch(() => ({}));
                         if (res.ok) {
                             await handleSyncedOperation(op, data.result || data);
@@ -478,6 +467,8 @@
                             await scheduleOutboxRetry(op, `Server error (HTTP ${res.status}).`);
                         }
                     } catch (err) {
+                        syncReplayAbortController = null;
+                        if (generation !== syncGeneration || err?.name === "AbortError") break;
                         await scheduleOutboxRetry(op, "Network error.");
                         setSyncStatus("offline");
                         break; // connection almost certainly dropped again — the next trigger (online event / timer) resumes
@@ -501,6 +492,7 @@
                     loadData().catch(() => {});
                 }
             } finally {
+                syncReplayAbortController = null;
                 syncInFlight = false;
             }
         }
@@ -17718,39 +17710,27 @@
                 section = document.createElement("section");
                 section.id = "offline-access-settings";
                 section.className = "rounded-xl border border-borderCol bg-bgMain p-3.5 space-y-3";
-                section.innerHTML = `<h4 class="text-[11px] font-bold text-textMain uppercase tracking-wider">Offline Access</h4>
-                    <div id="offline-access-summary" class="text-[11px] text-textSec" role="status"></div>
-                    <div class="offline-settings-actions">
-                        <button type="button" id="offline-enable-button" onclick="openOfflineSetupFromProfile()">Enable Offline Access · Set PIN</button>
-                        <button type="button" id="offline-refresh-button" onclick="refreshOfflineAccessFromProfile()">Refresh Offline Access</button>
-                        <button type="button" onclick="changeOfflinePinFromProfile()">Change offline PIN</button>
-                        <button type="button" id="offline-biometric-enable-button" onclick="enableOfflineBiometricsFromProfile()">Enable Biometrics</button>
-                        <button type="button" id="offline-biometric-disable-button" onclick="disableOfflineBiometricsFromProfile()">Disable Biometrics</button>
-                        <button type="button" onclick="disableOfflineAccessFromProfile()">Disable offline access</button>
-                        <button type="button" class="offline-danger" onclick="removeOfflineDataFromProfile()">Remove offline data from this device</button>
-                    </div>`;
                 container.insertBefore(section, container.lastElementChild);
             }
-            const scope = `${businessProfile?.id || businessProfile?.business_id}:${currentUserProfile?.id}`;
-            const identity = (await window.CauldraOffline.listIdentities().catch(() => [])).find((item) => item.scope === scope);
-            const summary = document.getElementById("offline-access-summary");
-            if (!summary) return;
-            const biometric = identity ? await window.CauldraOffline.biometricStatus(scope) : { available: false, enabled: false };
-            const enabled = !!(identity && !identity.revoked_locally_at && identity.expires_at > Date.now());
-            summary.textContent = enabled
-                ? `Enabled · Last verified ${new Date(identity.last_server_verified_at).toLocaleString()} · Expires ${new Date(identity.expires_at).toLocaleString()} · PIN required${biometric.enabled ? " · Biometrics enabled with PIN fallback" : ""}`
-                : (identity?.revoked_locally_at ? "Disabled on this device · encrypted local work preserved" : "Not enabled on this device");
-            document.getElementById("offline-enable-button").hidden = !!identity;
-            document.getElementById("offline-refresh-button").hidden = !identity;
-            document.getElementById("offline-biometric-enable-button").hidden = !enabled || !biometric.available || biometric.enabled;
-            document.getElementById("offline-biometric-disable-button").hidden = !biometric.enabled;
+            const state = await window.CauldraOffline.sessionStatus(currentUserProfile, businessProfile);
+            const identity = state.identity;
+            const enabled = !!(identity && !identity.revoked_locally_at && Number(identity.expires_at) > Date.now() && window.CauldraOffline.currentScope() === state.scope);
+            if (!enabled) {
+                section.innerHTML = `<div><h4 class="text-[11px] font-bold text-textMain uppercase tracking-wider">Offline Access</h4><p class="mt-1 text-xs font-semibold text-textMain">Not enabled on this device</p><p class="mt-1 text-[11px] text-textSec">Use Cauldra without internet on this trusted device.</p></div><button type="button" onclick="openOfflineSetupFromProfile()" class="bg-primary hover:bg-primary/90 text-white px-3.5 py-2.5 rounded-xl text-xs font-semibold transition focus:outline-none focus:ring-2 focus:ring-primary/50">Enable Offline Access</button>`;
+                return;
+            }
+            const biometric = await window.CauldraOffline.biometricStatus(state.scope);
+            section.innerHTML = `<div><h4 class="text-[11px] font-bold text-textMain uppercase tracking-wider">Offline Access</h4><p class="mt-1 text-xs font-semibold text-success">Enabled on this device</p></div>
+                <dl class="offline-access-facts"><div><dt>PIN</dt><dd>Configured</dd></div><div><dt>Biometric unlock</dt><dd>${biometric.enabled ? "Enabled" : "Not enabled"}</dd></div><div><dt>Trusted until</dt><dd>${new Date(identity.expires_at).toLocaleString()}</dd></div></dl>
+                <div class="offline-settings-actions"><button type="button" onclick="changeOfflinePinFromProfile()">Change Offline PIN</button><button type="button" onclick="manageOfflineBiometricsFromProfile()">Manage Biometrics</button><button type="button" onclick="refreshOfflineAccessFromProfile()">Refresh Offline Access</button></div>
+                <div class="offline-settings-secondary"><button type="button" onclick="disableOfflineAccessFromProfile()">Disable Offline Access</button></div>
+                <div class="offline-settings-danger"><span>Danger zone</span><button type="button" onclick="removeOfflineDataFromProfile()">Remove Offline Data</button></div>`;
         }
 
         async function openOfflineSetupFromProfile() {
             if (!authToken) { showToast("Internet connection required for this action.", "info"); return; }
-            const scope = `${businessProfile?.id || businessProfile?.business_id}:${currentUserProfile?.id}`;
-            const identity = (await window.CauldraOffline.listIdentities().catch(() => [])).find((item) => item.scope === scope && item.expires_at > Date.now());
-            if (identity) { showToast("Offline access is already enabled. Use Change offline PIN if needed.", "info"); return; }
+            const state = await window.CauldraOffline.sessionStatus(currentUserProfile, businessProfile);
+            if (state.identity) { showToast("Offline Access already exists on this device. Refresh or remove it first.", "info"); return; }
             window.CauldraOffline?.openSetup({ apiUrl: API_URL, token: authToken, user: currentUserProfile, business: businessProfile });
         }
 
@@ -17767,16 +17747,15 @@
             catch (error) { showToast(error.message, "error"); }
         }
 
-        async function enableOfflineBiometricsFromProfile() {
-            try { await window.CauldraOffline.openBiometricSetup(false); }
-            catch (error) { showToast(error.message, "info"); }
-        }
-
-        async function disableOfflineBiometricsFromProfile() {
-            if (!(await showCustomConfirm("Disable biometric unlock? Your Offline PIN will remain available.", "Disable Biometrics"))) return;
-            const scope = `${businessProfile?.id || businessProfile?.business_id}:${currentUserProfile?.id}`;
-            try { await window.CauldraOffline.disableBiometrics(scope); showToast("Biometric unlock disabled. Your Offline PIN is unchanged.", "info"); await renderOfflineAccessSettings(); }
-            catch (error) { showToast(error.message, "error"); }
+        async function manageOfflineBiometricsFromProfile() {
+            const scope = window.CauldraOffline?.currentScope();
+            try {
+                const status = await window.CauldraOffline.biometricStatus(scope);
+                if (!status.enabled) { await window.CauldraOffline.openBiometricSetup(false); return; }
+                if (!(await showCustomConfirm("Disable biometric unlock? Your Offline PIN will remain available.", "Manage Biometrics"))) return;
+                await window.CauldraOffline.disableBiometrics(scope);
+                showToast("Biometric unlock disabled. Your Offline PIN is unchanged.", "info"); await renderOfflineAccessSettings();
+            } catch (error) { showToast(error.message, "info"); }
         }
 
         async function disableOfflineAccessFromProfile() {
@@ -17787,7 +17766,7 @@
         }
 
         async function removeOfflineDataFromProfile() {
-            try { if (await window.CauldraOffline.removeCurrentData()) { showToast("Offline data removed from this device.", "info"); await renderOfflineAccessSettings(); } }
+            try { await window.CauldraOffline.removeCurrentData(window.CauldraOffline.currentScope()); }
             catch (error) { showToast(error.message, "error"); }
         }
 
@@ -18422,6 +18401,7 @@
         // landing mid-transition. Safe to call more than once; every step
         // here is itself idempotent.
         function quiesceAuthenticatedActivity() {
+            cancelOfflineSync();
             stopNotificationPolling();
             notificationPollAbortController?.abort();
             if (window.supplyPresenceTimer) { clearInterval(window.supplyPresenceTimer); window.supplyPresenceTimer = null; }
@@ -19217,17 +19197,7 @@
                 evShowState(data.status === 'verified' ? 3 : 2);
                 if (data.status === 'verified') evBroadcastVerified();
             } catch (error) {
-                // This branch is reached only after a concrete verification
-                // challenge was identified. Keep the failure inside the email
-                // verification/onboarding context instead of leaking a global
-                // infrastructure banner onto an unrelated Dashboard/Guest view.
-                try {
-                    if (openBusinessAuthModal()) {
-                        switchBizAuthView('payment-email');
-                        evShowState(2);
-                    }
-                } catch (_) {}
-                showToast(friendlyErrorMessage(error.message, "Cauldra couldn't finish checking this verification link. Please try again."), 'error');
+                showToast(friendlyErrorMessage(error.message, 'Verification could not be restored. Please try again.'), 'error');
             }
         }
         async function handleEmailVerifyReturn() {
@@ -19247,44 +19217,20 @@
             }
             if (purpose === 'onboarding') await evResumeChallenge(challenge);
         }
-        async function routeNativeReturnUrl(rawUrl) {
-            try {
-                const link = new URL(rawUrl || '');
-                const clean = !link.port && !link.username && !link.password && !link.hash;
-                if (!clean) return false;
-
-                const isEmailReturn = link.protocol === 'cauldra:' && link.hostname === 'auth' &&
-                    link.pathname === '/email-verified' && link.searchParams.get('purpose') === 'onboarding';
-                if (isEmailReturn) {
-                    const challenge = link.searchParams.get('challenge');
-                    if (!/^[a-f0-9]{64}$/.test(challenge || '')) return false;
-                    console.info('EMAIL_RETURN_RECEIVED');
-                    await evResumeChallenge(challenge);
-                    console.info('EMAIL_RETURN_PROCESSED');
-                    return true;
-                }
-
-                const isPaymentReturn = link.protocol === 'cauldra:' && link.hostname === 'payment-return' &&
-                    (link.pathname === '' || link.pathname === '/');
-                if (isPaymentReturn) {
-                    const reference = link.searchParams.get('reference') || link.searchParams.get('trxref');
-                    if (!/^[A-Za-z0-9_.=-]{1,200}$/.test(reference || '')) return false;
-                    console.info('PAYSTACK_RETURN_RECEIVED');
-                    await window.CauldraPayments?.resumeReturn(reference);
-                    return true;
-                }
-                return false;
-            } catch (_) {
-                return false;
-            }
-        }
         async function evInitializeNativeReturn() {
             if (!window.Capacitor?.isNativePlatform?.() || !window.Capacitor.isPluginAvailable('App')) return;
             const app = window.Capacitor.registerPlugin('App');
-            await app.addListener('appUrlOpen', ({url}) => routeNativeReturnUrl(url));
+            const receive = async ({url}) => {
+                try {
+                    const link = new URL(url);
+                    if (link.protocol !== 'cauldra:' || link.hostname !== 'auth' || link.pathname !== '/email-verified'
+                        || link.port || link.username || link.password || link.hash || link.searchParams.get('purpose') !== 'onboarding') return;
+                    await evResumeChallenge(link.searchParams.get('challenge'));
+                } catch (_) {}
+            };
+            await app.addListener('appUrlOpen', receive);
             await app.addListener('appStateChange', ({isActive}) => { if (isActive && evChallengeId) checkEmailVerification(false); });
-            const launch = await app.getLaunchUrl();
-            if (launch?.url) await routeNativeReturnUrl(launch.url);
+            const launch = await app.getLaunchUrl(); if (launch?.url) await receive(launch);
         }
 
         function renderRegisterPlanBanner() {
@@ -23586,7 +23532,7 @@
                 total: dailyTotal, items: items.map((item) => ({ ...item })), occurred_at: new Date().toISOString(), status: "pending_sync", _pendingSync: true };
             const nextSales = [...(offlineSnapshot?.sales || []), localReceipt];
             await addOutboxOp({
-                op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
+                op_id: opId, business_id: currentBusinessId(), user_id: currentUserProfile?.id || null,
                 auth_version: currentUserProfile?.auth_version ?? null,
                 type: "sale_checkout", endpoint: "/sales/checkout", method: "POST",
                 // location_id travels with the queued payload too (FINAL
@@ -25075,7 +25021,7 @@
                 currency: getCurrencyCode(), occurred_at: new Date().toISOString(), client_ref: opId, status: "pending_sync", _pendingSync: true };
             const nextExpenses = [...(offlineSnapshot?.expenses || []), localExpense];
             await addOutboxOp({
-                op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
+                op_id: opId, business_id: currentBusinessId(), user_id: currentUserProfile?.id || null,
                 auth_version: currentUserProfile?.auth_version ?? null,
                 type: "expense_create", endpoint: "/expenses/", method: "POST",
                 payload: { ...payload, location_id: locationId, business_day_id: openDay.id, currency: getCurrencyCode(), occurred_at: new Date().toISOString(), client_ref: opId }, client_ref: opId, meta: {},
@@ -25618,6 +25564,10 @@
             try { applyOfflineSnapshot(event.detail.snapshot, event.detail.grant); } catch (error) { showToast(error.message, "error"); }
         });
         window.addEventListener("cauldra-offline-settings-changed", () => renderOfflineAccessSettings().catch(() => {}));
+        window.addEventListener("cauldra-offline-data-removed", async () => {
+            showToast("Offline data removed from this device.", "info");
+            await renderOfflineAccessSettings().catch(() => {});
+        });
         window.addEventListener("cauldra-offline-locked", () => {
             offlineWorkspaceUnlocked = false;
             document.body.classList.remove("offline-mode");
@@ -25638,6 +25588,23 @@
                 if (attempt >= RETRY_DELAYS_MS.length) return "unreachable";
                 await new Promise(resolve => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
             }
+        }
+
+        async function maybeOfferOrMaintainOfflineAccess() {
+            if (!authToken || !navigator.onLine || !currentUserProfile || !businessProfile || !window.CauldraOffline) return;
+            // Registration, verification, payment, and every other critical
+            // overlay wins. The offer can wait for a later successful load.
+            const overlayOpen = document.querySelector('.fixed[id$="-modal"]:not(.hidden), dialog[open]');
+            if (overlayOpen) return;
+            const status = await window.CauldraOffline.sessionStatus(currentUserProfile, businessProfile);
+            if (status.identity) {
+                const refreshWindow = 48 * 60 * 60 * 1000;
+                if (Number(status.identity.expires_at || 0) - Date.now() <= refreshWindow) {
+                    await window.CauldraOffline.refreshAccess({ apiUrl: API_URL, token: authToken, user: currentUserProfile, business: businessProfile }).catch(() => {});
+                }
+                return;
+            }
+            await window.CauldraOffline.offerOptIn({ apiUrl: API_URL, token: authToken, user: currentUserProfile, business: businessProfile });
         }
 
         function startAuthRefreshHeartbeat() {
@@ -25880,9 +25847,10 @@
             if (existing) {
                 document.getElementById('location-name-input').value = existing.name || '';
                 if (existing.country_code) document.getElementById('location-country-select').value = existing.country_code;
+                document.getElementById('location-region-input').value = existing.region || '';
                 document.getElementById('location-city-input').value = existing.city || '';
-                document.getElementById('location-timezone-input').value = existing.timezone || '';
-                document.getElementById('location-currency-input').value = existing.currency || '';
+                document.getElementById('location-timezone-output').textContent = existing.timezone || 'Derived from geography';
+                document.getElementById('location-currency-output').textContent = existing.currency || 'Derived from geography';
                 document.getElementById('location-phone-input').value = existing.contact_phone || '';
                 document.getElementById('location-email-input').value = existing.contact_email || '';
                 document.getElementById('location-address-input').value = existing.address || '';
@@ -25893,6 +25861,7 @@
                 document.getElementById('location-phone-error'),
             );
             document.getElementById('location-form-modal').classList.remove('hidden');
+            if (!existing) handleLocationCountryChange();
         }
         function closeLocationFormModal() {
             document.getElementById('location-form-modal')?.classList.add('hidden');
@@ -25904,17 +25873,37 @@
             select.innerHTML = sorted.map(c => `<option value="${c.iso2}">${escapeHtml(c.name)}</option>`).join('');
             if (businessProfile?.country_code) select.value = businessProfile.country_code;
         }
-        // Defaults timezone/currency from the selected country WITHOUT
-        // overwriting a value the Admin already typed/edited (section 6:
-        // "must remain editable"; this only fills blanks, never clobbers).
         function handleLocationCountryChange() {
-            const iso2 = document.getElementById('location-country-select')?.value;
+            scheduleLocationContextPreview();
+        }
+
+        let locationContextPreviewTimer = null;
+        function scheduleLocationContextPreview() {
+            clearTimeout(locationContextPreviewTimer);
+            locationContextPreviewTimer = setTimeout(previewLocationContext, 250);
+        }
+        async function previewLocationContext() {
+            const iso2 = document.getElementById('location-country-select')?.value || '';
             const country = countryDatabase.find(c => c.iso2 === iso2);
-            if (!country) return;
-            const tzInput = document.getElementById('location-timezone-input');
-            const curInput = document.getElementById('location-currency-input');
-            if (tzInput && !tzInput.value) tzInput.value = countryTimezoneMap[iso2] || '';
-            if (curInput && !curInput.value) curInput.value = country.currency || '';
+            const region = document.getElementById('location-region-input')?.value.trim() || '';
+            const city = document.getElementById('location-city-input')?.value.trim() || '';
+            const timezone = document.getElementById('location-timezone-output');
+            const currency = document.getElementById('location-currency-output');
+            const help = document.getElementById('location-context-help');
+            if (!country || !authToken) return;
+            try {
+                const query = new URLSearchParams({ country: country.name, country_code: iso2, region, city });
+                const res = await fetch(`${API_URL}/locations/resolve-context?${query}`, { credentials: 'include', headers: { 'Authorization': `Bearer ${authToken}` } });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(showApiError(res, data, 'Add enough geography to derive this location context.'));
+                timezone.textContent = data.timezone || '—'; currency.textContent = data.currency || '—';
+                help.textContent = `Calling context ${data.phone_country_code || '—'} · set authoritatively by Cauldra.`;
+                help.classList.remove('text-danger'); help.classList.add('text-textSec');
+            } catch (error) {
+                timezone.textContent = 'Needs more geography'; currency.textContent = country.currency || 'Derived on save';
+                help.textContent = friendlyErrorMessage(error.message, error.message);
+                help.classList.add('text-danger'); help.classList.remove('text-textSec');
+            }
         }
 
         async function handleSaveLocation(event) {
@@ -25929,9 +25918,8 @@
                 name: document.getElementById('location-name-input').value.trim(),
                 country: country ? country.name : null,
                 country_code: iso2 || null,
+                region: document.getElementById('location-region-input').value.trim() || null,
                 city: document.getElementById('location-city-input').value.trim() || null,
-                timezone: document.getElementById('location-timezone-input').value.trim() || null,
-                currency: document.getElementById('location-currency-input').value.trim() || null,
                 contact_phone: phoneInput.value.trim() || null,
                 contact_email: document.getElementById('location-email-input').value.trim() || null,
                 address: document.getElementById('location-address-input').value.trim() || null,
@@ -25979,20 +25967,15 @@
         }
 
         // --- Warehouse create form: Location dropdown ---------------------------
-        // Hidden entirely for a single-location business (section 6/9's "don't
-        // overload the UI" principle) — a lone active Location is implicit and
-        // never needs a picker; the backend already defaults new warehouses to
-        // it when no location_id is sent.
+        // Warehouse ownership is always explicit, including for a business
+        // that currently has only one active Location.
         function updateWarehouseLocationDropdown() {
             const wrap = document.getElementById('new-warehouse-location-wrap');
             const select = document.getElementById('new-warehouse-location');
             if (!wrap || !select) return;
             const active = activeLocations();
-            if (active.length <= 1) { wrap.classList.add('hidden'); select.innerHTML = ''; return; }
             wrap.classList.remove('hidden');
-            select.innerHTML = active.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join('');
-            const mainLoc = active.find(l => l.is_main);
-            if (mainLoc) select.value = mainLoc.id;
+            select.innerHTML = `<option value="">Select a Location</option>` + active.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join('');
         }
 
         // --- Dashboard Business Day location selector ---------------------------
@@ -27308,6 +27291,7 @@
                 updateGuestHeaderState();
                 scheduleSyncSoon();
                 window.CauldraOffline?.refreshSnapshot({ apiUrl: API_URL, token: authToken }).catch(() => {});
+                setTimeout(() => maybeOfferOrMaintainOfflineAccess().catch(() => {}), 250);
             } catch (err) {
                 // Could not reach the server for a fresh snapshot — rather than
                 // wiping the screen blank, fall back to whatever was cached
@@ -27742,7 +27726,7 @@
             if (!warehouseId) throw new Error("Choose a synchronized warehouse before adding a product offline.");
             const nextStocks = [...offlineWarehouseStocks, { product_id: localId, warehouse_id: warehouseId, quantity: payload.quantity }];
             await addOutboxOp({
-                op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
+                op_id: opId, business_id: currentBusinessId(), user_id: currentUserProfile?.id || null,
                 auth_version: currentUserProfile?.auth_version ?? null,
                 type: "product_create", endpoint: "/products/", method: "POST",
                 payload: { ...payload, client_ref: opId }, client_ref: opId, meta: { local_id: localId },
@@ -27913,7 +27897,7 @@
             const baseUpdatedAt = idx !== -1 ? (globalProducts[idx].updated_at || null) : null;
             const nextProducts = globalProducts.map((product, productIndex) => productIndex === idx ? { ...product, ...payload, _pendingSync: true } : { ...product });
             await addOutboxOp({
-                op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
+                op_id: opId, business_id: currentBusinessId(), user_id: currentUserProfile?.id || null,
                 auth_version: currentUserProfile?.auth_version ?? null,
                 type: "product_update", endpoint: `/products/${id}`, method: "PATCH",
                 payload: { ...payload, client_ref: opId, base_updated_at: baseUpdatedAt }, client_ref: opId, meta: { local_id: id },
@@ -27988,7 +27972,7 @@
             const nextProducts = globalProducts.filter((item) => item.id !== productId);
             const opId = generateOpId();
             await addOutboxOp({
-                op_id: opId, business_id: currentOfflineScope(), user_id: currentUserProfile?.id || null,
+                op_id: opId, business_id: currentBusinessId(), user_id: currentUserProfile?.id || null,
                 auth_version: currentUserProfile?.auth_version ?? null,
                 type: "product_delete", endpoint: `/products/${productId}`, method: "DELETE",
                 payload: { id: productId, base_updated_at: product?.updated_at || null }, meta: {},
@@ -28929,11 +28913,9 @@
             const name = nameInput.value.trim();
             if (!name) return;
             const locationSelect = document.getElementById("new-warehouse-location");
-            const locationWrap = document.getElementById("new-warehouse-location-wrap");
-            const body = { name };
-            if (locationWrap && !locationWrap.classList.contains('hidden') && locationSelect?.value) {
-                body.location_id = parseInt(locationSelect.value, 10);
-            }
+            const locationId = parseInt(locationSelect?.value || '', 10);
+            if (!locationId) { showToast('Select the Location this warehouse belongs to.', 'error'); return; }
+            const body = { name, location_id: locationId };
             try {
                 const res = await fetch(`${API_URL}/warehouses/`, {
                     method: "POST", credentials: "include",
@@ -29529,13 +29511,7 @@
 
         // Initial Data Fetch on Page Load. Authentication restoration must
         // finish before deciding whether a direct Hub/onboarding URL may open.
-        // Deep-link integration is infrastructure, not itself an email-return
-        // event. A normal native launch has no verification return to process,
-        // so listener/getLaunchUrl setup failure must stay silent. A genuine
-        // recognized return is handled contextually inside evResumeChallenge().
-        evInitializeNativeReturn().catch(() => {
-            console.info('EMAIL_RETURN_NOT_PRESENT');
-        });
+        evInitializeNativeReturn().catch(() => showToast('Email return could not initialize. Reopen Cauldra to retry.', 'error'));
         async function bootstrapApplication() {
             const reachable = await isBackendReachable();
             if (!reachable) {

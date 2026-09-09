@@ -2599,26 +2599,31 @@
                     <label class="block font-medium text-textSec mb-1">Location / Branch Name</label>
                     <input type="text" id="location-name-input" placeholder="Lagos HQ" required class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-semibold">
                 </div>
-                <div class="grid grid-cols-2 gap-2">
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <div>
                         <label class="block font-medium text-textSec mb-1">Country</label>
                         <select id="location-country-select" onchange="handleLocationCountryChange()" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary cursor-pointer"></select>
                     </div>
                     <div>
+                        <label class="block font-medium text-textSec mb-1">Region / State</label>
+                        <input type="text" id="location-region-input" oninput="scheduleLocationContextPreview()" placeholder="Lagos State" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                    </div>
+                    <div>
                         <label class="block font-medium text-textSec mb-1">City</label>
-                        <input type="text" id="location-city-input" placeholder="Lagos" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                        <input type="text" id="location-city-input" oninput="scheduleLocationContextPreview()" placeholder="Lagos" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
                     </div>
                 </div>
                 <div class="grid grid-cols-2 gap-2">
                     <div>
                         <label class="block font-medium text-textSec mb-1">Timezone</label>
-                        <input type="text" id="location-timezone-input" placeholder="Africa/Lagos" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                        <output id="location-timezone-output" class="block min-h-[34px] w-full bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-textSec font-mono">Derived from geography</output>
                     </div>
                     <div>
                         <label class="block font-medium text-textSec mb-1">Currency</label>
-                        <input type="text" id="location-currency-input" placeholder="NGN (₦)" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                        <output id="location-currency-output" class="block min-h-[34px] w-full bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-textSec font-mono">Derived from geography</output>
                     </div>
                 </div>
+                <p id="location-context-help" class="text-[10px] text-textSec">Currency, timezone, and calling context are set by Cauldra from this geography.</p>
                 <div>
                     <label class="block font-medium text-textSec mb-1">Contact Phone</label>
                     <input type="text" id="location-phone-input" placeholder="Local number for this location" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-mono">

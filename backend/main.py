@@ -605,6 +605,7 @@ class Location(Base):
     name = Column(String, nullable=False)
     country = Column(String, nullable=True)
     country_code = Column(String, nullable=True)
+    region = Column(String, nullable=True)
     city = Column(String, nullable=True)
     timezone = Column(String, nullable=True)
     currency = Column(String, nullable=True)
@@ -2599,6 +2600,48 @@ def validate_location_timezone(value: Optional[str]) -> Optional[str]:
     except Exception:
         raise HTTPException(status_code=400, detail=f"'{value}' is not a valid timezone. Use a real IANA timezone name, e.g. Africa/Lagos, Europe/London, Asia/Tokyo.")
     return value
+
+# Region/city overrides are deliberately limited to geography for which this
+# application can resolve an IANA zone without guessing. Country-level zones
+# remain authoritative everywhere else.
+_LOCATION_TIMEZONE_OVERRIDES = {
+    "US": {
+        "eastern": "America/New_York", "new york": "America/New_York", "ny": "America/New_York", "florida": "America/New_York", "fl": "America/New_York",
+        "central": "America/Chicago", "texas": "America/Chicago", "tx": "America/Chicago", "illinois": "America/Chicago", "il": "America/Chicago",
+        "mountain": "America/Denver", "colorado": "America/Denver", "co": "America/Denver", "utah": "America/Denver", "ut": "America/Denver",
+        "pacific": "America/Los_Angeles", "california": "America/Los_Angeles", "ca": "America/Los_Angeles", "washington": "America/Los_Angeles", "wa": "America/Los_Angeles",
+        "alaska": "America/Anchorage", "ak": "America/Anchorage", "hawaii": "Pacific/Honolulu", "hi": "Pacific/Honolulu",
+    },
+    "CA": {"ontario": "America/Toronto", "on": "America/Toronto", "quebec": "America/Toronto", "qc": "America/Toronto", "manitoba": "America/Winnipeg", "mb": "America/Winnipeg", "alberta": "America/Edmonton", "ab": "America/Edmonton", "british columbia": "America/Vancouver", "bc": "America/Vancouver", "nova scotia": "America/Halifax", "ns": "America/Halifax"},
+    "AU": {"new south wales": "Australia/Sydney", "nsw": "Australia/Sydney", "victoria": "Australia/Melbourne", "vic": "Australia/Melbourne", "queensland": "Australia/Brisbane", "qld": "Australia/Brisbane", "south australia": "Australia/Adelaide", "sa": "Australia/Adelaide", "western australia": "Australia/Perth", "wa": "Australia/Perth", "tasmania": "Australia/Hobart", "tas": "Australia/Hobart", "northern territory": "Australia/Darwin", "nt": "Australia/Darwin"},
+}
+_LOCATION_CITY_TIMEZONES = {
+    "US": {"phoenix": "America/Phoenix"},
+    "CA": {"st. john's": "America/St_Johns", "st john's": "America/St_Johns"},
+    "AU": {"broken hill": "Australia/Broken_Hill"},
+}
+
+def resolve_location_context(country: Optional[str], country_code: Optional[str], region: Optional[str], city: Optional[str]) -> dict:
+    code = str(country_code or "").strip().upper()
+    name = str(country or "").strip()
+    if not code or code not in COUNTRY_CONTEXTS:
+        raise HTTPException(status_code=400, detail="Select a valid country code for this location.")
+    ctx = COUNTRY_CONTEXTS[code]
+    if name and name.casefold() != ctx["name"].casefold():
+        raise HTTPException(status_code=400, detail="Country and country code do not match.")
+    region_value = str(region or "").strip()
+    city_value = str(city or "").strip()
+    timezone_name = ctx.get("timezone") or "UTC"
+    overrides = _LOCATION_TIMEZONE_OVERRIDES.get(code)
+    if overrides:
+        city_override = _LOCATION_CITY_TIMEZONES.get(code, {}).get(city_value.casefold())
+        region_override = overrides.get(region_value.casefold())
+        if not city_override and not region_override:
+            raise HTTPException(status_code=400, detail=f"Region/state is required to derive an exact timezone for {ctx['name']}.")
+        timezone_name = city_override or region_override
+    validate_location_timezone(timezone_name)
+    return {"country": ctx["name"], "country_code": code, "region": region_value or None, "city": city_value or None,
+            "currency": normalize_currency_code(ctx["currency"]), "timezone": timezone_name, "phone_country_code": ctx["code"]}
 
 # -----------------------------------------------------------------------------
 # PROVIDERS
@@ -5303,20 +5346,18 @@ class BusinessProfileSchema(BaseModel):
 
 class WarehouseCreate(BaseModel):
     name: str
-    # Optional for backward compatibility with any existing caller that
-    # doesn't send it yet — create_warehouse() falls back to the business's
-    # Main Location when omitted, so nothing breaks during the transition.
-    location_id: Optional[int] = None
+    location_id: int
 
 class WarehouseUpdate(BaseModel):
     name: str
     is_active: Optional[bool] = None
-    location_id: Optional[int] = None
+    location_id: int
 
 class LocationCreate(BaseModel):
     name: str
     country: Optional[str] = None
     country_code: Optional[str] = None
+    region: Optional[str] = None
     city: Optional[str] = None
     timezone: Optional[str] = None
     currency: Optional[str] = None
@@ -5328,6 +5369,7 @@ class LocationUpdate(BaseModel):
     name: Optional[str] = None
     country: Optional[str] = None
     country_code: Optional[str] = None
+    region: Optional[str] = None
     city: Optional[str] = None
     timezone: Optional[str] = None
     currency: Optional[str] = None
@@ -7249,7 +7291,7 @@ def get_default_location(db: Session, business_id: int) -> Optional["Location"]:
 def serialize_location(l: "Location", db: Session) -> dict:
     warehouse_count = db.query(Warehouse).filter(Warehouse.location_id == l.id, Warehouse.is_active == True).count()
     return {
-        "id": l.id, "name": l.name, "country": l.country, "country_code": l.country_code, "city": l.city,
+        "id": l.id, "name": l.name, "country": l.country, "country_code": l.country_code, "region": l.region, "city": l.city,
         # Normalized on read (section 24) — create_location()/update_location()
         # already store a clean code going forward, but a row that predates
         # this rule could still carry a decorated string like "NGN (₦)"; this
@@ -7258,7 +7300,8 @@ def serialize_location(l: "Location", db: Session) -> dict:
         # Business Brain's revenue-at-risk breakdown) reads currency through
         # this same serializer, so "NGN" and "NGN (₦)" can never be treated
         # as two different currencies.
-        "timezone": l.timezone, "currency": normalize_currency_code(l.currency) or l.currency, "contact_phone": l.contact_phone, "contact_email": l.contact_email,
+        "timezone": l.timezone, "currency": normalize_currency_code(l.currency) or l.currency,
+        "phone_country_code": COUNTRY_CONTEXTS.get((l.country_code or "").upper(), {}).get("code"), "contact_phone": l.contact_phone, "contact_email": l.contact_email,
         "address": l.address, "is_active": l.is_active, "is_main": l.is_main, "warehouse_count": warehouse_count,
         "created_at": to_utc_iso(l.created_at),
     }
@@ -7308,6 +7351,12 @@ def list_operational_locations(user: User = Depends(get_current_user), db: Sessi
     rows = db.query(Location).filter(Location.business_id == user.business_id, Location.is_active == True).order_by(Location.is_main.desc(), Location.name.asc()).all()
     return [{"id": l.id, "name": l.name, "is_active": l.is_active, "is_main": l.is_main, "city": l.city, "timezone": l.timezone, "currency": normalize_currency_code(l.currency) or l.currency} for l in rows]
 
+@app.get("/locations/resolve-context")
+def preview_location_context(country: Optional[str] = Query(None), country_code: Optional[str] = Query(None), region: Optional[str] = Query(None), city: Optional[str] = Query(None), user: User = Depends(get_current_user)):
+    if user.role not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Business location information is managed by an Admin.")
+    return resolve_location_context(country, country_code, region, city)
+
 @app.post("/locations/")
 def create_location(data: LocationCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "admin":
@@ -7325,25 +7374,13 @@ def create_location(data: LocationCreate, user: User = Depends(get_current_user)
     # location's OWN country_code drives this — never the caller's own
     # business/profile country — since a Location can legitimately be in a
     # different country from the business's registration country.
-    canonical_phone = to_e164(data.contact_phone, data.country_code or "") if data.contact_phone else None
-    # Country code: uppercase ISO2, matching COUNTRY_CONTEXTS' own keying —
-    # never trusted in whatever case the client happened to send.
-    normalized_country_code = data.country_code.strip().upper() if data.country_code else data.country_code
-    # Currency and timezone: still OPTIONAL at this field's own level (no
-    # change to that — see LocationCreate's schema), but a GIVEN value must
-    # normalize/validate successfully or the request is rejected outright,
-    # never silently stored as a decorated string or an unchecked timezone
-    # name (section 21/29 — this is what makes currency_snapshot's own
-    # canonical-code contract actually hold at the source).
-    normalized_currency = None
-    if data.currency is not None:
-        normalized_currency = normalize_currency_code(data.currency)
-        if not normalized_currency:
-            raise HTTPException(status_code=400, detail=f"'{data.currency}' is not a valid currency code. Use a 3-letter ISO 4217 code, e.g. NGN, USD, GBP.")
-    normalized_timezone = validate_location_timezone(data.timezone)
+    if data.currency is not None or data.timezone is not None:
+        raise HTTPException(status_code=400, detail="Location currency and timezone are derived from geography and cannot be submitted by the client.")
+    context = resolve_location_context(data.country, data.country_code, data.region, data.city)
+    canonical_phone = to_e164(data.contact_phone, context["country_code"]) if data.contact_phone else None
     row = Location(
-        business_id=user.business_id, name=name, country=data.country, country_code=normalized_country_code, city=data.city,
-        timezone=normalized_timezone, currency=normalized_currency, contact_phone=canonical_phone,
+        business_id=user.business_id, name=name, country=context["country"], country_code=context["country_code"], region=context["region"], city=context["city"],
+        timezone=context["timezone"], currency=context["currency"], contact_phone=canonical_phone,
         contact_email=str(data.contact_email) if data.contact_email else None, address=data.address, is_active=True, is_main=False,
     )
     db.add(row); db.flush()
@@ -7366,43 +7403,31 @@ def update_location(location_id: int, data: LocationUpdate, user: User = Depends
         if duplicate:
             raise HTTPException(status_code=409, detail="A location with that name already exists.")
         row.name = new_name
-    normalized_currency = row.currency
-    if data.currency is not None:
-        normalized_currency = normalize_currency_code(data.currency)
-        if not normalized_currency:
-            raise HTTPException(status_code=400, detail=f"'{data.currency}' is not a valid currency code. Use a 3-letter ISO 4217 code, e.g. NGN, USD, GBP.")
-        if normalized_currency != row.currency:
-            # Financial records now DO snapshot their own currency
-            # independently of Location at creation time (currency_snapshot,
-            # migration 0034) — a historical Sale/Expense/Refund/PO always
-            # reads back under the currency it actually recorded, never
-            # reinterpreted if this Location's currency changes later.
-            # Despite that, changing an ACTIVE Location's currency is still
-            # blocked once it has financial activity: this guard is about
-            # LIVE/open-in-progress workflows (an open Business Day, a
-            # DRAFT PurchaseOrder still being priced, a currency selector
-            # already showing the OLD currency to a cashier mid-session),
-            # not about protecting historical figures — snapshots already
-            # do that. Intentionally conservative rather than assuming
-            # every in-flight workflow would handle a live currency swap
-            # correctly.
-            has_activity = (
-                db.query(BusinessDay.id).filter(BusinessDay.location_id == row.id).first()
-                or db.query(Expense.id).filter(Expense.location_id == row.id).first()
-                or db.query(RefundTransaction.id).filter(RefundTransaction.location_id == row.id).first()
-                or db.query(PurchaseOrder.id).filter(PurchaseOrder.location_id == row.id).first()
-            )
-            if has_activity:
-                raise HTTPException(status_code=409, detail="This location already has recorded financial activity and its currency can no longer be changed — historical figures would otherwise be misread under a different currency. Create a new location instead if the currency has genuinely changed.")
-    normalized_timezone = validate_location_timezone(data.timezone) if data.timezone is not None else row.timezone
-    for field in ("country", "city", "address"):
-        value = getattr(data, field)
-        if value is not None:
-            setattr(row, field, value)
-    if data.country_code is not None:
-        row.country_code = data.country_code.strip().upper()
-    row.timezone = normalized_timezone
-    row.currency = normalized_currency
+    if data.currency is not None or data.timezone is not None:
+        raise HTTPException(status_code=400, detail="Location currency and timezone are derived from geography and cannot be submitted by the client.")
+    geography_changed = any(getattr(data, field) is not None for field in ("country", "country_code", "region", "city"))
+    context = resolve_location_context(
+        data.country if data.country is not None else row.country,
+        data.country_code if data.country_code is not None else row.country_code,
+        data.region if data.region is not None else row.region,
+        data.city if data.city is not None else row.city,
+    ) if geography_changed else None
+    if context and context["currency"] != normalize_currency_code(row.currency):
+        # Business Days cover their attributed sales as well as day usage;
+        # the other operational tables carry location_id directly.
+        has_activity = (
+            db.query(BusinessDay.id).filter(BusinessDay.location_id == row.id).first()
+            or db.query(Expense.id).filter(Expense.location_id == row.id).first()
+            or db.query(RefundTransaction.id).filter(RefundTransaction.location_id == row.id).first()
+            or db.query(PurchaseOrder.id).filter(PurchaseOrder.location_id == row.id).first()
+        )
+        if has_activity:
+            raise HTTPException(status_code=409, detail="This location already has recorded financial activity and its currency can no longer be changed. Create a new Location instead if the currency has genuinely changed.")
+    if context:
+        for field in ("country", "country_code", "region", "city", "timezone", "currency"):
+            setattr(row, field, context[field])
+    if data.address is not None:
+        row.address = data.address
     if data.contact_phone is not None:
         # Same phone-number rule as create_location() above — canonicalized
         # against this Location's EFFECTIVE country_code (the value just set
@@ -7434,30 +7459,23 @@ def create_warehouse(data: WarehouseCreate, user: User = Depends(get_current_use
     name = data.name.strip()
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Warehouse name must contain at least 2 characters.")
-    # A warehouse must belong to a location in THIS business — an omitted
-    # location_id falls back to the Main Location (compatibility with any
-    # existing caller that doesn't send one yet), never silently to no
-    # location and never to another business's location.
-    if data.location_id is not None:
-        location = db.query(Location).filter(Location.id == data.location_id, Location.business_id == user.business_id, Location.is_active == True).first()
-        if not location:
-            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
-    else:
-        location = get_default_location(db, user.business_id)
+    location = db.query(Location).filter(Location.id == data.location_id, Location.business_id == user.business_id, Location.is_active == True).first()
+    if not location:
+        raise HTTPException(status_code=400, detail="That location could not be found for this business.")
     existing = db.query(Warehouse).filter(Warehouse.business_id == user.business_id, func.lower(Warehouse.name) == name.casefold()).first()
     if existing:
         if not existing.is_active:
             business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
             check_plan_limit(db, business, "warehouse", db.query(Warehouse).filter(Warehouse.business_id == user.business_id, Warehouse.is_active == True).count())
             existing.is_active = True
-            existing.location_id = location.id if location else existing.location_id
+            existing.location_id = location.id
             existing.updated_at = datetime.utcnow()
             db.commit(); db.refresh(existing)
             return serialize_warehouse(existing, db)
         raise HTTPException(status_code=409, detail="That warehouse already exists in this business.")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     check_plan_limit(db, business, "warehouse", db.query(Warehouse).filter(Warehouse.business_id == user.business_id, Warehouse.is_active == True).count())
-    row = Warehouse(business_id=user.business_id, name=name, is_active=True, location_id=location.id if location else None)
+    row = Warehouse(business_id=user.business_id, name=name, is_active=True, location_id=location.id)
     db.add(row); db.flush()
     add_audit(db, user, "WAREHOUSE_CREATED", f"Created warehouse {name}.", action_category="WAREHOUSE", resource_type="warehouse", resource_id=row.id)
     db.commit(); db.refresh(row)
@@ -7475,7 +7493,10 @@ def update_warehouse(warehouse_id: int, data: WarehouseUpdate, user: User = Depe
     duplicate = db.query(Warehouse).filter(Warehouse.business_id == user.business_id, Warehouse.id != row.id, func.lower(Warehouse.name) == new_name.casefold()).first()
     if duplicate:
         raise HTTPException(status_code=409, detail="That warehouse already exists in this business.")
-    if data.location_id is not None and data.location_id != row.location_id:
+    location = db.query(Location).filter(Location.id == data.location_id, Location.business_id == user.business_id, Location.is_active == True).first()
+    if not location:
+        raise HTTPException(status_code=400, detail="That location could not be found for this business.")
+    if data.location_id != row.location_id:
         # Reassigning an EXISTING warehouse's Location is a major operational
         # action, not harmless metadata (section 51) — history (stock,
         # Business Days, sales) already assumes the OLD branch. Blocked once
@@ -7493,9 +7514,6 @@ def update_warehouse(warehouse_id: int, data: WarehouseUpdate, user: User = Depe
         )
         if has_stock:
             raise HTTPException(status_code=409, detail="This warehouse currently holds stock and cannot be reassigned to a different location. Transfer or clear its stock first, or create a new warehouse at the target location instead.")
-        location = db.query(Location).filter(Location.id == data.location_id, Location.business_id == user.business_id, Location.is_active == True).first()
-        if not location:
-            raise HTTPException(status_code=400, detail="That location could not be found for this business.")
         row.location_id = location.id
     old_name = row.name
     if old_name != new_name:
@@ -9597,8 +9615,7 @@ def create_expense(data: ExpenseCreate, request: Request, user: User = Depends(g
     # currency at creation time, never re-derived later.
     expense_currency = resolved_location.currency if resolved_location and resolved_location.currency else None
     if not expense_currency:
-        business_for_currency = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-        expense_currency = business_for_currency.currency if business_for_currency else None
+        raise HTTPException(status_code=409, detail="This Location has no authoritative currency. Reconcile its geography before recording an expense.")
     # Canonical code only (never a decorated "NGN (₦)" string) — normalized
     # here regardless of whether the source was already clean, since a
     # Location or BusinessProfile row can predate this rule (section 26).
@@ -10061,8 +10078,7 @@ def generate_po(user: User = Depends(get_current_user), db: Session = Depends(ge
         # currency later.
         po_currency = location.currency if location and location.currency else None
         if not po_currency:
-            business_for_currency = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-            po_currency = business_for_currency.currency if business_for_currency else None
+            raise HTTPException(status_code=409, detail="This Location has no authoritative currency. Reconcile its geography before creating a purchase order.")
         po_currency = normalize_currency_code(po_currency)  # canonical code only — see normalize_currency_code()
         po = PurchaseOrder(status="DRAFT", total_estimated_cost=total_cost, email_draft=draft, business_id=user.business_id, owner_id=None, location_id=location_id, currency_snapshot=po_currency)
         db.add(po); db.flush()
@@ -10696,8 +10712,7 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
     checkout_location_row = db.query(Location).filter(Location.id == checkout_location_id).first() if checkout_location_id else None
     checkout_currency = checkout_location_row.currency if checkout_location_row and checkout_location_row.currency else None
     if not checkout_currency:
-        business_for_currency = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-        checkout_currency = business_for_currency.currency if business_for_currency else None
+        raise HTTPException(status_code=409, detail="This Location has no authoritative currency. Reconcile its geography before completing a sale.")
     checkout_currency = normalize_currency_code(checkout_currency)  # canonical code only — see normalize_currency_code()
 
     daily_total = 0.0
@@ -11336,7 +11351,7 @@ def financial_summary_by_location(period: str = Query("today"), custom_start: Op
         summary = financial_summary_for_period(db, business, period, custom_start, custom_end, location_id=loc.id)
         summary["location_id"] = loc.id
         summary["location_name"] = loc.name
-        summary["currency"] = loc.currency or business.currency
+        summary["currency"] = loc.currency
         out.append(summary)
     return out
 
@@ -13468,14 +13483,7 @@ class OnboardingPaymentInitRequest(BaseModel):
 def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request, db: Session = Depends(get_db)):
     """Step 1: begin card verification for a guest who has not registered a
     business yet. Only ever charges the same small, refundable verification
-    amount used by the existing trial flow — never the plan's actual price.
-
-    A previous *initialization* is not a payment. If Paystack definitively says
-    that an earlier checkout was abandoned/failed before verification, release
-    only that dead attempt and let the same verified email challenge start a
-    fresh checkout. Pending/successful provider states remain locked to their
-    existing reference so retry can never create a second charge blindly.
-    """
+    amount used by the existing trial flow — never the plan's actual price."""
     client_ip = request.client.host if request and request.client else "unknown"
     check_rate_limit(db, "onboarding-payment-init-ip", client_ip)
     check_rate_limit(db, "onboarding-payment-init-email", str(data.email).strip().lower())
@@ -13496,44 +13504,8 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
     if interval not in ("monthly", "annual"):
         interval = "monthly"
 
-    # A prior attempt may have consumed the email challenge before Paystack
-    # initialization returned to the device. Reconcile that server-owned row
-    # before deciding whether a genuinely fresh initialization is safe.
-    prior = db.query(OnboardingAuthorization).filter(
-        OnboardingAuthorization.email_challenge_id == challenge.challenge_id
-    ).with_for_update().first()
-    if challenge.status == "consumed" and prior:
-        releasable = prior.status == "failed" or datetime.utcnow() > prior.expires_at
-        if not releasable and prior.status in ("initialized", "pending"):
-            try:
-                prior_tx = paystack_verify_transaction(prior.paystack_reference)
-                prior_provider_status = str(prior_tx.get("status") or "").lower()
-            except Exception:
-                raise HTTPException(status_code=409, detail={
-                    "message": "The previous Paystack checkout is still being reconciled. Check its status before trying again.",
-                    "reference": prior.paystack_reference, "status": "pending"})
-            if prior_provider_status in ("abandoned", "failed"):
-                releasable = True
-            else:
-                raise HTTPException(status_code=409, detail={
-                    "message": "The previous Paystack checkout must be checked before another can start.",
-                    "reference": prior.paystack_reference,
-                    "status": "pending" if prior_provider_status in ("pending", "processing", "ongoing", "queued") else prior_provider_status})
-        elif not releasable:
-            raise HTTPException(status_code=409, detail={
-                "message": "This verification attempt already has a Paystack checkout. Check its status.",
-                "reference": prior.paystack_reference, "status": prior.status})
-
-        if releasable:
-            # Keep the old row for audit/reconciliation but detach its unique
-            # challenge binding. No card data or provider authorization is moved.
-            prior.status = "failed"
-            prior.email_challenge_id = None
-            challenge.status = "verified"
-            challenge.consumed_at = None
-            db.commit()
-
     # Require one fresh server-side challenge, then atomically bind it to payment.
+
     amount_kobo = PAYSTACK_TRIAL_VERIFICATION_AMOUNT_KOBO
     key = str(request.headers.get('Idempotency-Key') or '')
     if not re.fullmatch(r'[A-Za-z0-9_-]{16,100}', key):
@@ -13541,10 +13513,10 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
     digest = hmac.new(PAYSTACK_SECRET_KEY.encode(), (str(data.email).casefold() + ':' + plan + ':' + interval + ':' + key).encode(), 'sha256').hexdigest()
     reference = 'cauldra_onboard_' + digest[:40]
     existing = db.query(OnboardingAuthorization).filter_by(paystack_reference=reference).first()
+    if existing and existing.email_challenge_id != data.challenge_id:
+        raise HTTPException(403, "This payment attempt belongs to another verification challenge.")
     if existing:
-        raise HTTPException(status_code=409, detail={
-            'message': 'This Paystack initialization key has already been used. Check that attempt before retrying.',
-            'reference': reference, 'status': existing.status})
+        raise HTTPException(status_code=409, detail={'message': 'This verification attempt already exists. Check its status.', 'reference': reference})
 
     if (challenge.status != "verified" or not challenge.verified_at or
         (challenge.email, challenge.plan, challenge.billing_interval) != (str(data.email).strip().lower(), plan, interval)):
@@ -13603,26 +13575,8 @@ def onboarding_payment_confirm(data: OnboardingPaymentConfirmRequest, request: R
     except Exception:
         raise HTTPException(status_code=502, detail="We couldn't verify that payment method with Paystack right now. Please try again.")
 
-    provider_status = str(tx.get('status') or '').lower()
-    if provider_status in ('pending', 'processing', 'ongoing', 'queued'):
+    if tx.get('status') in ('pending', 'processing', 'ongoing', 'queued', 'abandoned'):
         return JSONResponse(status_code=202, content={'status': 'pending', 'reference': reference})
-    if provider_status in ('abandoned', 'failed'):
-        # Paystack has definitively classified this checkout as non-successful.
-        # Release the verified email challenge so an explicit user retry can
-        # create a new reference without reusing or duplicating this attempt.
-        challenge = None
-        if row.email_challenge_id:
-            challenge = db.query(OnboardingEmailChallenge).filter(
-                OnboardingEmailChallenge.challenge_id == row.email_challenge_id
-            ).with_for_update().first()
-        row.status = 'failed'
-        row.email_challenge_id = None
-        if challenge and challenge.status == 'consumed':
-            challenge.status = 'verified'
-            challenge.consumed_at = None
-        db.commit()
-        return JSONResponse(status_code=200 if provider_status == 'abandoned' else 400,
-            content={'status': 'cancelled' if provider_status == 'abandoned' else 'failed', 'reference': reference})
     if not transaction_id_available(db, tx, row):
         raise HTTPException(status_code=409, detail='This payment could not be verified for this attempt.')
     if (tx.get("status") != "success" or int(tx.get("amount") or 0) != row.amount_kobo
