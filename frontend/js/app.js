@@ -19175,8 +19175,11 @@
             }
         }
         // The return URL is routing only. Backend challenge status is authority.
-        async function evResumeChallenge(challenge) {
-            if (!/^[a-f0-9]{64}$/.test(challenge || '')) return;
+        async function evResumeChallenge(challenge, {contextualReturn = false} = {}) {
+            if (!/^[a-f0-9]{64}$/.test(challenge || '')) {
+                if (contextualReturn) evShowReturnRecovery('This email verification return is incomplete. Request a new verification email.');
+                return;
+            }
             const generation = evGeneration;
             try {
                 const res = await fetch(`${API_URL}/onboarding/email/verify/confirm`, {method:'POST',
@@ -19197,8 +19200,17 @@
                 evShowState(data.status === 'verified' ? 3 : 2);
                 if (data.status === 'verified') evBroadcastVerified();
             } catch (error) {
-                showToast(friendlyErrorMessage(error.message, 'Verification could not be restored. Please try again.'), 'error');
+                const message = friendlyErrorMessage(error.message, 'Verification could not be restored. Please try again.');
+                if (contextualReturn) evShowReturnRecovery(message);
+                else showToast(message, 'error');
             }
+        }
+        function evShowReturnRecovery(message) {
+            openBusinessAuthModal();
+            switchBizAuthView('payment-email');
+            const recovery = document.getElementById('ev-state-4-msg');
+            if (recovery) recovery.textContent = `Email verification return: ${message}`;
+            evShowState(4);
         }
         async function handleEmailVerifyReturn() {
             const params = new URLSearchParams(window.location.search);
@@ -19225,7 +19237,7 @@
                     const link = new URL(url);
                     if (link.protocol !== 'cauldra:' || link.hostname !== 'auth' || link.pathname !== '/email-verified'
                         || link.port || link.username || link.password || link.hash || link.searchParams.get('purpose') !== 'onboarding') return;
-                    await evResumeChallenge(link.searchParams.get('challenge'));
+                    await evResumeChallenge(link.searchParams.get('challenge'), {contextualReturn:true});
                 } catch (_) {}
             };
             await app.addListener('appUrlOpen', receive);
@@ -29511,7 +29523,7 @@
 
         // Initial Data Fetch on Page Load. Authentication restoration must
         // finish before deciding whether a direct Hub/onboarding URL may open.
-        evInitializeNativeReturn().catch(() => showToast('Email return could not initialize. Reopen Cauldra to retry.', 'error'));
+        evInitializeNativeReturn().catch((error) => console.warn('[Cauldra email return] Native listener initialization unavailable.', error));
         async function bootstrapApplication() {
             const reachable = await isBackendReachable();
             if (!reachable) {

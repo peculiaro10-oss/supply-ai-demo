@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 import time
 import asyncio
 import math
@@ -2601,24 +2602,104 @@ def validate_location_timezone(value: Optional[str]) -> Optional[str]:
         raise HTTPException(status_code=400, detail=f"'{value}' is not a valid timezone. Use a real IANA timezone name, e.g. Africa/Lagos, Europe/London, Asia/Tokyo.")
     return value
 
-# Region/city overrides are deliberately limited to geography for which this
-# application can resolve an IANA zone without guessing. Country-level zones
-# remain authoritative everywhere else.
+def _normalize_location_geography(value: Optional[str]) -> str:
+    value = unicodedata.normalize("NFKD", str(value or ""))
+    value = "".join(character for character in value if not unicodedata.combining(character))
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+
+def _timezone_aliases(*groups: tuple[str, tuple[str, ...]]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for timezone_name, names in groups:
+        for name in names:
+            aliases[_normalize_location_geography(name)] = timezone_name
+    return aliases
+
+# Audited against the bundled IANA tzdata country catalogue. These are every
+# currently supported COUNTRY_CONTEXTS entry with more than one operational
+# timezone rule. Merely having a country-level timezone in COUNTRY_CONTEXTS is
+# never enough for these codes: an exact deterministic region/city alias must
+# resolve below, otherwise the write is rejected.
+_MULTI_TIMEZONE_COUNTRY_CODES = frozenset({
+    "AU", "BR", "CA", "CD", "CL", "CN", "EC", "ES", "FM", "GL", "ID",
+    "KI", "MN", "MX", "NZ", "PF", "PG", "PT", "RU", "UA", "US",
+})
+
 _LOCATION_TIMEZONE_OVERRIDES = {
-    "US": {
-        "eastern": "America/New_York", "new york": "America/New_York", "ny": "America/New_York", "florida": "America/New_York", "fl": "America/New_York",
-        "central": "America/Chicago", "texas": "America/Chicago", "tx": "America/Chicago", "illinois": "America/Chicago", "il": "America/Chicago",
-        "mountain": "America/Denver", "colorado": "America/Denver", "co": "America/Denver", "utah": "America/Denver", "ut": "America/Denver",
-        "pacific": "America/Los_Angeles", "california": "America/Los_Angeles", "ca": "America/Los_Angeles", "washington": "America/Los_Angeles", "wa": "America/Los_Angeles",
-        "alaska": "America/Anchorage", "ak": "America/Anchorage", "hawaii": "Pacific/Honolulu", "hi": "Pacific/Honolulu",
-    },
-    "CA": {"ontario": "America/Toronto", "on": "America/Toronto", "quebec": "America/Toronto", "qc": "America/Toronto", "manitoba": "America/Winnipeg", "mb": "America/Winnipeg", "alberta": "America/Edmonton", "ab": "America/Edmonton", "british columbia": "America/Vancouver", "bc": "America/Vancouver", "nova scotia": "America/Halifax", "ns": "America/Halifax"},
-    "AU": {"new south wales": "Australia/Sydney", "nsw": "Australia/Sydney", "victoria": "Australia/Melbourne", "vic": "Australia/Melbourne", "queensland": "Australia/Brisbane", "qld": "Australia/Brisbane", "south australia": "Australia/Adelaide", "sa": "Australia/Adelaide", "western australia": "Australia/Perth", "wa": "Australia/Perth", "tasmania": "Australia/Hobart", "tas": "Australia/Hobart", "northern territory": "Australia/Darwin", "nt": "Australia/Darwin"},
+    "AU": _timezone_aliases(
+        ("Australia/Sydney", ("New South Wales", "NSW")), ("Australia/Melbourne", ("Victoria", "VIC")),
+        ("Australia/Brisbane", ("Queensland", "QLD")), ("Australia/Adelaide", ("South Australia", "SA")),
+        ("Australia/Perth", ("Western Australia", "WA")), ("Australia/Hobart", ("Tasmania", "TAS")),
+        ("Australia/Darwin", ("Northern Territory", "NT")), ("Australia/Lord_Howe", ("Lord Howe Island",)),
+        ("Antarctica/Macquarie", ("Macquarie Island",)), ("Australia/Eucla", ("Eucla",)),
+        ("Australia/Lindeman", ("Whitsunday Islands", "Lindeman Island")),
+    ),
+    "BR": _timezone_aliases(
+        ("America/Noronha", ("Atlantic Islands", "Fernando de Noronha")),
+        ("America/Belem", ("Amapa", "AP")), ("America/Fortaleza", ("Maranhao", "MA", "Piaui", "PI", "Ceara", "CE", "Rio Grande do Norte", "RN", "Paraiba", "PB")),
+        ("America/Recife", ("Pernambuco", "PE")), ("America/Araguaina", ("Tocantins", "TO")),
+        ("America/Maceio", ("Alagoas", "AL", "Sergipe", "SE")), ("America/Bahia", ("Bahia", "BA")),
+        ("America/Sao_Paulo", ("Goias", "GO", "Distrito Federal", "DF", "Minas Gerais", "MG", "Espirito Santo", "ES", "Rio de Janeiro", "RJ", "Sao Paulo", "SP", "Parana", "PR", "Santa Catarina", "SC", "Rio Grande do Sul", "RS")),
+        ("America/Campo_Grande", ("Mato Grosso do Sul", "MS")), ("America/Cuiaba", ("Mato Grosso", "MT")),
+        ("America/Porto_Velho", ("Rondonia", "RO")), ("America/Boa_Vista", ("Roraima", "RR")),
+        ("America/Rio_Branco", ("Acre", "AC")),
+    ),
+    "CA": _timezone_aliases(
+        ("America/Halifax", ("Prince Edward Island", "PEI")), ("America/Moncton", ("New Brunswick", "NB")),
+        ("America/Winnipeg", ("Manitoba", "MB")), ("America/Regina", ("Saskatchewan", "SK")),
+        ("America/Edmonton", ("Alberta", "AB")),
+    ),
+    "CD": _timezone_aliases(("Africa/Kinshasa", ("Western Congo", "West", "Kinshasa")), ("Africa/Lubumbashi", ("Eastern Congo", "East", "Lubumbashi"))),
+    "CL": _timezone_aliases(("America/Santiago", ("Santiago", "Metropolitan Region")), ("America/Coyhaique", ("Aysen", "Aysen Region")), ("America/Punta_Arenas", ("Magallanes", "Magallanes Region")), ("Pacific/Easter", ("Easter Island", "Rapa Nui"))),
+    "CN": _timezone_aliases(("Asia/Shanghai", ("Beijing Time", "Beijing", "Shanghai")), ("Asia/Urumqi", ("Xinjiang", "Urumqi"))),
+    "EC": _timezone_aliases(("America/Guayaquil", ("Mainland", "Continental Ecuador", "Guayaquil")), ("Pacific/Galapagos", ("Galapagos", "Galapagos Islands"))),
+    "ES": _timezone_aliases(("Europe/Madrid", ("Mainland", "Peninsular Spain", "Madrid")), ("Africa/Ceuta", ("Ceuta", "Melilla")), ("Atlantic/Canary", ("Canary Islands", "Canarias"))),
+    "FM": _timezone_aliases(("Pacific/Chuuk", ("Chuuk", "Truk", "Yap")), ("Pacific/Pohnpei", ("Pohnpei", "Ponape")), ("Pacific/Kosrae", ("Kosrae",))),
+    "GL": _timezone_aliases(("America/Nuuk", ("Nuuk", "Most of Greenland")), ("America/Danmarkshavn", ("Danmarkshavn", "Northeast Greenland National Park")), ("America/Scoresbysund", ("Scoresbysund", "Ittoqqortoormiit")), ("America/Thule", ("Thule", "Pituffik"))),
+    "ID": _timezone_aliases(("Asia/Jakarta", ("Java", "Sumatra", "Jakarta")), ("Asia/Pontianak", ("West Kalimantan", "Central Kalimantan", "Pontianak")), ("Asia/Makassar", ("East Kalimantan", "South Kalimantan", "Sulawesi", "Bali", "Nusa Tenggara", "West Timor", "Makassar")), ("Asia/Jayapura", ("Maluku", "Papua", "West Papua", "Jayapura"))),
+    "KI": _timezone_aliases(("Pacific/Tarawa", ("Gilbert Islands", "Tarawa")), ("Pacific/Kanton", ("Phoenix Islands", "Kanton")), ("Pacific/Kiritimati", ("Line Islands", "Kiritimati"))),
+    "MN": _timezone_aliases(("Asia/Ulaanbaatar", ("Ulaanbaatar", "Most of Mongolia")), ("Asia/Hovd", ("Bayan Olgii", "Hovd", "Uvs"))),
+    "MX": _timezone_aliases(
+        ("America/Mexico_City", ("Central Mexico", "Mexico City", "Aguascalientes", "Colima", "Guanajuato", "Guerrero", "Hidalgo", "Jalisco", "Mexico State", "Michoacan", "Morelos", "Oaxaca", "Puebla", "Queretaro", "San Luis Potosi", "Tabasco", "Tlaxcala", "Veracruz", "Zacatecas")),
+        ("America/Cancun", ("Quintana Roo",)), ("America/Merida", ("Campeche", "Yucatan")),
+        ("America/Monterrey", ("Durango",)), ("America/Mazatlan", ("Baja California Sur", "Nayarit", "Sinaloa")),
+        ("America/Hermosillo", ("Sonora",)), ("America/Tijuana", ("Baja California",)),
+    ),
+    "NZ": _timezone_aliases(("Pacific/Auckland", ("Mainland", "North Island", "South Island", "Auckland")), ("Pacific/Chatham", ("Chatham Islands", "Chatham"))),
+    "PF": _timezone_aliases(("Pacific/Tahiti", ("Society Islands", "Tahiti")), ("Pacific/Marquesas", ("Marquesas Islands", "Marquesas")), ("Pacific/Gambier", ("Gambier Islands", "Gambier"))),
+    "PG": _timezone_aliases(("Pacific/Port_Moresby", ("Mainland", "Port Moresby")), ("Pacific/Bougainville", ("Bougainville", "Autonomous Region of Bougainville"))),
+    "PT": _timezone_aliases(("Europe/Lisbon", ("Mainland", "Continental Portugal", "Lisbon")), ("Atlantic/Madeira", ("Madeira", "Madeira Islands")), ("Atlantic/Azores", ("Azores",))),
+    "RU": _timezone_aliases(
+        ("Europe/Kaliningrad", ("Kaliningrad", "Kaliningrad Oblast")), ("Europe/Moscow", ("Moscow", "Moscow Oblast")),
+        ("Europe/Kirov", ("Kirov", "Kirov Oblast")), ("Europe/Volgograd", ("Volgograd", "Volgograd Oblast")),
+        ("Europe/Astrakhan", ("Astrakhan", "Astrakhan Oblast")), ("Europe/Saratov", ("Saratov", "Saratov Oblast")),
+        ("Europe/Ulyanovsk", ("Ulyanovsk", "Ulyanovsk Oblast")), ("Europe/Samara", ("Samara", "Samara Oblast", "Udmurtia")),
+        ("Asia/Yekaterinburg", ("Yekaterinburg", "Sverdlovsk Oblast", "Chelyabinsk Oblast", "Perm Krai", "Bashkortostan")),
+        ("Asia/Omsk", ("Omsk", "Omsk Oblast")), ("Asia/Novosibirsk", ("Novosibirsk", "Novosibirsk Oblast")),
+        ("Asia/Barnaul", ("Altai Krai", "Barnaul")), ("Asia/Tomsk", ("Tomsk", "Tomsk Oblast")),
+        ("Asia/Novokuznetsk", ("Kemerovo", "Kemerovo Oblast", "Novokuznetsk")), ("Asia/Krasnoyarsk", ("Krasnoyarsk", "Krasnoyarsk Krai")),
+        ("Asia/Irkutsk", ("Irkutsk", "Irkutsk Oblast", "Buryatia")), ("Asia/Chita", ("Chita", "Zabaykalsky Krai")),
+        ("Asia/Yakutsk", ("Yakutsk",)), ("Asia/Khandyga", ("Khandyga", "Tomponsky District", "Ust Maysky District")),
+        ("Asia/Vladivostok", ("Vladivostok", "Primorsky Krai")), ("Asia/Ust-Nera", ("Ust Nera", "Oymyakonsky District")),
+        ("Asia/Magadan", ("Magadan", "Magadan Oblast")), ("Asia/Sakhalin", ("Sakhalin", "Sakhalin Oblast")),
+        ("Asia/Srednekolymsk", ("Srednekolymsk", "Eastern Sakha", "North Kuril Islands")),
+        ("Asia/Kamchatka", ("Kamchatka", "Kamchatka Krai")), ("Asia/Anadyr", ("Anadyr", "Chukotka")),
+    ),
+    "UA": _timezone_aliases(("Europe/Kyiv", ("Mainland", "Most of Ukraine", "Kyiv")), ("Europe/Simferopol", ("Crimea", "Simferopol"))),
+    "US": _timezone_aliases(
+        ("America/New_York", ("Eastern", "New York", "NY", "New Jersey", "NJ", "Connecticut", "CT", "Massachusetts", "MA", "Rhode Island", "RI", "Vermont", "VT", "New Hampshire", "NH", "Maine", "ME", "Pennsylvania", "PA", "Ohio", "OH", "Delaware", "DE", "Maryland", "MD", "District of Columbia", "DC", "Virginia", "VA", "West Virginia", "WV", "North Carolina", "NC", "South Carolina", "SC", "Georgia", "GA")),
+        ("America/Chicago", ("Central", "Alabama", "AL", "Arkansas", "AR", "Iowa", "IA", "Illinois", "IL", "Louisiana", "LA", "Minnesota", "MN", "Mississippi", "MS", "Missouri", "MO", "Oklahoma", "OK", "Wisconsin", "WI")),
+        ("America/Denver", ("Mountain", "Colorado", "CO", "Montana", "MT", "New Mexico", "NM", "Utah", "UT", "Wyoming", "WY")),
+        ("America/Los_Angeles", ("Pacific", "California", "CA", "Washington", "WA")),
+        ("Pacific/Honolulu", ("Hawaii", "HI")),
+    ),
 }
+
 _LOCATION_CITY_TIMEZONES = {
-    "US": {"phoenix": "America/Phoenix"},
-    "CA": {"st. john's": "America/St_Johns", "st john's": "America/St_Johns"},
-    "AU": {"broken hill": "Australia/Broken_Hill"},
+    "AU": _timezone_aliases(("Australia/Broken_Hill", ("Broken Hill",)), ("Australia/Eucla", ("Eucla",))),
+    "BR": _timezone_aliases(("America/Belem", ("Belem",)), ("America/Santarem", ("Santarem",)), ("America/Manaus", ("Manaus",)), ("America/Eirunepe", ("Eirunepe",)), ("America/Noronha", ("Fernando de Noronha",))),
+    "CA": _timezone_aliases(("America/St_Johns", ("St Johns",)), ("America/Halifax", ("Halifax",)), ("America/Glace_Bay", ("Glace Bay",)), ("America/Moncton", ("Moncton",)), ("America/Goose_Bay", ("Goose Bay",)), ("America/Blanc-Sablon", ("Blanc Sablon",)), ("America/Toronto", ("Toronto",)), ("America/Iqaluit", ("Iqaluit",)), ("America/Atikokan", ("Atikokan",)), ("America/Winnipeg", ("Winnipeg",)), ("America/Resolute", ("Resolute",)), ("America/Rankin_Inlet", ("Rankin Inlet",)), ("America/Regina", ("Regina",)), ("America/Swift_Current", ("Swift Current",)), ("America/Edmonton", ("Edmonton",)), ("America/Cambridge_Bay", ("Cambridge Bay",)), ("America/Inuvik", ("Inuvik",)), ("America/Vancouver", ("Vancouver",)), ("America/Creston", ("Creston",)), ("America/Dawson_Creek", ("Dawson Creek",)), ("America/Fort_Nelson", ("Fort Nelson",)), ("America/Whitehorse", ("Whitehorse",)), ("America/Dawson", ("Dawson",))),
+    "MX": _timezone_aliases(("America/Matamoros", ("Matamoros",)), ("America/Ciudad_Juarez", ("Ciudad Juarez",)), ("America/Ojinaga", ("Ojinaga",)), ("America/Chihuahua", ("Chihuahua",)), ("America/Bahia_Banderas", ("Bahia de Banderas",)), ("America/Monterrey", ("Monterrey",)), ("America/Tijuana", ("Tijuana",))),
+    "US": _timezone_aliases(("America/Phoenix", ("Phoenix",)), ("America/Detroit", ("Detroit",)), ("America/Boise", ("Boise",)), ("America/Anchorage", ("Anchorage",)), ("America/Juneau", ("Juneau",)), ("America/Sitka", ("Sitka",)), ("America/Metlakatla", ("Metlakatla",)), ("America/Yakutat", ("Yakutat",)), ("America/Nome", ("Nome",)), ("America/Adak", ("Adak",))),
 }
 
 def resolve_location_context(country: Optional[str], country_code: Optional[str], region: Optional[str], city: Optional[str]) -> dict:
@@ -2631,14 +2712,15 @@ def resolve_location_context(country: Optional[str], country_code: Optional[str]
         raise HTTPException(status_code=400, detail="Country and country code do not match.")
     region_value = str(region or "").strip()
     city_value = str(city or "").strip()
-    timezone_name = ctx.get("timezone") or "UTC"
-    overrides = _LOCATION_TIMEZONE_OVERRIDES.get(code)
-    if overrides:
-        city_override = _LOCATION_CITY_TIMEZONES.get(code, {}).get(city_value.casefold())
-        region_override = overrides.get(region_value.casefold())
+    timezone_name = ctx.get("timezone")
+    if code in _MULTI_TIMEZONE_COUNTRY_CODES:
+        city_override = _LOCATION_CITY_TIMEZONES.get(code, {}).get(_normalize_location_geography(city_value))
+        region_override = _LOCATION_TIMEZONE_OVERRIDES.get(code, {}).get(_normalize_location_geography(region_value))
         if not city_override and not region_override:
-            raise HTTPException(status_code=400, detail=f"Region/state is required to derive an exact timezone for {ctx['name']}.")
+            raise HTTPException(status_code=400, detail=f"Region/state or city is required to derive an exact timezone for {ctx['name']}. Enter a recognized state, province, territory, island, or city.")
         timezone_name = city_override or region_override
+    if not timezone_name:
+        raise HTTPException(status_code=400, detail=f"No authoritative timezone is configured for {ctx['name']}.")
     validate_location_timezone(timezone_name)
     return {"country": ctx["name"], "country_code": code, "region": region_value or None, "city": city_value or None,
             "currency": normalize_currency_code(ctx["currency"]), "timezone": timezone_name, "phone_country_code": ctx["code"]}

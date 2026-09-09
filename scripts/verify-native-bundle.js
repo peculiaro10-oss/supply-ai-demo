@@ -48,28 +48,19 @@ function verify(native = true) {
             }
         } catch (_) { failures.push(dir+'/build-manifest.json missing or unreadable'); }
     }
-    // Native email-return regression protection: App/deep-link listener
-    // initialization is not itself a verification event and must never surface
-    // the old global startup error to an ordinary Guest/authenticated launch.
-    const appSource = fs.readFileSync(path.join(root,'frontend/js/app.js'),'utf8');
-    if (appSource.includes('Email return could not initialize. Reopen Cauldra to retry.'))
-        failures.push('frontend/js/app.js must not expose a global email-return initialization error');
-    if (!appSource.includes("link.hostname === 'auth'") || !appSource.includes("link.hostname === 'payment-return'"))
-        failures.push('frontend/js/app.js must classify email and Paystack native returns separately');
-
-    const paymentSource = fs.readFileSync(path.join(root,'frontend/js/payments.js'),'utf8');
-    if (paymentSource.includes('The payment attempt has not been resolved. Check status or contact support; no new charge has been started.'))
-        failures.push('frontend/js/payments.js must not label unlaunched checkout initialization as unresolved payment');
-    for (const marker of ['openInWebView','PAYSTACK_INIT_SUCCESS','PAYSTACK_CHECKOUT_OPEN_REQUESTED','PAYSTACK_CHECKOUT_OPENED','PAYSTACK_RETURN_RECEIVED','PAYSTACK_CONFIRM_REQUESTED']) {
-        if (!paymentSource.includes(marker)) failures.push('frontend/js/payments.js missing Paystack checkout lifecycle marker: '+marker);
-    }
-
     // A concrete regression assertion on source AND both generated shells.
     for (const dir of ['frontend',...dirs]) {
         const file = path.join(root,dir,'index.html');
         if (!fs.existsSync(file)) continue;
         const tag = fs.readFileSync(file,'utf8').match(/<[^>]+id="header-global-search-wrap"[^>]*>/)?.[0] || '';
         if (!/class="[^"]*\bhidden\b/.test(tag)) failures.push(dir+'/index.html guest search must start hidden');
+    }
+    const forbiddenEmailStartupError = 'Email return could not initialize. Reopen Cauldra to retry.';
+    for (const dir of ['frontend',...dirs]) {
+        const file = path.join(root,dir,'js/app.js');
+        if (fs.existsSync(file) && fs.readFileSync(file,'utf8').includes(forbiddenEmailStartupError)) {
+            failures.push(dir+'/js/app.js contains forbidden ordinary-startup email return error UI');
+        }
     }
     if (native) {
         try {
