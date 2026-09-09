@@ -33,7 +33,7 @@ from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, ForeignKey, Text, Boolean,
     DateTime as SQLDateTime, and_, or_, func, UniqueConstraint, inspect,
-    cast, literal, text as sql_text, event
+    cast, literal, text as sql_text, event, Index
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from sqlalchemy.exc import IntegrityError
@@ -1452,12 +1452,17 @@ class PresenceSession(Base):
 
 class PriceMonitorSource(Base):
     __tablename__ = "price_monitor_sources"
+    __table_args__ = (Index("ix_price_monitor_sources_business_active", "business_id", "is_active"),)
     id = Column(Integer, primary_key=True, index=True)
     business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False)
     supplier_id = Column(Integer, ForeignKey("suppliers.id", ondelete="SET NULL"), nullable=True)
     product_id = Column(Integer, ForeignKey("products.id", ondelete="SET NULL"), nullable=True)
     source_type = Column(String, nullable=False)
     source_url = Column(String, nullable=True)
+    # A source can be retired without destroying its monitoring history.
+    # Only active sources consume plan capacity; reactivation is checked by
+    # the same authoritative entitlement guard as creation.
+    is_active = Column(Boolean, default=True, nullable=False)
     last_price = Column(Float, nullable=True)
     last_checked_at = Column(SQLDateTime, nullable=True)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
@@ -1925,6 +1930,26 @@ PLAN_CONFIG = {
 PLAN_LIMIT_FIELDS = ["admin", "manager", "staff", "branch", "city", "country", "product", "supplier", "warehouse",
                       "purchase_order", "price_monitor", "storage_gb", "included_ai_credits"]
 
+# Every customer-facing PLAN_CONFIG limit has one explicit semantic model.
+# Pricing, trial duration, and AI overage price/unit are billing terms rather
+# than resource entitlements and therefore deliberately do not appear here.
+ENTITLEMENT_LIMIT_TYPES = {
+    "admin": "capacity", "manager": "capacity", "staff": "capacity",
+    "branch": "capacity", "city": "capacity", "country": "capacity",
+    "product": "capacity", "supplier": "capacity", "warehouse": "capacity",
+    "price_monitor": "capacity", "storage_gb": "capacity",
+    "purchase_order": "period_usage", "included_ai_credits": "period_usage",
+}
+CAPACITY_LIMIT_FIELDS = tuple(k for k, kind in ENTITLEMENT_LIMIT_TYPES.items() if kind == "capacity")
+PERIOD_USAGE_LIMIT_FIELDS = tuple(k for k, kind in ENTITLEMENT_LIMIT_TYPES.items() if kind == "period_usage")
+ENTITLEMENT_RESOURCE_LABELS = {
+    "admin": "active Admin accounts", "manager": "active Manager accounts", "staff": "active Staff accounts",
+    "branch": "active locations", "city": "active-location cities", "country": "active-location countries",
+    "product": "products", "supplier": "suppliers", "warehouse": "active warehouses",
+    "price_monitor": "active price-monitor sources", "storage_gb": "storage",
+    "purchase_order": "sent purchase orders", "included_ai_credits": "AI credits",
+}
+
 def plan_public_view(pid: str, cfg: dict) -> dict:
     """Shared shape for both the public /plans catalog and the authenticated
     usage summary's embedded plan catalog, so pricing/limits/savings are computed
@@ -2029,7 +2054,13 @@ def subscription_for(db: Session, business: BusinessProfile) -> dict:
 def add_billing_interval(start: datetime, interval: str) -> datetime:
     months = 12 if interval == "annual" else 1
     month = start.month + months
-    return datetime(start.year + (month - 1) // 12, (month - 1) % 12 + 1, 1)
+    year = start.year + (month - 1) // 12
+    target_month = (month - 1) % 12 + 1
+    next_month = target_month + 1
+    next_year = year + (next_month - 1) // 12
+    next_month = (next_month - 1) % 12 + 1
+    last_day = (datetime(next_year, next_month, 1) - timedelta(days=1)).day
+    return start.replace(year=year, month=target_month, day=min(start.day, last_day))
 
 def get_subscription(db: Session, business_id: int) -> Optional[BusinessSubscription]:
     return db.query(BusinessSubscription).filter(BusinessSubscription.business_id == business_id).first()
@@ -2114,6 +2145,12 @@ def require_subscription_access(db: Session, user: User):
 def billing_period_for(db: Session, business: BusinessProfile, now: Optional[datetime] = None) -> tuple[datetime, datetime, str]:
     sub = get_or_create_subscription(db, business)
     now = now or datetime.utcnow()
+    # The provider/server-recorded subscription period is authoritative. Do
+    # not silently replace it with a calendar-month window: a customer whose
+    # period starts on the 17th must not reset usage on the 1st.
+    if sub.current_period_start and sub.current_period_end:
+        start, period_end = sub.current_period_start, sub.current_period_end
+        return start, period_end, start.strftime("%Y-%m-%dT%H:%M:%S")
     start = sub.current_period_start or sub.trial_start_at or now
     annual = (sub.billing_interval or "monthly").lower() == "annual"
     months = 12 if annual else 1
@@ -2123,25 +2160,176 @@ def billing_period_for(db: Session, business: BusinessProfile, now: Optional[dat
     period_start = datetime(start.year + (period_start_month - 1) // 12, (period_start_month - 1) % 12 + 1, 1)
     next_month = period_start.month + months
     period_end = datetime(period_start.year + (next_month - 1) // 12, (next_month - 1) % 12 + 1, 1)
-    return period_start, period_end, period_start.strftime("%Y-%m-%d")
+    return period_start, period_end, period_start.strftime("%Y-%m-%dT%H:%M:%S")
 
-def raise_limit_reached(db: Session, business: BusinessProfile, resource: str, current: int, maximum: int):
+def _normalize_entitlement_city(value: Optional[str]) -> str:
+    return " ".join(str(value or "").strip().casefold().split())
+
+def _normalize_entitlement_country(value: Optional[str]) -> str:
+    return str(value or "").strip().upper()
+
+def acquire_entitlement_lock(db: Session, business_id: int, resource: str) -> None:
+    """Serialize capacity-increasing writes for one business/resource.
+
+    PostgreSQL advisory transaction locks close the count-then-insert race and
+    are automatically released by commit/rollback. SQLite has no equivalent
+    row/advisory lock; its write transaction serialization remains the test and
+    local-development behavior.
+    """
+    bind = db.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    digest = hashlib.sha256(f"cauldra-entitlement:{business_id}:{resource}".encode("utf-8")).digest()
+    lock_key = int.from_bytes(digest[:8], "big", signed=True)
+    db.execute(sql_text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
+
+def get_plan_limit(db: Session, business: BusinessProfile, resource: str):
+    if resource not in ENTITLEMENT_LIMIT_TYPES:
+        raise ValueError(f"Unknown entitlement resource: {resource}")
+    value = subscription_for(db, business).get(resource)
+    if value is None:
+        return None
+    if resource == "storage_gb":
+        return int(value) * 1024 * 1024 * 1024
+    return int(value)
+
+def get_current_entitlement_usage(db: Session, business: BusinessProfile, resource: str) -> int:
+    """Authoritative, business-scoped current usage for every plan limit."""
+    business_id = business.id
+    if resource in {"admin", "manager", "staff"}:
+        return db.query(User).filter(User.business_id == business_id, User.role == resource, User.disabled == False).count()
+    if resource == "branch":
+        return db.query(Location).filter(Location.business_id == business_id, Location.is_active == True).count()
+    if resource == "city":
+        values = db.query(Location.city).filter(Location.business_id == business_id, Location.is_active == True).all()
+        return len({_normalize_entitlement_city(value) for (value,) in values if _normalize_entitlement_city(value)})
+    if resource == "country":
+        values = db.query(Location.country_code).filter(Location.business_id == business_id, Location.is_active == True).all()
+        return len({_normalize_entitlement_country(value) for (value,) in values if _normalize_entitlement_country(value)})
+    if resource == "product":
+        return db.query(Product).filter(Product.business_id == business_id).count()
+    if resource == "supplier":
+        return db.query(Supplier).filter(Supplier.business_id == business_id).count()
+    if resource == "warehouse":
+        return db.query(Warehouse).filter(Warehouse.business_id == business_id, Warehouse.is_active == True).count()
+    if resource == "price_monitor":
+        return db.query(PriceMonitorSource).filter(PriceMonitorSource.business_id == business_id, PriceMonitorSource.is_active == True).count()
+    if resource == "storage_gb":
+        return int(db.query(func.coalesce(func.sum(StoredUpload.size_bytes), 0)).filter(StoredUpload.business_id == business_id).scalar() or 0)
+    if resource == "purchase_order":
+        period_start, period_end, _ = billing_period_for(db, business)
+        return db.query(PurchaseOrder).filter(
+            PurchaseOrder.business_id == business_id, PurchaseOrder.status == "SENT",
+            PurchaseOrder.sent_at.isnot(None), PurchaseOrder.sent_at >= period_start, PurchaseOrder.sent_at < period_end,
+        ).count()
+    if resource == "included_ai_credits":
+        period_start, period_end, _ = billing_period_for(db, business)
+        return int(db.query(func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0)).filter(
+            AIUsageLedger.business_id == business_id, AIUsageLedger.created_at >= period_start,
+            AIUsageLedger.created_at < period_end, AIUsageLedger.success == True,
+        ).scalar() or 0)
+    raise ValueError(f"Unknown entitlement resource: {resource}")
+
+def raise_limit_reached(db: Session, business: BusinessProfile, resource: str, current: int, maximum: int, increment: int = 1):
     plan = subscription_for(db, business)
     current_plan_id = (get_or_create_subscription(db, business).plan or "starter").lower()
     upgrade_id = UPGRADE_PATH.get(current_plan_id, "enterprise")
     upgrade_label = PLAN_CONFIG.get(upgrade_id, PLAN_CONFIG["enterprise"])["label"]
-    raise HTTPException(status_code=409, detail=f"You have reached the {plan['label']} {resource} limit of {maximum}. Current usage: {current}/{maximum}. Upgrade to {upgrade_label} for a higher allowance.")
+    label = ENTITLEMENT_RESOURCE_LABELS.get(resource, resource.replace("_", " "))
+    if resource == "storage_gb":
+        display_limit = f"{plan['storage_gb']} GB"
+        display_current = f"{round(current / (1024 ** 3), 3)} GB"
+    else:
+        display_limit, display_current = str(maximum), str(current)
+    if current > maximum:
+        message = (f"Your {plan['label']} plan supports up to {display_limit} {label}. You currently have {display_current}. "
+                   f"Your existing data remains available, but you can't add or reactivate {label} until usage is below the plan limit or you upgrade.")
+    else:
+        message = f"You've reached your {plan['label']} plan limit of {display_limit} {label}. Upgrade to {upgrade_label} for a higher allowance."
+    raise HTTPException(status_code=409, detail={
+        "code": "PLAN_LIMIT_EXCEEDED", "resource": resource, "plan": current_plan_id,
+        "plan_label": plan["label"], "limit": maximum, "current": current,
+        "requested_increment": int(increment), "upgrade_required": True, "message": message,
+    })
 
-def check_plan_limit(db: Session, business: BusinessProfile, resource: str, current: int, increment: int = 1):
-    maximum = subscription_for(db, business).get(resource)
+def check_capacity_limit(db: Session, business: BusinessProfile, resource: str, increment: int = 1) -> int:
+    if ENTITLEMENT_LIMIT_TYPES.get(resource) != "capacity":
+        raise ValueError(f"{resource} is not a capacity entitlement")
+    acquire_entitlement_lock(db, business.id, resource)
+    current = get_current_entitlement_usage(db, business, resource)
+    maximum = get_plan_limit(db, business, resource)
     if maximum is not None and current + increment > maximum:
-        raise_limit_reached(db, business, resource.replace("_", " "), current, maximum)
+        raise_limit_reached(db, business, resource, current, maximum, increment)
+    return current
 
-def check_storage_limit(db: Session, business: BusinessProfile, byte_count: int):
-    maximum = subscription_for(db, business)["storage_gb"] * 1024 * 1024 * 1024
-    current = db.query(func.coalesce(func.sum(StoredUpload.size_bytes), 0)).filter(StoredUpload.business_id == business.id).scalar() or 0
-    if current + byte_count > maximum:
-        raise_limit_reached(db, business, "storage", round(current / (1024**3), 2), subscription_for(db, business)["storage_gb"])
+def check_period_usage_limit(db: Session, business: BusinessProfile, resource: str, increment: int = 1) -> int:
+    if ENTITLEMENT_LIMIT_TYPES.get(resource) != "period_usage":
+        raise ValueError(f"{resource} is not a period-usage entitlement")
+    acquire_entitlement_lock(db, business.id, resource)
+    current = get_current_entitlement_usage(db, business, resource)
+    maximum = get_plan_limit(db, business, resource)
+    if maximum is not None and current + increment > maximum:
+        raise_limit_reached(db, business, resource, current, maximum, increment)
+    return current
+
+def check_plan_limit(db: Session, business: BusinessProfile, resource: str, current: Optional[int] = None, increment: int = 1):
+    """Compatibility wrapper; supplied counts are intentionally ignored.
+
+    Usage is always re-read under the entitlement transaction lock so callers
+    cannot enforce a stale, frontend-derived, lifetime, or cross-tenant count.
+    """
+    if ENTITLEMENT_LIMIT_TYPES.get(resource) == "period_usage":
+        return check_period_usage_limit(db, business, resource, increment)
+    return check_capacity_limit(db, business, resource, increment)
+
+def check_storage_limit(db: Session, business: BusinessProfile, byte_count: int, reclaimed_bytes: int = 0):
+    acquire_entitlement_lock(db, business.id, "storage_gb")
+    current = get_current_entitlement_usage(db, business, "storage_gb")
+    maximum = get_plan_limit(db, business, "storage_gb")
+    effective_current = max(0, current - max(0, int(reclaimed_bytes)))
+    if maximum is not None and effective_current + int(byte_count) > maximum:
+        raise_limit_reached(db, business, "storage_gb", effective_current, maximum, int(byte_count))
+    return effective_current
+
+def entitlement_capacity_snapshot(db: Session, business: BusinessProfile, plan_id: Optional[str] = None) -> list[dict]:
+    target_plan_id = (plan_id or get_or_create_subscription(db, business).plan or "starter").strip().lower()
+    if target_plan_id not in PLAN_CONFIG:
+        raise HTTPException(status_code=400, detail="Please choose a valid subscription plan.")
+    target = PLAN_CONFIG[target_plan_id]
+    rows = []
+    for resource in CAPACITY_LIMIT_FIELDS:
+        current = get_current_entitlement_usage(db, business, resource)
+        configured_limit = target.get(resource)
+        maximum = None if configured_limit is None else (int(configured_limit) * 1024 ** 3 if resource == "storage_gb" else int(configured_limit))
+        status_value = "UNLIMITED" if maximum is None else ("OVER_LIMIT" if current > maximum else ("AT_LIMIT" if current == maximum else "WITHIN_LIMIT"))
+        rows.append({
+            "resource": resource, "plan_config_key": resource, "limit_type": "capacity",
+            "current": current, "limit": maximum, "configured_limit": configured_limit,
+            "unit": "bytes" if resource == "storage_gb" else "count", "status": status_value,
+            "existing_data_preserved": True,
+        })
+    return rows
+
+def check_location_after_state(db: Session, business: BusinessProfile, *, exclude_location_id: Optional[int], active: bool,
+                               city: Optional[str], country_code: Optional[str]) -> None:
+    """Validate branch/city/country together against the intended after-state."""
+    acquire_entitlement_lock(db, business.id, "location_capacity")
+    existing = db.query(Location).filter(Location.business_id == business.id, Location.is_active == True)
+    if exclude_location_id is not None:
+        existing = existing.filter(Location.id != exclude_location_id)
+    rows = existing.all()
+    after = {
+        "branch": len(rows) + (1 if active else 0),
+        "city": len({_normalize_entitlement_city(r.city) for r in rows if _normalize_entitlement_city(r.city)} | ({_normalize_entitlement_city(city)} if active and _normalize_entitlement_city(city) else set())),
+        "country": len({_normalize_entitlement_country(r.country_code) for r in rows if _normalize_entitlement_country(r.country_code)} | ({_normalize_entitlement_country(country_code)} if active and _normalize_entitlement_country(country_code) else set())),
+    }
+    for resource in ("branch", "city", "country"):
+        before = get_current_entitlement_usage(db, business, resource)
+        maximum = get_plan_limit(db, business, resource)
+        # Existing over-limit locations remain editable. Only a transition that
+        # increases counted usage is blocked.
+        if maximum is not None and after[resource] > maximum and after[resource] > before:
+            raise_limit_reached(db, business, resource, before, maximum, after[resource] - before)
 
 def record_ai_usage(db: Session, user: User, operation_type: str, success: bool, provider: str, model: str, **metadata):
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
@@ -2155,7 +2343,10 @@ def record_ai_usage(db: Session, user: User, operation_type: str, success: bool,
 def usage_summary(db: Session, business: BusinessProfile) -> dict:
     sub = get_or_create_subscription(db, business)
     plan = subscription_for(db, business); period_start, period_end, period = billing_period_for(db, business)
-    used = db.query(func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0)).filter(AIUsageLedger.business_id == business.id, AIUsageLedger.billing_period == period, AIUsageLedger.success == True).scalar() or 0
+    used = db.query(func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0)).filter(
+        AIUsageLedger.business_id == business.id, AIUsageLedger.created_at >= period_start,
+        AIUsageLedger.created_at < period_end, AIUsageLedger.success == True,
+    ).scalar() or 0
     included = plan["included_ai_credits"]; overage = max(0, int(used) - included)
     overage_charge = ((overage + plan["ai_overage_unit"] - 1) // plan["ai_overage_unit"]) * plan["ai_overage_price"] if overage else 0
     trial_end = sub.trial_end_at or (datetime.utcnow() + timedelta(days=plan["trial_days"]))
@@ -2885,10 +3076,16 @@ def safe_upload_name(value: str, fallback: str) -> str:
     name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
     return (name or fallback)[:180]
 
-def persist_upload(db: Session, user: User, kind: str, original_name: str, content_type: str, raw: bytes) -> StoredUpload:
+def persist_upload(db: Session, user: User, kind: str, original_name: str, content_type: str, raw: bytes,
+                   replacing_upload_id: Optional[int] = None) -> StoredUpload:
     """Save bytes privately and create an auditable, business-scoped record."""
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-    check_storage_limit(db, business, len(raw))
+    reclaimed_bytes = 0
+    if replacing_upload_id is not None:
+        reclaimed_bytes = int(db.query(StoredUpload.size_bytes).filter(
+            StoredUpload.id == replacing_upload_id, StoredUpload.business_id == user.business_id,
+        ).scalar() or 0)
+    check_storage_limit(db, business, len(raw), reclaimed_bytes=reclaimed_bytes)
     suffix = Path(original_name).suffix.lower()
     row = StoredUpload(
         business_id=user.business_id,
@@ -5400,6 +5597,9 @@ class CreateUserRequest(BaseModel):
     phone: str
     position: str
 
+class UserRoleUpdate(BaseModel):
+    role: str
+
 class BusinessProfileSchema(BaseModel):
     company_name: str
     email: Optional[str] = None
@@ -5621,6 +5821,9 @@ class PriceSourceCreate(BaseModel):
     source_type: str = "manual"
     source_url: Optional[str] = None
     initial_price: Optional[float] = None
+
+class PriceSourceStatusUpdate(BaseModel):
+    is_active: bool
 
 class ManualPriceUpdate(BaseModel):
     price: float
@@ -6657,7 +6860,7 @@ def upload_my_avatar(payload: UserAvatarUpload, user: User = Depends(get_authent
     if len(raw) > AVATAR_MAX_BYTES:
         raise HTTPException(status_code=422, detail="Profile photo must be 2 MB or smaller.")
     previous_id = user.avatar_upload_id
-    row = persist_upload(db, user, "avatar", (payload.file_name or "avatar"), content_type, raw)
+    row = persist_upload(db, user, "avatar", (payload.file_name or "avatar"), content_type, raw, replacing_upload_id=previous_id)
     user.avatar_upload_id = row.id
     if previous_id and previous_id != row.id:
         _delete_stored_upload(db, user, previous_id)
@@ -6835,8 +7038,7 @@ def create_user(data: CreateUserRequest, user: User = Depends(get_current_user),
     if role not in {"admin","manager","staff"}: raise HTTPException(status_code=400, detail="Unsupported account role.")
     if user.role == "manager" and role != "staff": raise HTTPException(status_code=403, detail="Managers can only create Staff accounts.")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-    current = db.query(User).filter(User.business_id == user.business_id, User.role == role).count()
-    check_plan_limit(db, business, role, current)
+    check_capacity_limit(db, business, role)
     validate_temp_password_strength(data.password)
     if normalize_username(data.username) == normalize_username(user.username):
         raise HTTPException(status_code=409, detail="That username is already in use in this business.")
@@ -6875,11 +7077,45 @@ def enable_user(user_id: int, actor: User = Depends(get_current_user), db: Sessi
     target = db.query(User).filter(User.id == user_id, User.business_id == actor.business_id).first()
     if not target: raise HTTPException(status_code=404, detail="Account is unavailable.")
     if actor.role != "admin": raise HTTPException(status_code=403, detail="Only Admins can enable accounts directly.")
+    if target.disabled:
+        business = db.query(BusinessProfile).filter(BusinessProfile.id == actor.business_id).first()
+        check_capacity_limit(db, business, target.role)
     target.disabled = False
     target.auth_version = int(target.auth_version or 1) + 1
     add_audit(db, actor, "USER_ENABLED", "Account enabled.", target, action_category="TEAM", resource_type="user", resource_id=target.id)
     db.commit()
     return {"message": "Account enabled successfully."}
+
+@app.patch("/users/{user_id}/role")
+def change_user_role(user_id: int, data: UserRoleUpdate, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if actor.role != "admin":
+        raise HTTPException(status_code=403, detail="Only Admins can change account roles.")
+    target = db.query(User).filter(User.id == user_id, User.business_id == actor.business_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Account is unavailable.")
+    new_role = str(data.role or "").strip().casefold()
+    if new_role not in {"admin", "manager", "staff"}:
+        raise HTTPException(status_code=400, detail="Unsupported account role.")
+    if target.id == actor.id and new_role != target.role:
+        raise HTTPException(status_code=400, detail="The active business owner cannot change their own role here.")
+    if new_role == target.role:
+        return serialize_user(target)
+    if target.role == "admin" and not target.disabled:
+        remaining_admins = db.query(User).filter(
+            User.business_id == actor.business_id, User.role == "admin", User.disabled == False, User.id != target.id,
+        ).count()
+        if remaining_admins < 1:
+            raise HTTPException(status_code=400, detail="The last active Admin cannot be moved to another role.")
+    if not target.disabled:
+        business = db.query(BusinessProfile).filter(BusinessProfile.id == actor.business_id).first()
+        check_capacity_limit(db, business, new_role)
+    old_role = target.role
+    target.role = new_role
+    revoke_all_user_sessions(db, target)
+    add_audit(db, actor, "USER_ROLE_CHANGED", f"Changed account role from {old_role} to {new_role}.", target,
+              action_category="TEAM", resource_type="user", resource_id=target.id)
+    db.commit(); db.refresh(target)
+    return serialize_user(target)
 
 @app.patch("/users/{user_id}/reset-password")
 def reset_user_password(user_id: int, data: AdminPasswordResetRequest, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -6892,6 +7128,11 @@ def reset_user_password(user_id: int, data: AdminPasswordResetRequest, actor: Us
     validate_temp_password_strength(data.new_password)
     if target.previous_password_hash and verify_password(data.new_password, target.previous_password_hash):
         raise HTTPException(status_code=400, detail="Last created password cannot be used.")
+    # Resetting a disabled account also enables it below, so it is a capacity-
+    # increasing transition and must not bypass the destination role's limit.
+    if target.disabled:
+        business = db.query(BusinessProfile).filter(BusinessProfile.id == actor.business_id).first()
+        check_capacity_limit(db, business, target.role)
     target.previous_password_hash = target.password
     target.password = hash_password(data.new_password)
     target.must_change_password = True
@@ -7459,6 +7700,11 @@ def create_location(data: LocationCreate, user: User = Depends(get_current_user)
     if data.currency is not None or data.timezone is not None:
         raise HTTPException(status_code=400, detail="Location currency and timezone are derived from geography and cannot be submitted by the client.")
     context = resolve_location_context(data.country, data.country_code, data.region, data.city)
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    check_location_after_state(
+        db, business, exclude_location_id=None, active=True,
+        city=context["city"], country_code=context["country_code"],
+    )
     canonical_phone = to_e164(data.contact_phone, context["country_code"]) if data.contact_phone else None
     row = Location(
         business_id=user.business_id, name=name, country=context["country"], country_code=context["country_code"], region=context["region"], city=context["city"],
@@ -7494,6 +7740,14 @@ def update_location(location_id: int, data: LocationUpdate, user: User = Depends
         data.region if data.region is not None else row.region,
         data.city if data.city is not None else row.city,
     ) if geography_changed else None
+    proposed_active = bool(data.is_active) if data.is_active is not None else bool(row.is_active)
+    proposed_city = context["city"] if context else row.city
+    proposed_country_code = context["country_code"] if context else row.country_code
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    check_location_after_state(
+        db, business, exclude_location_id=row.id, active=proposed_active,
+        city=proposed_city, country_code=proposed_country_code,
+    )
     if context and context["currency"] != normalize_currency_code(row.currency):
         # Business Days cover their attributed sales as well as day usage;
         # the other operational tables carry location_id directly.
@@ -7610,6 +7864,9 @@ def update_warehouse(warehouse_id: int, data: WarehouseUpdate, user: User = Depe
         db.query(WarehouseStock).filter(WarehouseStock.business_id == user.business_id, or_(WarehouseStock.warehouse_id == row.id, and_(WarehouseStock.warehouse_id.is_(None), WarehouseStock.warehouse == old_name))).update({WarehouseStock.warehouse: new_name}, synchronize_session=False)
         row.name = new_name
     if data.is_active is not None:
+        if bool(data.is_active) and not row.is_active:
+            business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+            check_capacity_limit(db, business, "warehouse")
         row.is_active = bool(data.is_active)
     row.updated_at = datetime.utcnow()
     add_audit(db, user, "WAREHOUSE_UPDATED", f"Updated warehouse {old_name} to {new_name}.", action_category="WAREHOUSE", resource_type="warehouse", resource_id=row.id)
@@ -12286,7 +12543,7 @@ def price_monitor(user: User = Depends(get_current_user), db: Session = Depends(
         change = None
         if len(hist) >= 2 and hist[-2].price:
             change = round(((hist[-1].price - hist[-2].price)/hist[-2].price)*100, 2)
-        sources.append({"id": s.id, "product_name": product.name if product else "Unknown product", "sku": product.sku if product else "", "supplier_name": supplier.name if supplier else "General Vendor", "source_type": s.source_type, "last_price": s.last_price, "change_percent": change, "history": [{"price": h.price, "recorded_at": to_utc_iso(h.recorded_at)} for h in hist]})
+        sources.append({"id": s.id, "product_name": product.name if product else "Unknown product", "sku": product.sku if product else "", "supplier_name": supplier.name if supplier else "General Vendor", "source_type": s.source_type, "is_active": bool(s.is_active), "last_price": s.last_price, "change_percent": change, "history": [{"price": h.price, "recorded_at": to_utc_iso(h.recorded_at)} for h in hist]})
     return {"sources": sources}
 
 @app.post("/price-monitor/sources")
@@ -12296,17 +12553,39 @@ def create_price_source(payload: PriceSourceCreate, user: User = Depends(get_cur
     if not db.query(Supplier).filter(Supplier.id == supplier_id, Supplier.business_id == user.business_id).first(): raise HTTPException(status_code=404, detail="Supplier is unavailable.")
     if not db.query(Product).filter(Product.id == product_id, Product.business_id == user.business_id).first(): raise HTTPException(status_code=404, detail="Product is unavailable.")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-    check_plan_limit(db, business, "price_monitor", db.query(PriceMonitorSource).filter(PriceMonitorSource.business_id == user.business_id).count())
-    s=PriceMonitorSource(business_id=user.business_id, supplier_id=supplier_id, product_id=product_id, source_type=source_type, source_url=payload.source_url, last_price=payload.initial_price)
+    check_capacity_limit(db, business, "price_monitor")
+    s=PriceMonitorSource(business_id=user.business_id, supplier_id=supplier_id, product_id=product_id, source_type=source_type, source_url=payload.source_url, is_active=True, last_price=payload.initial_price)
     db.add(s); db.flush()
     add_audit(db, user, "PRICE_MONITOR_SOURCE_ADDED", "Added a price monitor source.", action_category="PURCHASE_ORDERS", resource_type="price_monitor_source", resource_id=s.id)
     db.commit(); return {"id": s.id, "message": "Price source added."}
+
+@app.patch("/price-monitor/sources/{source_id}")
+def update_price_source_status(source_id: int, payload: PriceSourceStatusUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_permission(user, "procurement.price_monitor")
+    source = db.query(PriceMonitorSource).filter(PriceMonitorSource.id == source_id, PriceMonitorSource.business_id == user.business_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Price source is unavailable.")
+    if payload.is_active and not source.is_active:
+        business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+        check_capacity_limit(db, business, "price_monitor")
+    source.is_active = bool(payload.is_active)
+    add_audit(db, user, "PRICE_MONITOR_SOURCE_REACTIVATED" if source.is_active else "PRICE_MONITOR_SOURCE_DEACTIVATED",
+              "Reactivated a price monitor source." if source.is_active else "Deactivated a price monitor source.",
+              action_category="PURCHASE_ORDERS", resource_type="price_monitor_source", resource_id=source.id)
+    db.commit()
+    return {"id": source.id, "is_active": source.is_active, "message": "Price source updated."}
+
+@app.delete("/price-monitor/sources/{source_id}")
+def deactivate_price_source(source_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Free capacity without deleting the source or its PriceHistory rows."""
+    return update_price_source_status(source_id, PriceSourceStatusUpdate(is_active=False), user, db)
 
 @app.post("/price-monitor/{source_id}/price")
 def manual_price_update(source_id: int, payload: ManualPriceUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "procurement.price_monitor")
     s=db.query(PriceMonitorSource).filter(PriceMonitorSource.id == source_id, PriceMonitorSource.business_id == user.business_id).first()
     if not s: raise HTTPException(status_code=404, detail="Price source is unavailable.")
+    if not s.is_active: raise HTTPException(status_code=409, detail="Reactivate this price source before recording a new price.")
     old_price = s.last_price
     price=payload.price; s.last_price=price; s.last_checked_at=datetime.utcnow(); db.add(PriceHistory(source_id=s.id, price=price))
     check_price_change_notification(db, s, old_price, price)
@@ -12317,6 +12596,7 @@ def check_price_source(source_id: int, user: User = Depends(get_current_user), d
     require_permission(user, "procurement.price_monitor")
     s=db.query(PriceMonitorSource).filter(PriceMonitorSource.id == source_id, PriceMonitorSource.business_id == user.business_id).first()
     if not s: raise HTTPException(status_code=404, detail="Price source is unavailable.")
+    if not s.is_active: raise HTTPException(status_code=409, detail="Reactivate this price source before checking it.")
     if s.source_type != "website": raise HTTPException(status_code=400, detail="Only website monitoring sources can be checked automatically.")
     # Safe behavior until a real website scraper/parser is configured: retain the last price.
     if s.last_price is None: raise HTTPException(status_code=422, detail="No supplier price has been recorded for this source yet.")
@@ -12339,7 +12619,7 @@ def upload_price_list(payload: PriceListUploadRequest, user: User = Depends(get_
         raw = raw_bytes.decode("utf-8-sig")
     except Exception as exc:
         raise HTTPException(status_code=422, detail="The price list could not be read.") from exc
-    count=0
+    parsed_rows = {}
     for line in raw.splitlines()[1:]:
         parts=[p.strip() for p in line.split(",")]
         if len(parts) < 2: continue
@@ -12347,12 +12627,30 @@ def upload_price_list(payload: PriceListUploadRequest, user: User = Depends(get_
         except: continue
         pid=int(product_id) if product_id else (int(parts[0]) if parts[0].isdigit() else None)
         if not pid: continue
-        s=db.query(PriceMonitorSource).filter(PriceMonitorSource.business_id == user.business_id, PriceMonitorSource.supplier_id == supplier_id, PriceMonitorSource.product_id == pid).first()
-        if not s:
-            s=PriceMonitorSource(business_id=user.business_id, supplier_id=supplier_id, product_id=pid, source_type="price_list"); db.add(s); db.flush()
-        s.last_price=price; s.last_checked_at=datetime.utcnow(); db.add(PriceHistory(source_id=s.id, price=price)); count += 1
-    if not count:
+        if not db.query(Product.id).filter(Product.id == pid, Product.business_id == user.business_id).first():
+            continue
+        parsed_rows[pid] = price
+    if not parsed_rows:
         raise HTTPException(status_code=422, detail="No valid price rows were found in this CSV file.")
+    existing_by_product = {
+        source.product_id: source for source in db.query(PriceMonitorSource).filter(
+            PriceMonitorSource.business_id == user.business_id,
+            PriceMonitorSource.supplier_id == supplier_id,
+            PriceMonitorSource.product_id.in_(list(parsed_rows)),
+        ).all()
+    }
+    needed_capacity = sum(1 for pid in parsed_rows if pid not in existing_by_product or not existing_by_product[pid].is_active)
+    if needed_capacity:
+        business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+        check_capacity_limit(db, business, "price_monitor", increment=needed_capacity)
+    count=0
+    for pid, price in parsed_rows.items():
+        s = existing_by_product.get(pid)
+        if not s:
+            s=PriceMonitorSource(business_id=user.business_id, supplier_id=supplier_id, product_id=pid, source_type="price_list", is_active=True); db.add(s); db.flush()
+        else:
+            s.is_active = True
+        s.last_price=price; s.last_checked_at=datetime.utcnow(); db.add(PriceHistory(source_id=s.id, price=price)); count += 1
     upload = persist_upload(db, user, "price_list", file_name, content_type, raw_bytes)
     add_audit(db, user, "PRICE_LIST_UPLOADED", f"Uploaded and processed price list {upload.original_name}.")
     db.commit(); return {"count": count, "upload_id": upload.id}
@@ -12537,19 +12835,23 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
         PurchaseOrder.business_id == business.id, PurchaseOrder.status == "SENT",
         PurchaseOrder.sent_at.isnot(None), PurchaseOrder.sent_at >= period_start, PurchaseOrder.sent_at < period_end,
     ).count()
-    role_counts = {role: db.query(User).filter(User.business_id == business.id, User.role == role).count() for role in ("admin", "manager", "staff")}
+    role_counts = {role: get_current_entitlement_usage(db, business, role) for role in ("admin", "manager", "staff")}
     resources = {
-        "products": db.query(Product).filter(Product.business_id == business.id).count(),
-        "suppliers": db.query(Supplier).filter(Supplier.business_id == business.id).count(),
-        "warehouses": db.query(Warehouse).filter(Warehouse.business_id == business.id, Warehouse.is_active == True).count(),
+        "products": get_current_entitlement_usage(db, business, "product"),
+        "suppliers": get_current_entitlement_usage(db, business, "supplier"),
+        "warehouses": get_current_entitlement_usage(db, business, "warehouse"),
+        "locations": get_current_entitlement_usage(db, business, "branch"),
+        "cities": get_current_entitlement_usage(db, business, "city"),
+        "countries": get_current_entitlement_usage(db, business, "country"),
         "users": sum(role_counts.values()),
-        "price_monitor_sources": db.query(PriceMonitorSource).filter(PriceMonitorSource.business_id == business.id).count(),
+        "price_monitor_sources": get_current_entitlement_usage(db, business, "price_monitor"),
         "purchase_orders": po_this_period,
         "storage_bytes": storage_used_bytes,
     }
     total_user_limit = None if all(plan.get(role) is None for role in ("admin", "manager", "staff")) else sum(plan.get(role) or 0 for role in ("admin", "manager", "staff"))
     summary["resources"] = {name: {"used": used, "limit": (total_user_limit if key == "users" else plan.get(key))} for name, used, key in [
         ("products", resources["products"], "product"), ("suppliers", resources["suppliers"], "supplier"), ("warehouses", resources["warehouses"], "warehouse"),
+        ("locations", resources["locations"], "branch"), ("cities", resources["cities"], "city"), ("countries", resources["countries"], "country"),
         ("users", resources["users"], "users"), ("price_monitor_sources", resources["price_monitor_sources"], "price_monitor"),
         ("purchase_orders", resources["purchase_orders"], "purchase_order"),
     ]}
@@ -12569,7 +12871,8 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
     # rows to group.
     feature_rows = (
         db.query(AIUsageLedger.operation_type, func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0), func.count(AIUsageLedger.id))
-        .filter(AIUsageLedger.business_id == business.id, AIUsageLedger.billing_period == current_period, AIUsageLedger.success == True)
+        .filter(AIUsageLedger.business_id == business.id, AIUsageLedger.created_at >= period_start,
+                AIUsageLedger.created_at < period_end, AIUsageLedger.success == True)
         .group_by(AIUsageLedger.operation_type)
         .all()
     )
@@ -12582,6 +12885,23 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
 class ChangePlanRequest(BaseModel):
     plan: str
     billing_interval: Optional[str] = None
+
+@app.get("/subscription/downgrade-impact")
+def downgrade_impact(plan: str, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    """Read-only, server-authoritative impact preview for every capacity key."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only an Admin can review subscription downgrade impact.")
+    target_plan = str(plan or "").strip().lower()
+    if target_plan not in PLAN_CONFIG:
+        raise HTTPException(status_code=400, detail="Please choose a valid subscription plan.")
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    current_plan = (get_or_create_subscription(db, business).plan or "starter").strip().lower()
+    return {
+        "from_plan": current_plan, "to_plan": target_plan,
+        "existing_data_preserved": True,
+        "message": "Existing data will be preserved. New creation or reactivation is restricted only where current usage has no capacity under the effective plan.",
+        "capacity_impact": entitlement_capacity_snapshot(db, business, target_plan),
+    }
 
 def plan_amount_naira(plan: str, interval: str) -> int:
     cfg = PLAN_CONFIG[plan]
@@ -12630,28 +12950,21 @@ def change_plan(data: ChangePlanRequest, request: Request, user: User = Depends(
         if PLAN_RANK.get(plan, -1) < PLAN_RANK.get(current_plan_id, -1):
             raise HTTPException(status_code=409, detail="Downgrading to a lower plan takes effect at the end of your current billing period. Please use the downgrade option to schedule it.")
 
-    # A downgrade must not silently strip data the business already has — surface
-    # it as a clear, actionable error instead of a partial/confusing state.
     new_limits = PLAN_CONFIG[plan]
-    role_counts = {role: db.query(User).filter(User.business_id == business.id, User.role == role).count() for role in ("admin", "manager", "staff")}
-    checks = [
-        ("admin", role_counts["admin"]), ("manager", role_counts["manager"]), ("staff", role_counts["staff"]),
-        ("product", db.query(Product).filter(Product.business_id == business.id).count()),
-        ("supplier", db.query(Supplier).filter(Supplier.business_id == business.id).count()),
-        ("warehouse", db.query(Warehouse).filter(Warehouse.business_id == business.id, Warehouse.is_active == True).count()),
-        ("price_monitor", db.query(PriceMonitorSource).filter(PriceMonitorSource.business_id == business.id).count()),
-    ]
-    for resource, current in checks:
-        maximum = new_limits.get(resource)
-        if maximum is not None and current > maximum:
-            raise HTTPException(status_code=409, detail=f"Your current usage ({current} {resource.replace('_',' ')}) exceeds the {new_limits['label']} limit of {maximum}. Reduce usage before switching to this plan.")
-
+    # Trial/lateral changes never destroy data and never demand destructive
+    # cleanup first. If the newly-effective plan is below current capacity,
+    # the central guards simply prevent future growth until usage is freed.
     sub.plan = plan; sub.billing_interval = interval
     business.subscription_plan = plan; business.billing_interval = interval
     clear_pending_downgrade(sub)
     add_audit(db, user, "SUBSCRIPTION_PLAN_CHANGED", f"Subscription changed to {new_limits['label']} ({interval}).")
     db.commit()
-    return usage_summary(db, business)
+    summary = usage_summary(db, business)
+    summary["downgrade_impact"] = {
+        "from_plan": current_plan_id, "to_plan": plan, "effective_at": to_utc_iso(datetime.utcnow()),
+        "existing_data_preserved": True, "capacity_impact": entitlement_capacity_snapshot(db, business, plan),
+    }
+    return summary
 
 class DowngradeRequest(BaseModel):
     plan: str
@@ -12729,7 +13042,12 @@ def schedule_downgrade(data: DowngradeRequest, request: Request, user: User = De
               f"Downgrade scheduled: {PLAN_CONFIG[current_plan_id]['label']} ({current_interval}) -> {PLAN_CONFIG[plan]['label']} ({interval}), effective {to_utc_iso(effective_at)}.",
               business_id=business.id)
     db.commit()
-    return usage_summary(db, business)
+    summary = usage_summary(db, business)
+    summary["downgrade_impact"] = {
+        "from_plan": current_plan_id, "to_plan": plan, "effective_at": to_utc_iso(effective_at),
+        "existing_data_preserved": True, "capacity_impact": entitlement_capacity_snapshot(db, business, plan),
+    }
+    return summary
 
 @app.post("/subscription/downgrade/cancel")
 def cancel_pending_downgrade(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):

@@ -21151,7 +21151,7 @@
             try {
                 const res = await fetch(`${API_URL}/users/${userId}/${action}`, { method: "PATCH", headers: { "Authorization": `Bearer ${authToken}` } });
                 const data = await res.json();
-                if (!res.ok) throw new Error(data.detail || (disabled ? t("team.enableAccountFailed") : t("team.disableAccountFailed")));
+                if (!res.ok) throw new Error(friendlyErrorMessage(data, disabled ? t("team.enableAccountFailed") : t("team.disableAccountFailed")));
                 renderEmployeesList(); showToast(disabled ? t("team.employeeEnabled") : t("team.employeeDisabled"), "success");
             } catch (e) { showToast(e.message || t("common.actionFailed"), "error"); }
         }
