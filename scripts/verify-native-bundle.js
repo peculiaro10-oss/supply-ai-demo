@@ -62,6 +62,26 @@ function verify(native = true) {
             failures.push(dir+'/js/app.js contains forbidden ordinary-startup email return error UI');
         }
     }
+    for (const dir of ['frontend',...dirs]) {
+        const appFile = path.join(root,dir,'js/app.js');
+        const offlineFile = path.join(root,dir,'js/offline.js');
+        const cssFile = path.join(root,dir,'css/offline.css');
+        if (!fs.existsSync(appFile) || !fs.existsSync(offlineFile) || !fs.existsSync(cssFile)) continue;
+        const appSource = fs.readFileSync(appFile,'utf8');
+        const offlineSource = fs.readFileSync(offlineFile,'utf8');
+        const offlineCss = fs.readFileSync(cssFile,'utf8');
+        const enabledStatus = appSource.match(/<p[^>]*>Enabled on this device<\/p>/)?.[0] || '';
+        if (!enabledStatus.includes('text-primary') || enabledStatus.includes('text-success')) {
+            failures.push(dir+'/js/app.js Offline Access enabled status must use Cauldra primary, never success green');
+        }
+        for (const marker of ['id="offline-opt-in-enable" class="offline-primary"','id="offline-pin-unlock" class="offline-primary"','type="submit" class="offline-primary">Enable on this device','type="submit" class="offline-primary">Enable Biometrics','id="offline-remove-confirm" class="offline-danger"']) {
+            if (!offlineSource.includes(marker)) failures.push(dir+'/js/offline.js missing Offline action hierarchy marker: '+marker);
+        }
+        if (!/\.offline-settings-actions button[^}]*background:#0d1322/i.test(offlineCss)) failures.push(dir+'/css/offline.css management actions must retain neutral Cauldra surface');
+        if (!/\.offline-dialog \.offline-primary[^}]*background:#436bee/i.test(offlineCss)) failures.push(dir+'/css/offline.css primary Offline action must use Cauldra primary');
+        if (!/\.offline-dialog \.offline-danger[^}]*background:#d94141/i.test(offlineCss)) failures.push(dir+'/css/offline.css destructive Offline action must use Cauldra danger');
+        if (/(?:green|teal|emerald|cyan|lime)|#(?:0f|10b|14b|16a|22c)[0-9a-f]{3,6}/i.test(offlineCss)) failures.push(dir+'/css/offline.css contains a forbidden Offline green/teal color family');
+    }
     if (native) {
         try {
             const assets = path.join(root,'android/app/src/main/assets');

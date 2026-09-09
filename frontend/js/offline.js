@@ -828,7 +828,7 @@
                     <div id="offline-workspace-fields"><label for="offline-identity">Workspace</label><select id="offline-identity"></select>
                     <label for="offline-pin">Offline PIN</label><input id="offline-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="off" required></div>
                     <p id="offline-unlock-status" role="status"></p>
-                    <div class="offline-dialog-actions"><button type="button" id="offline-biometric-unlock" hidden>Use fingerprint or face</button><button type="submit" id="offline-pin-unlock">Unlock with PIN</button><button type="button" id="offline-retry-online">Retry internet</button></div>
+                    <div class="offline-dialog-actions"><button type="button" id="offline-biometric-unlock" hidden>Use fingerprint or face</button><button type="submit" id="offline-pin-unlock" class="offline-primary">Unlock with PIN</button><button type="button" id="offline-retry-online">Retry internet</button></div>
                 </form>
             </dialog>
             <dialog id="offline-setup-dialog" class="offline-dialog" aria-labelledby="offline-setup-title">
@@ -838,7 +838,7 @@
                 <form id="offline-setup-form">
                     <label for="offline-setup-pin">Create a 6–12 digit offline PIN</label><input id="offline-setup-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="new-password" required>
                     <label for="offline-setup-confirm">Confirm offline PIN</label><input id="offline-setup-confirm" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="new-password" required>
-                    <p id="offline-setup-status" role="status"></p><button type="submit">Enable on this device</button>
+                    <p id="offline-setup-status" role="status"></p><button type="submit" class="offline-primary">Enable on this device</button>
                 </form>
             </dialog>
             <dialog id="offline-change-pin-dialog" class="offline-dialog" aria-labelledby="offline-change-pin-title">
@@ -848,7 +848,7 @@
                     <label for="offline-current-pin">Current Offline PIN</label><input id="offline-current-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" autocomplete="off" required>
                     <label for="offline-new-pin">New 6–12 digit Offline PIN</label><input id="offline-new-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="new-password" required>
                     <label for="offline-new-pin-confirm">Confirm new Offline PIN</label><input id="offline-new-pin-confirm" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="new-password" required>
-                    <p id="offline-change-pin-status" role="status"></p><button type="submit">Change Offline PIN</button>
+                    <p id="offline-change-pin-status" role="status"></p><button type="submit" class="offline-primary">Change Offline PIN</button>
                 </form>
             </dialog>
             <dialog id="offline-biometric-dialog" class="offline-dialog" aria-labelledby="offline-biometric-title">
@@ -858,13 +858,13 @@
                 <form id="offline-biometric-form">
                     <div id="offline-biometric-pin-wrap"><label for="offline-biometric-pin">Confirm your Offline PIN</label><input id="offline-biometric-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" autocomplete="off"></div>
                     <p id="offline-biometric-status" role="status"></p>
-                    <div class="offline-dialog-actions"><button type="submit">Enable Biometrics</button><button type="button" id="offline-biometric-not-now">Not Now</button></div>
+                    <div class="offline-dialog-actions"><button type="submit" class="offline-primary">Enable Biometrics</button><button type="button" id="offline-biometric-not-now">Not Now</button></div>
                 </form>
             </dialog>
             <dialog id="offline-sync-dialog" class="offline-dialog offline-sync-dialog" aria-labelledby="offline-sync-title">
                 <form method="dialog"><button class="offline-dialog-close" value="cancel" aria-label="Close">×</button></form>
                 <h2 id="offline-sync-title">Sync details</h2><p id="offline-sync-summary" role="status"></p>
-                <div id="offline-conflict-list"></div><button type="button" id="offline-sync-retry">Retry sync</button>
+                <div id="offline-conflict-list"></div><button type="button" id="offline-sync-retry" class="offline-primary">Retry sync</button>
             </dialog>
             <dialog id="offline-remove-dialog" class="offline-dialog offline-remove-dialog" aria-labelledby="offline-remove-title">
                 <h2 id="offline-remove-title">Remove offline data?</h2>

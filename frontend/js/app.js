@@ -17720,7 +17720,7 @@
                 return;
             }
             const biometric = await window.CauldraOffline.biometricStatus(state.scope);
-            section.innerHTML = `<div><h4 class="text-[11px] font-bold text-textMain uppercase tracking-wider">Offline Access</h4><p class="mt-1 text-xs font-semibold text-success">Enabled on this device</p></div>
+            section.innerHTML = `<div><h4 class="text-[11px] font-bold text-textMain uppercase tracking-wider">Offline Access</h4><p class="mt-1 text-xs font-semibold text-primary">Enabled on this device</p></div>
                 <dl class="offline-access-facts"><div><dt>PIN</dt><dd>Configured</dd></div><div><dt>Biometric unlock</dt><dd>${biometric.enabled ? "Enabled" : "Not enabled"}</dd></div><div><dt>Trusted until</dt><dd>${new Date(identity.expires_at).toLocaleString()}</dd></div></dl>
                 <div class="offline-settings-actions"><button type="button" onclick="changeOfflinePinFromProfile()">Change Offline PIN</button><button type="button" onclick="manageOfflineBiometricsFromProfile()">Manage Biometrics</button><button type="button" onclick="refreshOfflineAccessFromProfile()">Refresh Offline Access</button></div>
                 <div class="offline-settings-secondary"><button type="button" onclick="disableOfflineAccessFromProfile()">Disable Offline Access</button></div>
