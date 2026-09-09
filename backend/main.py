@@ -275,6 +275,53 @@ PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY", "").strip()
 PAYSTACK_PUBLIC_KEY = os.getenv("PAYSTACK_PUBLIC_KEY", "").strip()
 PAYSTACK_CALLBACK_URL = os.getenv("PAYSTACK_CALLBACK_URL", "").strip()
 SUPPLY_AI_FRONTEND_URL = os.getenv("SUPPLY_AI_FRONTEND_URL", "").strip().rstrip("/")
+SUPABASE_EMAIL_REDIRECT_URL = os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "").strip().rstrip("/")
+ONBOARDING_EMAIL_CALLBACK_BASE_URL = os.getenv("ONBOARDING_EMAIL_CALLBACK_BASE_URL", "").strip().rstrip("/")
+
+def _public_https_origin(value: str, setting: str, *, required: bool = True) -> str:
+    """Validate a public integration origin without ever logging credentials."""
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        if required:
+            raise RuntimeError(f"{setting} is required and must be a public HTTPS origin.")
+        return ""
+    parts = urllib.parse.urlsplit(raw)
+    if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
+            or parts.query or parts.fragment or parts.path not in ("", "/")):
+        raise RuntimeError(f"{setting} must be a public HTTPS origin with no path, credentials, query, or fragment.")
+    return urllib.parse.urlunsplit(("https", parts.netloc, "", "", ""))
+
+def validate_email_payment_public_urls(*, required: bool = True) -> dict:
+    """Keep the frontend return and backend callback roles explicit."""
+    frontend = _public_https_origin(SUPPLY_AI_FRONTEND_URL, "SUPPLY_AI_FRONTEND_URL", required=required)
+    callback = _public_https_origin(
+        ONBOARDING_EMAIL_CALLBACK_BASE_URL,
+        "ONBOARDING_EMAIL_CALLBACK_BASE_URL",
+        required=required,
+    )
+    supabase_return = _public_https_origin(
+        SUPABASE_EMAIL_REDIRECT_URL,
+        "SUPABASE_EMAIL_REDIRECT_URL",
+        required=False,
+    )
+    if supabase_return and frontend and supabase_return != frontend:
+        raise RuntimeError(
+            "SUPABASE_EMAIL_REDIRECT_URL must use the configured frontend origin; "
+            "ONBOARDING_EMAIL_CALLBACK_BASE_URL owns the backend callback origin."
+        )
+    return {"frontend_origin": frontend, "email_callback_origin": callback,
+            "supabase_return_origin": supabase_return}
+
+try:
+    EMAIL_PAYMENT_PUBLIC_URLS = validate_email_payment_public_urls(required=IS_PRODUCTION)
+except RuntimeError:
+    # Production must fail closed. Development/test imports remain usable but
+    # the affected endpoints independently return 503 until configured.
+    if IS_PRODUCTION:
+        raise
+    EMAIL_PAYMENT_PUBLIC_URLS = {"frontend_origin": "", "email_callback_origin": "",
+                                 "supabase_return_origin": ""}
+    print("[startup] EMAIL_PAYMENT_PUBLIC_URL_CONFIG_INVALID")
 # Web Push (VAPID). VAPID_PUBLIC_KEY is safe to hand to the frontend (served
 # via GET /push/vapid-public-key) — it's what the browser's
 # pushManager.subscribe({applicationServerKey}) call needs. VAPID_PRIVATE_KEY
@@ -13141,21 +13188,64 @@ def initialize_owned_checkout(db, request, record, email, metadata, user=None):
             'metadata': metadata}
     if not isinstance(record, PaymentRecord) or record.purpose in ('card_verification', 'payment_method'):
         body['channels'] = ['card']
+    _integration_diagnostic(
+        "PAYSTACK_INIT_REQUESTED", phase="initialize", native=False,
+        reference_present=bool(record.paystack_reference), access_code_present=False,
+    )
     try:
         payload = paystack_request('POST', '/transaction/initialize', body)
-        provider = payload.get('data') or {}
-        url = urllib.parse.urlsplit(str(provider.get('authorization_url') or ''))
-        if (url.scheme != 'https' or url.netloc != 'checkout.paystack.com'
-                or not provider.get('access_code') or provider.get('reference') != record.paystack_reference):
-            raise ValueError('Invalid checkout response')
-    except Exception as exc:
+    except PaystackRequestError as exc:
         # Unknown transport outcomes remain reconcilable; never blindly retry
         # a new reference after Paystack may have accepted initialization.
-        record.status = 'failed' if isinstance(exc, PaystackRequestError) and exc.definitive else 'pending'
+        record.status = 'failed' if exc.definitive else 'pending'
+        can_restart = bool(exc.definitive)
+        if can_restart and isinstance(record, OnboardingAuthorization) and record.email_challenge_id:
+            challenge = db.query(OnboardingEmailChallenge).filter_by(
+                challenge_id=record.email_challenge_id).with_for_update().first()
+            if challenge and challenge.status == 'consumed':
+                challenge.status = 'verified'
+                challenge.consumed_at = None
         db.commit()
+        _integration_diagnostic(
+            "PAYSTACK_INIT_HTTP_FAILED", phase="initialize",
+            http_status=exc.http_status, reference_present=True,
+            access_code_present=False, definitive=exc.definitive,
+        )
         raise HTTPException(status_code=502, detail={
             'message': 'Checkout could not be opened. Check this payment before trying again.',
-            'reference': record.paystack_reference, 'status': record.status})
+            'reference': record.paystack_reference, 'status': record.status,
+            'reason': 'PAYSTACK_INIT_HTTP_FAILED', 'can_restart': can_restart})
+    provider = payload.get('data') or {}
+    required_present = all((provider.get('access_code'), provider.get('authorization_url'), provider.get('reference')))
+    if not required_present or provider.get('reference') != record.paystack_reference:
+        record.status = 'pending'; db.commit()
+        _integration_diagnostic(
+            "PAYSTACK_INIT_INVALID_PAYLOAD", phase="initialize",
+            reference_present=bool(provider.get('reference')),
+            access_code_present=bool(provider.get('access_code')),
+        )
+        raise HTTPException(status_code=502, detail={
+            'message': 'Paystack returned an incomplete checkout response. Check payment status before retrying.',
+            'reference': record.paystack_reference, 'status': record.status,
+            'reason': 'PAYSTACK_INIT_INVALID_PAYLOAD', 'can_restart': False})
+    url = urllib.parse.urlsplit(str(provider['authorization_url']))
+    if (url.scheme != 'https' or url.netloc != 'checkout.paystack.com'
+            or url.username or url.password or url.port):
+        record.status = 'pending'; db.commit()
+        _integration_diagnostic(
+            "PAYSTACK_INIT_INVALID_PROVIDER_URL", phase="initialize",
+            reference_present=True, access_code_present=True,
+            provider_hostname=url.hostname,
+        )
+        raise HTTPException(status_code=502, detail={
+            'message': 'Paystack returned an invalid checkout destination. Check payment status before retrying.',
+            'reference': record.paystack_reference, 'status': record.status,
+            'reason': 'PAYSTACK_INIT_INVALID_PROVIDER_URL', 'can_restart': False})
+    _integration_diagnostic(
+        "PAYSTACK_INIT_SUCCEEDED", phase="checkout_ready",
+        reference_present=True, access_code_present=True,
+        provider_hostname=url.hostname,
+    )
     result = {'reference': record.paystack_reference, 'access_code': provider['access_code'],
               'authorization_url': provider['authorization_url'], 'amount_kobo': record.amount_kobo,
               'verification_amount_kobo': record.amount_kobo if body.get('channels') else None,
@@ -13212,24 +13302,30 @@ class PaystackRequestError(RuntimeError):
     response. A timeout/disconnect can happen after Paystack accepted a write,
     so callers must reconcile rather than blindly create the mutation again.
     """
-    def __init__(self, message: str, *, definitive: bool):
+    def __init__(self, message: str, *, definitive: bool, http_status: Optional[int] = None):
         super().__init__(message)
         self.definitive = definitive
+        self.http_status = http_status
 
 
 def paystack_request(method: str, path: str, json_body: Optional[dict] = None, timeout: int = 15) -> dict:
     import requests
-    resp = requests.request(
-        method, f"https://api.paystack.co{path}",
-        headers={"Authorization": f"Bearer {PAYSTACK_SECRET_KEY}", "Content-Type": "application/json"},
-        json=json_body, timeout=timeout,
-    )
+    try:
+        resp = requests.request(
+            method, f"https://api.paystack.co{path}",
+            headers={"Authorization": f"Bearer {PAYSTACK_SECRET_KEY}", "Content-Type": "application/json"},
+            json=json_body, timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise PaystackRequestError("Paystack could not be reached.", definitive=False) from exc
     try:
         payload = resp.json()
     except Exception:
-        raise PaystackRequestError("Paystack returned an unreadable response.", definitive=False)
+        raise PaystackRequestError("Paystack returned an unreadable response.", definitive=False,
+                                   http_status=resp.status_code)
     if not resp.ok or not payload.get("status"):
-        raise PaystackRequestError("Paystack rejected the request.", definitive=True)
+        raise PaystackRequestError("Paystack rejected the request.", definitive=True,
+                                   http_status=resp.status_code)
     return payload
 
 def paystack_verify_transaction(reference: str) -> dict:
@@ -13533,7 +13629,6 @@ def ensure_verification_refund(db: Session, row, transaction_reference: str, pro
 # Profile email verification retains its existing Supabase-authoritative flow.
 # Where Supabase should send the guest after they click the verification link.
 # Must also be added to the Supabase project's Auth "Redirect URLs" allow-list.
-SUPABASE_EMAIL_REDIRECT_URL = os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "").strip().rstrip("/")
 ONBOARDING_EMAIL_RESEND_SECONDS = int(os.getenv("ONBOARDING_EMAIL_RESEND_SECONDS", "60"))
 
 def _supabase_auth_or_503():
@@ -13641,6 +13736,22 @@ def _onboarding_check_rate_limit(db: Session, scope: str, key: str, reason: str,
 def _onboarding_verifier(challenge_id):
     return hmac.new(SECRET_KEY.encode(), ("onboarding-pkce-v1:" + challenge_id).encode(), "sha256").hexdigest()
 
+def _challenge_diagnostic_id(challenge_id) -> str:
+    value = str(challenge_id or "")
+    return hashlib.sha256(value.encode()).hexdigest()[:12] if value else "missing"
+
+def _integration_diagnostic(event: str, **fields) -> None:
+    """Emit structured, secret-free email/payment integration diagnostics."""
+    allowed = {
+        "challenge", "platform", "current_platform", "challenge_matched",
+        "code_present", "status", "return_origin", "phase", "native",
+        "http_status", "reference_present", "access_code_present",
+        "provider_hostname", "plugin_available", "definitive",
+    }
+    safe = {key: value for key, value in fields.items() if key in allowed
+            and isinstance(value, (str, int, bool, type(None)))}
+    print(json.dumps({"event": event, **safe}, separators=(",", ":"), sort_keys=True))
+
 def _onboarding_provider_post(path, body, params=None):
     import requests
     from supabase_client import SupabaseSettings
@@ -13707,12 +13818,19 @@ def _onboarding_provider_post(path, body, params=None):
         raise HTTPException(502, "Email verification returned an invalid response. Please try again.")
 
 def _onboarding_web_base():
-    from urllib.parse import urlsplit
-    base = (SUPABASE_EMAIL_REDIRECT_URL or SUPPLY_AI_FRONTEND_URL).rstrip("/")
-    parts = urlsplit(base)
-    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
+    try:
+        return _public_https_origin(SUPPLY_AI_FRONTEND_URL, "SUPPLY_AI_FRONTEND_URL")
+    except RuntimeError:
         raise HTTPException(503, "A secure email return URL must be configured. Please contact support.")
-    return base
+
+def _onboarding_callback_base():
+    try:
+        return _public_https_origin(
+            ONBOARDING_EMAIL_CALLBACK_BASE_URL,
+            "ONBOARDING_EMAIL_CALLBACK_BASE_URL",
+        )
+    except RuntimeError:
+        raise HTTPException(503, "A secure email callback URL must be configured.")
 
 def _onboarding_row(db, challenge_id, lock=False):
     if not re.fullmatch(r"[a-f0-9]{64}", str(challenge_id or "")):
@@ -13726,9 +13844,12 @@ def _onboarding_row(db, challenge_id, lock=False):
     return row
 
 def _onboarding_state(row):
-    return {"status": row.status, "challenge_id": row.challenge_id, "email": row.email,
+    state = {"status": row.status, "challenge_id": row.challenge_id, "email": row.email,
         "plan": row.plan, "billing_interval": row.billing_interval, "platform": row.platform,
         "return_target": row.return_target, "expires_at": row.expires_at.isoformat() + "Z"}
+    if row.platform == "web":
+        state["expected_return_origin"] = _onboarding_web_base()
+    return state
 
 class OnboardingEmailVerifyRequest(BaseModel):
     email: EmailStr
@@ -13784,11 +13905,7 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
             # resend timer.
             old.status = "invalidated"
     base = _onboarding_web_base()
-    callback_base = os.getenv("ONBOARDING_EMAIL_CALLBACK_BASE_URL", "https://cauldra.up.railway.app").rstrip("/")
-    from urllib.parse import urlsplit
-    cb = urlsplit(callback_base)
-    if cb.scheme != "https" or not cb.hostname or cb.username or cb.password or cb.query or cb.fragment:
-        raise HTTPException(503, "A secure email callback URL must be configured.")
+    callback_base = _onboarding_callback_base()
     row = OnboardingEmailChallenge(challenge_id=secrets.token_hex(32), email=email, plan=plan,
         billing_interval=interval, platform=data.platform,
         return_target=base + "/" if data.platform == "web" else "cauldra://auth/email-verified",
@@ -13808,20 +13925,65 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
     # (especially Supabase 429s) must not also increase Cauldra's own limiter.
     record_failure(db, "onboarding-email-verify-ip", ip)
     record_failure(db, "onboarding-email-verify-email", email)
+    _integration_diagnostic(
+        "EMAIL_VERIFY_REQUEST_CREATED",
+        challenge=_challenge_diagnostic_id(row.challenge_id),
+        platform=row.platform,
+        return_origin=(base if row.platform == "web" else "cauldra://auth"),
+    )
     return {**_onboarding_state(row), "status":"sent", "resend_after_seconds":ONBOARDING_EMAIL_RESEND_SECONDS}
 
 class OnboardingEmailConfirmRequest(BaseModel):
     challenge_id: str = ""
     code: str = ""
+    platform: str = ""
 
 @app.post("/onboarding/email/verify/confirm")
 def onboarding_email_verify_confirm(data: OnboardingEmailConfirmRequest, request: Request, db: Session = Depends(get_db)):
     ip = request.client.host if request.client else "unknown"
     check_rate_limit(db, "onboarding-email-confirm-ip", ip)
-    row = _onboarding_row(db, data.challenge_id, lock=True)
+    marker = _challenge_diagnostic_id(data.challenge_id)
+    try:
+        row = _onboarding_row(db, data.challenge_id, lock=True)
+    except HTTPException:
+        _integration_diagnostic(
+            "EMAIL_VERIFY_CALLBACK_RECEIVED" if data.code else "EMAIL_VERIFY_RESUME_REQUESTED",
+            challenge=marker, current_platform=data.platform or None,
+            challenge_matched=False, code_present=bool(data.code),
+        )
+        raise
+    if data.code:
+        _integration_diagnostic(
+            "EMAIL_VERIFY_CALLBACK_RECEIVED", challenge=marker,
+            platform=row.platform, challenge_matched=True, code_present=True,
+        )
+    else:
+        _integration_diagnostic(
+            "EMAIL_VERIFY_RESUME_REQUESTED", challenge=marker,
+            platform=row.platform, current_platform=data.platform or None,
+            challenge_matched=True, code_present=False,
+        )
+        if data.platform and data.platform not in ("web", "native_android", "native_ios"):
+            raise HTTPException(400, "Invalid onboarding platform.")
+        if data.platform and data.platform != row.platform:
+            _integration_diagnostic(
+                "EMAIL_VERIFY_RESUME_RESULT", challenge=marker,
+                platform=row.platform, current_platform=data.platform,
+                status="platform_mismatch",
+            )
+            raise HTTPException(status_code=409, detail={
+                "message": "This verification belongs to another Cauldra platform. Start a new verification here.",
+                "reason": "platform_mismatch",
+            })
     if row.status == "consumed":
         raise HTTPException(409, "This email verification has already been used for payment.")
     if row.status == "verified" or not data.code:
+        if not data.code:
+            _integration_diagnostic(
+                "EMAIL_VERIFY_RESUME_RESULT", challenge=marker,
+                platform=row.platform, current_platform=data.platform or None,
+                status=row.status,
+            )
         return _onboarding_state(row)  # polling never consults global confirmation
     if len(data.code) > 2048 or not re.fullmatch(r"[A-Za-z0-9_-]+", data.code):
         raise HTTPException(400, "Invalid verification code. Please request a new email.")
@@ -13839,6 +14001,12 @@ def onboarding_email_verify_confirm(data: OnboardingEmailConfirmRequest, request
     row.status = "verified"; row.verified_at = datetime.utcnow()
     row.expires_at = row.verified_at + timedelta(minutes=30)
     db.commit()
+    return_origin = (urllib.parse.urlsplit(row.return_target).scheme + "://" +
+                     urllib.parse.urlsplit(row.return_target).netloc)
+    _integration_diagnostic(
+        "EMAIL_VERIFY_CALLBACK_CONFIRMED", challenge=marker,
+        platform=row.platform, status=row.status, return_origin=return_origin,
+    )
     return _onboarding_state(row)
 
 @app.post("/onboarding/email/invalidate")
@@ -13923,12 +14091,28 @@ def onboarding_payment_init(data: OnboardingPaymentInitRequest, request: Request
         raise HTTPException(403, "Please complete fresh email verification for this email and plan before payment.")
 
     now = datetime.utcnow()
-    row = OnboardingAuthorization(
-        email_challenge_id=challenge.challenge_id,
-        paystack_reference=reference, email=str(data.email).strip().lower(), plan=plan, billing_interval=interval,
-        amount_kobo=amount_kobo, status="initialized",
-        expires_at=now + timedelta(minutes=ONBOARDING_PAYMENT_SESSION_MINUTES),
-    )
+    row = db.query(OnboardingAuthorization).filter_by(
+        email_challenge_id=challenge.challenge_id).with_for_update().first()
+    if row:
+        # Only a definitive provider rejection returns the challenge to verified
+        # and the attempt to failed. Reuse that row with a new deterministic
+        # reference; an uncertain/pending attempt can never enter this branch.
+        if row.status != "failed":
+            raise HTTPException(status_code=409, detail={
+                'message': 'This verification already owns a payment attempt. Check its status.',
+                'reference': row.paystack_reference,
+            })
+        row.paystack_reference = reference
+        row.amount_kobo = amount_kobo
+        row.status = "initialized"
+        row.expires_at = now + timedelta(minutes=ONBOARDING_PAYMENT_SESSION_MINUTES)
+    else:
+        row = OnboardingAuthorization(
+            email_challenge_id=challenge.challenge_id,
+            paystack_reference=reference, email=str(data.email).strip().lower(), plan=plan, billing_interval=interval,
+            amount_kobo=amount_kobo, status="initialized",
+            expires_at=now + timedelta(minutes=ONBOARDING_PAYMENT_SESSION_MINUTES),
+        )
     challenge.status = "consumed"
     challenge.consumed_at = now
     db.add(row); db.commit()

@@ -18724,8 +18724,32 @@
         const evStorageKey = 'cauldra_onboarding_challenge_v2';
         const evPlatform = () => window.Capacitor?.isNativePlatform?.()
             ? (window.Capacitor.getPlatform() === 'ios' ? 'native_ios' : 'native_android') : 'web';
+        const evTrace = (event, challenge, fields = {}) => console.info(`[CAULDRA_EMAIL] ${event}`, {
+            challengePrefix: /^[a-f0-9]{64}$/.test(challenge || '') ? challenge.slice(0, 8) : 'missing',
+            currentPlatform: evPlatform(), ...fields
+        });
         function evRemember() {
-            try { if (evChallengeId) localStorage.setItem(evStorageKey, evChallengeId); else localStorage.removeItem(evStorageKey); } catch (_) {}
+            try {
+                if (evChallengeId) localStorage.setItem(evStorageKey, JSON.stringify({challenge_id:evChallengeId, platform:evPlatform()}));
+                else localStorage.removeItem(evStorageKey);
+            } catch (_) {}
+        }
+        function evReadRemembered() {
+            try {
+                const raw = localStorage.getItem(evStorageKey);
+                if (!raw) return null;
+                let saved;
+                try { saved = JSON.parse(raw); } catch (_) { saved = {challenge_id:raw, platform:null}; }
+                const challenge = typeof saved === 'string' ? saved : saved?.challenge_id;
+                const platform = typeof saved === 'object' ? saved?.platform : null;
+                if (!/^[a-f0-9]{64}$/.test(challenge || '')) {localStorage.removeItem(evStorageKey); return null;}
+                if (platform && platform !== evPlatform()) {
+                    localStorage.removeItem(evStorageKey);
+                    evTrace('EMAIL_VERIFY_STORED_PLATFORM_MISMATCH', challenge, {storedPlatform:platform});
+                    return null;
+                }
+                return challenge;
+            } catch (_) {return null;}
         }
         function evAcceptState(data) {
             if (!/^[a-f0-9]{64}$/.test(data.challenge_id || '') || data.platform !== evPlatform()) return false;
@@ -19152,10 +19176,11 @@
             try {
                 const res = await fetch(`${API_URL}/onboarding/email/verify/confirm`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ challenge_id:challenge })
+                    body: JSON.stringify({ challenge_id:challenge, platform:evPlatform() })
                 });
                 const data = await res.json().catch(() => ({}));
                 if (challenge !== evChallengeId) return;
+                evTrace('EMAIL_VERIFY_RESUME_RESULT', challenge, {status:data.status || data?.detail?.reason || `http_${res.status}`});
                 if (res.ok && data.status === 'verified' && evAcceptState(data)) {
                     evVerifiedEmail = data.email || email;
                     evBroadcastVerified();
@@ -19165,6 +19190,9 @@
                     const message = document.getElementById('ev-state-4-msg');
                     if (message) message.textContent = data.detail || 'Please request a new verification email.';
                     evShowState(4);
+                } else if (res.status === 409 && data?.detail?.reason === 'platform_mismatch') {
+                    evChallengeId = null; evVerifiedEmail = null; evRemember();
+                    evShowReturnRecovery(data.detail.message);
                 } else if (manual) {
                     showToast(data.detail || "Not verified yet. Open the link in your email, then check again.", "info");
                 }
@@ -19181,18 +19209,22 @@
                 return;
             }
             const generation = evGeneration;
+            evTrace('EMAIL_VERIFY_RESUME_REQUESTED', challenge);
             try {
                 const res = await fetch(`${API_URL}/onboarding/email/verify/confirm`, {method:'POST',
-                    headers:{'Content-Type':'application/json'},body:JSON.stringify({challenge_id:challenge})});
+                    headers:{'Content-Type':'application/json'},body:JSON.stringify({challenge_id:challenge,platform:evPlatform()})});
                 const data = await res.json();
                 if (generation !== evGeneration) return;
                 if (!res.ok) {
+                    if (res.status === 409 && data?.detail?.reason === 'platform_mismatch') {
+                        if (evChallengeId === challenge) {evChallengeId = null; evVerifiedEmail = null; evRemember();}
+                        else {try {localStorage.removeItem(evStorageKey);} catch (_) {}}
+                        throw new Error(data.detail.message);
+                    }
                     if (res.status === 409) return; // existing Paystack attempt owns this proof
-                    throw new Error(data.detail || 'Please request a new verification email.');
+                    throw new Error(typeof data.detail === 'string' ? data.detail : data?.detail?.message || 'Please request a new verification email.');
                 }
-                if (data.platform !== evPlatform()) {
-                    showToast('Return to the Cauldra app where you started verification.', 'info'); return;
-                }
+                if (data.platform !== evPlatform()) throw new Error('This verification belongs to another Cauldra platform. Start a new verification here.');
                 if (!evAcceptState(data)) return;
                 await loadPublicPlanCatalog();
                 if (generation !== evGeneration || !openBusinessAuthModal()) return;
@@ -29549,8 +29581,7 @@
                 await handlePaystackReturn();
                 return;
             }
-            let savedChallenge = null;
-            try { savedChallenge = localStorage.getItem(evStorageKey); } catch (_) {}
+            const savedChallenge = evReadRemembered();
             if (savedChallenge && !authToken) await evResumeChallenge(savedChallenge);
             else handleHubOnboardingRoute();
         });

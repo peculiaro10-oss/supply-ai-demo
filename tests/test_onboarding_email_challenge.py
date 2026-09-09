@@ -38,7 +38,9 @@ class ChallengeTests(unittest.TestCase):
             return {'user':{'email':expected[1],'email_confirmed_at':'2026-09-08T00:00:00Z'},'refresh_token':'never-return-to-browser'}
         self.patches=[patch.object(main,'_onboarding_provider_post',side_effect=provider),
             patch.object(main,'_supabase_email_confirmed',side_effect=AssertionError('Global confirmation must not be queried')),
+            patch.object(main,'SUPPLY_AI_FRONTEND_URL','https://web.example.com'),
             patch.object(main,'SUPABASE_EMAIL_REDIRECT_URL','https://web.example.com'),
+            patch.object(main,'ONBOARDING_EMAIL_CALLBACK_BASE_URL','https://api.example.com'),
             patch.object(main,'PAYSTACK_SECRET_KEY','test-provider-secret'),
             patch.object(main,'initialize_owned_checkout',side_effect=lambda db,req,row,email,meta:{'reference':row.paystack_reference})]
         for p in self.patches:p.start()
@@ -100,14 +102,23 @@ class ChallengeTests(unittest.TestCase):
     def test_platform_binding_and_purpose(self):
         c=self.send(platform='native_android').json()['challenge_id'];r=self.click(c).json()
         self.assertEqual(r['platform'],'native_android');self.assertEqual(r['return_target'],'cauldra://auth/email-verified')
-        r=self.confirm(c,platform='web',return_target='https://evil.example').json()
-        self.assertEqual(r['platform'],'native_android')
+        mismatch=self.confirm(c,platform='web',return_target='https://evil.example')
+        self.assertEqual(mismatch.status_code,409)
+        self.assertEqual(mismatch.json()['detail']['reason'],'platform_mismatch')
+        self.assertEqual(self.confirm(c,platform='native_android').json()['status'],'verified')
         callback=self.client.get('/auth/email-verified?verified=true')
         self.assertEqual(callback.status_code,200);self.assertIn('text/html',callback.headers['content-type'])
         self.assertEqual(callback.headers['referrer-policy'],'no-referrer')
     def test_verified_attempt_reuse_only_exact_values(self):
         c=self.send().json()['challenge_id'];self.click(c)
         r=self.send(challenge_id=c);self.assertEqual(r.json()['status'],'verified');self.assertEqual(len(self.sends),1)
+
+    def test_web_challenge_uses_only_configured_frontend_origin(self):
+        row=self.send(platform='web').json()
+        self.assertEqual(row['platform'],'web')
+        self.assertEqual(row['return_target'],'https://web.example.com/')
+        self.assertEqual(row['expected_return_origin'],'https://web.example.com')
+        self.assertNotEqual(row['return_target'],'cauldra://auth/email-verified')
     def test_registration_rejects_old_unbound_payment(self):
         with self.Session() as db:
             db.add(main.OnboardingAuthorization(paystack_reference='legacy',email='owner@example.com',plan='starter',billing_interval='monthly',amount_kobo=5000,status='verified',verified_at=datetime.utcnow(),expires_at=datetime.utcnow()+timedelta(hours=1)));db.commit()

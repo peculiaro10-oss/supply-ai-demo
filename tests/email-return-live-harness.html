@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Cauldra email return click harness</title>
+  <script>
+    window.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: 'verified',
+        platform: 'web',
+        return_target: 'https://cauldra.up.railway.app/',
+        expected_return_origin: 'https://cauldra.up.railway.app'
+      })
+    });
+    // Suppress only automatic navigation so the real anchor can be clicked.
+    window.setTimeout = callback => { window.__autoReturn = callback; return 1; };
+  </script>
+  <script src="../frontend/js/email-return.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>Email verification</h1>
+    <p id="email-return-status" role="status">Checking…</p>
+    <a id="email-return-open" hidden>Return to Cauldra</a>
+    <p id="email-return-help">Fallback-navigation integration harness.</p>
+  </main>
+</body>
+</html>
