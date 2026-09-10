@@ -1644,6 +1644,7 @@ UPLOAD_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 # Central subscription and AI-cost policy.  None represents an intentionally
 # unlimited top-tier people/location resource, not a large hidden cap.
 #
+# PUBLIC TIER LADDER (lowest -> highest): Starter -> Business -> Premium -> Enterprise.
 # The `label` below is the single source of truth for every customer-facing plan
 # name; the frontend never hardcodes one (see /plans and plan_public_view).
 #
@@ -10061,6 +10062,21 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
     # AIUsageLedger the headline included/used/remaining figures above
     # already come from (usage_summary()), just grouped by operation_type
     # instead of summed across all of them. Reused by Settings > AI Credits
+    # & Usage; an entry-tier business (plan id "core", shown as "Starter";
+    # included_ai_credits == 0) simply gets an empty list here since it can
+    # never have any successful billable-AI rows to group.
+    feature_rows = (
+        db.query(
+            AIUsageLedger.operation_type,
+            func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0),
+            func.count(AIUsageLedger.id)
+        )
+        .filter(
+            AIUsageLedger.business_id == business.id,
+            AIUsageLedger.created_at >= period_start,
+            AIUsageLedger.created_at < period_end,
+            AIUsageLedger.success == True
+        )
         .group_by(AIUsageLedger.operation_type)
         .all()
     )
