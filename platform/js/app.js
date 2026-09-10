@@ -290,7 +290,7 @@ async function loadBusinesses() {
         <tr class="cursor-pointer" data-open-business="${b.id}">
             <td><div class="font-semibold text-textMain">${escapeHtml(b.company_name)}</div><div class="text-[10px] text-textSec font-mono">${escapeHtml(b.business_code)}</div></td>
             <td>${fmtDate(b.joined_at)}</td>
-            <td><span class="pill bg-primary/15 text-primary">${escapeHtml(b.plan)}</span></td>
+            <td><span class="pill bg-primary/15 text-primary" title="plan id: ${escapeHtml(b.plan || "")}">${escapeHtml(b.plan_label || b.plan)}</span></td>
             <td>${statusPill(b.subscription_status)}</td>
             <td>${fmtInt(b.user_count)}</td>
             <td>${fmtDateTime(b.last_active_at)}</td>
@@ -330,7 +330,7 @@ async function loadBusinessDetail(id) {
                     <div class="text-lg font-extrabold text-textMain">${escapeHtml(b.company_name)}</div>
                     <div class="text-[11px] text-textSec font-mono">${escapeHtml(b.business_code)}</div>
                 </div>
-                <div class="flex gap-2">${statusPill(b.subscription_status)}<span class="pill bg-primary/15 text-primary">${escapeHtml(b.plan)}</span></div>
+                <div class="flex gap-2">${statusPill(b.subscription_status)}<span class="pill bg-primary/15 text-primary" title="plan id: ${escapeHtml(b.plan || "")}">${escapeHtml(b.plan_label || b.plan)}</span></div>
             </div>
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
                 <div><div class="stat-label">Joined</div><div class="text-xs text-textMain mt-1">${fmtDate(b.joined_at)}</div></div>
@@ -505,7 +505,7 @@ async function fetchRevenue(period, start, end) {
         const max = Math.max(...data.by_plan.map(p => p.revenue_naira), 1);
         byPlanEl.innerHTML = data.by_plan.map(p => `
             <div>
-                <div class="flex items-center justify-between text-[11px] mb-1"><span class="text-textMain font-medium capitalize">${escapeHtml(p.plan || "unknown")}</span><span class="text-textSec">${fmtMoney(p.revenue_naira, "NGN")} · ${fmtInt(p.payments)} pmts</span></div>
+                <div class="flex items-center justify-between text-[11px] mb-1"><span class="text-textMain font-medium" title="plan id: ${escapeHtml(p.plan || "")}">${escapeHtml(p.plan_label || p.plan || "unknown")}</span><span class="text-textSec">${fmtMoney(p.revenue_naira, "NGN")} · ${fmtInt(p.payments)} pmts</span></div>
                 <div class="bar-track"><div class="bar-fill bg-primary" style="width:${Math.max(4, (p.revenue_naira / max) * 100)}%"></div></div>
             </div>`).join("");
     }

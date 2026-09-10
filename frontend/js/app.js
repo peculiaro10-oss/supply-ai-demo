@@ -16781,7 +16781,7 @@
                 "business-profile": adminOrManager, // ownership-adjacent — stays role-based, see D in the final report
                 "billing": adminOrManager, // ownership/subscription control — hard role-based on purpose
                 // AI Credits & Usage only exists for a plan that actually
-                // includes AI credits — Core (currentAiEntitled === false)
+                // includes AI credits — Starter (currentAiEntitled === false)
                 // never sees this destination at all, not merely a disabled
                 // or empty version of it.
                 "ai-usage": adminOrManager && currentAiEntitled,
@@ -18911,6 +18911,12 @@
             const grid = document.getElementById("plan-cards-grid");
             grid.classList.remove("hidden");
             // Stable, intentional display order regardless of object key order.
+            // These are internal plan IDS, not display names — they intentionally
+            // differ (id "core" is shown as "Starter", "starter" as "Business",
+            // "business" as "Premium", "enterprise" as "Enterprise"). Ascending
+            // by id here still renders the public ladder lowest -> highest:
+            // Starter -> Business -> Premium -> Enterprise. Names come from the
+            // server-supplied label; never hardcode a plan name here.
             const order = ["core", "starter", "business", "enterprise"];
             const ids = order.filter(id => publicPlanCatalog[id]).concat(Object.keys(publicPlanCatalog).filter(id => !order.includes(id)));
             const intervalLabel = onboardingSelectedInterval === 'annual' ? 'year' : 'month';
@@ -19931,7 +19937,7 @@
                 s("3. Account responsibilities", `You must provide accurate information, protect your credentials, use only accounts you're authorized to use, keep your contact details up to date, and report any suspected unauthorized access.`),
                 s("4. Business Admin responsibilities", `A Business Admin is responsible for inviting appropriate staff, assigning permissions responsibly, removing access when appropriate, and ensuring they have the authority to submit employee, vendor, and business information to Cauldra.`),
                 s("5. Acceptable use", `You may not: use Cauldra illegally; attempt unauthorized access; introduce malware; interfere with or abuse the service; impersonate another person or business; access another business's information without authority; deliberately bypass security or plan limits; or infringe intellectual property rights.`),
-                s("6. Subscription plans", `Plans differ by features and resource limits, and may bill monthly or annually. The Core plan has no billable external-AI entitlement; AI-enabled plans may include AI credits as described in the app.`),
+                s("6. Subscription plans", `Plans differ by features and resource limits, and may bill monthly or annually. The Starter plan has no billable external-AI entitlement; AI-enabled plans may include AI credits as described in the app.`),
                 s("7. Trial", `[TRIAL LENGTH TO BE CONFIRMED]. [AUTO-CHARGE AFTER TRIAL RULE TO BE CONFIRMED]. [TRIAL-END / PAYMENT-FAILURE RULE TO BE CONFIRMED]`),
                 s("8. Card verification", `Where onboarding uses a small, refundable card-verification transaction, that transaction is separate and distinct from your actual subscription charge.`),
                 s("9. Cancellation", `[CANCELLATION POLICY TO BE CONFIRMED]`),
@@ -20255,6 +20261,12 @@
             const usage = billingUsageCache;
             const plans = usage.plans || {};
             const isAdmin = getCurrentRole() === 'admin';
+            // These are internal plan IDS, not display names — they intentionally
+            // differ (id "core" is shown as "Starter", "starter" as "Business",
+            // "business" as "Premium", "enterprise" as "Enterprise"). Ascending
+            // by id here still renders the public ladder lowest -> highest:
+            // Starter -> Business -> Premium -> Enterprise. Names come from the
+            // server-supplied label; never hardcode a plan name here.
             const order = ["core", "starter", "business", "enterprise"];
             const ids = order.filter(id => plans[id]).concat(Object.keys(plans).filter(id => !order.includes(id)));
             const currentPlan = (usage.plan || '').toLowerCase();
