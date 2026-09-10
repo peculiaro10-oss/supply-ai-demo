@@ -1642,25 +1642,40 @@ UPLOAD_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 # `alembic upgrade head` to apply schema changes.
 
 # Central subscription and AI-cost policy.  None represents an intentionally
-# unlimited Enterprise people/location resource, not a large hidden cap.
+# unlimited top-tier people/location resource, not a large hidden cap.
 #
-# "enterprise" is displayed to customers as "Premium" (see `label` below) — the
-# internal id is kept as "enterprise" for backward compatibility with existing
-# database records, Paystack subscriptions, and env-configured plan codes.
-# Core is the entry-level, non-AI plan: included_ai_credits=0 means the plan
+# The `label` below is the single source of truth for every customer-facing plan
+# name; the frontend never hardcodes one (see /plans and plan_public_view).
+#
+# The internal plan ids deliberately do NOT match those labels one-for-one.  The
+# public names were shifted down one rank position in the tier-naming migration,
+# while the ids were left exactly as they were so that existing database records,
+# historical subscriptions, Paystack plan codes, and the env-configured
+# PAYSTACK_<ID>_MONTHLY/ANNUAL_PLAN_CODE variables all keep pointing at the same
+# priced product they always did.  The mapping is therefore:
+#
+#     id "core"       -> "Starter"     (rank 0, lowest)
+#     id "starter"    -> "Business"    (rank 1)
+#     id "business"   -> "Premium"     (rank 2)
+#     id "enterprise" -> "Enterprise"  (rank 3, highest)
+#
+# Read an id as an opaque, immutable billing key, never as a display name.
+# Rank order lives in PLAN_RANK below and is unchanged by the renaming.
+#
+# id "core" is the entry-level, non-AI plan: included_ai_credits=0 means the plan
 # has no AI entitlement at all (see require_ai_access below), not just a small
 # credit allowance.
 PLAN_CONFIG = {
-    "core": {"label": "Core", "monthly_price": 5000, "annual_price": 50000, "trial_days": 14,
+    "core": {"label": "Starter", "monthly_price": 5000, "annual_price": 50000, "trial_days": 14,
         "admin": 1, "manager": 1, "staff": 2, "branch": 1, "city": 1, "country": 1, "product": 250, "supplier": 10, "warehouse": 1,
         "purchase_order": 15, "price_monitor": 0, "storage_gb": 2, "included_ai_credits": 0, "ai_overage_unit": 250, "ai_overage_price": 5000},
-    "starter": {"label": "Starter", "monthly_price": 20000, "annual_price": 200000, "trial_days": 14,
+    "starter": {"label": "Business", "monthly_price": 20000, "annual_price": 200000, "trial_days": 14,
         "admin": 1, "manager": 1, "staff": 3, "branch": 1, "city": 1, "country": 1, "product": 500, "supplier": 20, "warehouse": 2,
         "purchase_order": 30, "price_monitor": 5, "storage_gb": 5, "included_ai_credits": 500, "ai_overage_unit": 250, "ai_overage_price": 5000},
-    "business": {"label": "Business", "monthly_price": 50000, "annual_price": 500000, "trial_days": 14,
+    "business": {"label": "Premium", "monthly_price": 50000, "annual_price": 500000, "trial_days": 14,
         "admin": 2, "manager": 5, "staff": 15, "branch": 5, "city": 5, "country": 2, "product": 2500, "supplier": 100, "warehouse": 10,
         "purchase_order": 200, "price_monitor": 30, "storage_gb": 25, "included_ai_credits": 2500, "ai_overage_unit": 500, "ai_overage_price": 7500},
-    "enterprise": {"label": "Premium", "monthly_price": 200000, "annual_price": 2100000, "trial_days": 14,
+    "enterprise": {"label": "Enterprise", "monthly_price": 200000, "annual_price": 2100000, "trial_days": 14,
         "admin": None, "manager": None, "staff": None, "branch": None, "city": None, "country": None, "product": 50000, "supplier": 2000, "warehouse": 100,
         "purchase_order": 5000, "price_monitor": 500, "storage_gb": 250, "included_ai_credits": 15000, "ai_overage_unit": 1000, "ai_overage_price": 10000},
 }
@@ -1680,6 +1695,15 @@ def plan_public_view(pid: str, cfg: dict) -> dict:
         "ai_included": bool(cfg.get("included_ai_credits")),
         "limits": {f: cfg.get(f) for f in PLAN_LIMIT_FIELDS},
     }
+
+def plan_label_for(plan_id) -> str:
+    """Public tier name for an internal plan id.  Plan ids are opaque billing
+    keys and are deliberately NOT the customer-facing names (see PLAN_CONFIG) —
+    anything a human reads must go through this, never through the raw id.
+    Falls back to the id itself for a historical/unknown value so an old record
+    still renders something rather than blank."""
+    return PLAN_CONFIG.get((plan_id or "").strip().lower(), {}).get("label") or (plan_id or "—")
+
 
 # Strict plan ordering used ONLY to decide whether a requested plan change is
 # a genuine upgrade (see /subscription/upgrade-quote). A billing-interval
@@ -3098,7 +3122,8 @@ def require_ai_access(user: User = Depends(get_current_user), db: Session = Depe
     """Real security boundary for every AI-branded endpoint (Business Brain, AI
     chat, margin advisor, invoice OCR, predictive intelligence, etc). A locked
     frontend button is UX only — this dependency is what actually blocks a
-    Core-plan business (included_ai_credits == 0) from calling AI endpoints
+    entry-tier business (plan id "core", shown as "Starter";
+    included_ai_credits == 0) from calling AI endpoints
     directly, regardless of what the client sends or displays."""
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     plan = subscription_for(db, business)
@@ -10032,6 +10057,25 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
     # over as if it were one.
     summary["users_by_role"] = {role: {"used": role_counts[role], "limit": plan.get(role)} for role in ("admin", "manager", "staff")}
     summary["unlimited_people_and_locations"] = plan.get("admin") is None
+    # Per-feature AI usage breakdown for the current billing period — same
+    # AIUsageLedger the headline included/used/remaining figures above
+    # already come from (usage_summary()), just grouped by operation_type
+    # instead of summed across all of them. Reused by Settings > AI Credits
+        .group_by(AIUsageLedger.operation_type)
+        .all()
+    )
+
+    summary["usage_by_feature"] = [
+        {
+            "operation": op,
+            "label": AI_FEATURE_LABELS.get(op, op.replace("_", " ").title()),
+            "credits_consumed": int(credits),
+            "calls": int(calls),
+            "credit_cost_per_call": AI_CREDIT_WEIGHTS.get(op),
+        }
+        for op, credits, calls in feature_rows
+    ]
+
     return summary
 
 class ChangePlanRequest(BaseModel):
@@ -11126,14 +11170,16 @@ def subscription_payments(limit: int = Query(50, ge=1, le=200), offset: int = Qu
             .order_by(PaymentRecord.created_at.desc()).offset(offset).limit(limit).all())
     results = []
     for r in rows:
-        entry = {"plan": r.plan, "plan_label": PLAN_CONFIG.get(r.plan, {}).get("label", r.plan), "billing_interval": r.billing_interval,
+        entry = {"plan": r.plan, "plan_label": plan_label_for(r.plan), "billing_interval": r.billing_interval,
                  "amount_naira": r.amount_kobo / 100, "currency": r.currency, "status": r.status, "purpose": r.purpose,
                  "reference": r.paystack_reference, "paid_at": to_utc_iso(r.paid_at),
                  "created_at": to_utc_iso(r.created_at)}
         if r.purpose == "subscription_upgrade":
             # Enough detail for a future UI to render this distinctly from a
-            # normal renewal (e.g. "Business -> Enterprise Upgrade — ₦175,000"
+            # normal renewal (e.g. "Premium -> Enterprise Upgrade — ₦150,000"
             # instead of implying a full-price Enterprise charge occurred).
+            # Labels here come from PLAN_CONFIG, so they follow the public
+            # ladder Starter -> Business -> Premium -> Enterprise, not the ids.
             try:
                 meta = json.loads(r.transaction_metadata or "{}")
             except Exception:
@@ -12569,6 +12615,7 @@ def platform_businesses(
             "id": b.id, "business_code": b.business_code, "company_name": b.company_name,
             "joined_at": to_utc_iso(b.trial_started_at),
             "plan": (sub.plan if sub else b.subscription_plan) or "starter",
+            "plan_label": plan_label_for((sub.plan if sub else b.subscription_plan) or "starter"),
             "subscription_status": sub.status if sub else None,
             "is_trial": bool(sub and sub.status == "trialing"),
             "user_count": int(user_counts.get(b.id, 0)),
@@ -12603,6 +12650,7 @@ def platform_business_detail(business_id: int, owner: PlatformOwner = Depends(ge
         "email": biz.email, "phone": biz.phone, "country": biz.country, "currency": biz.currency,
         "joined_at": to_utc_iso(biz.trial_started_at),
         "plan": (sub.plan if sub else biz.subscription_plan),
+        "plan_label": plan_label_for(sub.plan if sub else biz.subscription_plan),
         "subscription_status": sub.status if sub else None,
         "billing_interval": (sub.billing_interval if sub else biz.billing_interval),
         "trial_end_at": to_utc_iso(sub.trial_end_at) if sub else None,
@@ -12696,7 +12744,7 @@ def platform_revenue(
     paying_businesses = base.with_entities(func.count(func.distinct(PaymentRecord.business_id))).scalar() or 0
     avg_per_business_kobo = (total_kobo / paying_businesses) if paying_businesses else 0
 
-    by_plan = [{"plan": p, "revenue_naira": round(amt / 100, 2), "payments": cnt}
+    by_plan = [{"plan": p, "plan_label": plan_label_for(p), "revenue_naira": round(amt / 100, 2), "payments": cnt}
                for p, amt, cnt in base.with_entities(PaymentRecord.plan, func.coalesce(func.sum(PaymentRecord.amount_kobo), 0), func.count(PaymentRecord.id)).group_by(PaymentRecord.plan).all()]
 
     by_business_rows = (
