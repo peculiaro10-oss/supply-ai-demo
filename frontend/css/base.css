@@ -252,7 +252,7 @@
             #mobile-auth-container .guest-preview-disabled{opacity:.55;pointer-events:none;}
             #mobile-menu-btn{width:40px;height:40px;border-radius:.8rem;margin-right:.5rem;}
             #header-global-search{display:block!important;min-width:0;width:100%;height:40px;font-size:11px;padding-left:2.25rem;}
-            #header-global-search-wrap{display:block;}
+            #header-global-search-wrap:not(.hidden):not([hidden]){display:block;}
             #header-action-controls{gap:.35rem;margin-left:.5rem;}
             #nav-btn-new-sale{padding-left:.7rem;padding-right:.7rem;height:40px;}
             #dynamic-dashboard-container section{padding-left:.75rem;padding-right:.75rem;padding-top:.75rem;}
@@ -278,6 +278,28 @@
             .inventory-filter-row button{height:40px;}
             .inventory-table-container{overflow-x:auto;-webkit-overflow-scrolling:touch;}
             .inventory-table-container table{min-width:700px;}
+        }
+
+        /* Inventory Status filters are BOTH status indicators and filter
+           controls — they must look and behave like real interactive
+           buttons at every breakpoint, especially desktop, where the
+           min-width:768px rule further below strips background/border for
+           a plain-text look and previously left nothing to replace that
+           affordance with. This base rule (outside any media query) is
+           what every breakpoint's own sizing tweaks below now layer on top
+           of, instead of each breakpoint needing to redefine hover/focus/
+           active color state on its own. No animation, no blinking —
+           purely hover/focus/pressed/selected state, and the transition
+           itself is skipped entirely under prefers-reduced-motion. */
+        .inventory-status-filter{cursor:pointer;border:1px solid transparent;background:transparent;transition:background-color .15s ease,border-color .15s ease,color .15s ease;}
+        .inventory-status-filter:hover{background:rgba(226,232,240,.06);border-color:#172033;}
+        .inventory-status-filter:focus-visible{outline:2px solid #436BEE;outline-offset:2px;}
+        .inventory-status-filter:active{transform:translateY(0.5px);}
+        .inventory-status-filter.is-active{background:rgba(67,107,238,.15);color:#E2E8F0;border-color:rgba(67,107,238,.4);}
+        .inventory-status-filter.is-active:hover{background:rgba(67,107,238,.2);}
+        @media (prefers-reduced-motion:reduce){
+            .inventory-status-filter{transition:none;}
+            .inventory-status-filter:active{transform:none;}
         }
 
         /* Cauldra responsive dashboard refinement: Layout A (mobile) and Layout B (tablet/desktop). */
@@ -404,3 +426,6 @@
             .inventory-table-container{border-top:1px solid #172033;overflow-x:auto;}
             .inventory-table-container table{min-width:640px;}
         }
+
+/* Guest visibility wins over all responsive display rules. */
+#header-global-search-wrap.hidden,#header-global-search-wrap[hidden]{display:none!important}
