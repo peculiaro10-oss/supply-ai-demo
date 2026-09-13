@@ -4584,8 +4584,8 @@ def serialize_user(u: User) -> dict:
         "pending_email": (u.pending_email or None),
     }
 
-def serialize_business(b: BusinessProfile) -> dict:
-    return {
+def serialize_business(b: BusinessProfile, db: Optional[Session] = None) -> dict:
+    payload = {
         # Keep the business identifier explicit when this object is combined with
         # a user object in an authentication response. Both models have an id.
         "id": b.id, "business_id": b.id, "business_code": b.business_code, "company_name": b.company_name,
@@ -4595,6 +4595,25 @@ def serialize_business(b: BusinessProfile) -> dict:
         "phone_country_code": b.phone_country_code,
         "subscription_plan": (b.subscription_plan or "starter").lower(), "billing_interval": b.billing_interval or "monthly",
     }
+    # AI entitlement, delivered on a surface EVERY role can read.
+    #
+    # It was previously only ever reachable through /subscription/usage, which
+    # the frontend fetches on the Admin/Manager dashboard path and in Settings →
+    # Subscription & Billing — both closed to Staff. Staff therefore never
+    # received an entitlement value at all, so the client-side AI gate kept its
+    # (fail-open) default and Starter Staff were shown AI Center and Predictive.
+    #
+    # Resolved READ-ONLY on purpose: get_or_create_subscription() commits, and a
+    # serializer on the auth/snapshot path must not write. Mirrors the rule
+    # require_ai_access() enforces — entitlement follows the subscription's plan
+    # id — so the client flag can never disagree with the server's own decision.
+    # `db` is optional so existing callers that have no session (and the
+    # unauthenticated /auth/verify-business response) are unchanged.
+    if db is not None:
+        sub = get_subscription(db, b.id)
+        plan_id = ((sub.plan if sub and sub.plan else b.subscription_plan) or "starter").strip().lower()
+        payload["ai_included"] = bool(PLAN_CONFIG.get(plan_id, PLAN_CONFIG["starter"]).get("included_ai_credits"))
+    return payload
 
 # =============================================================================
 # GENERAL CATALOG IDENTITY (hardening pass)
@@ -6231,7 +6250,7 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
     return {"access_token": access, "token_type": "bearer", "business_code": new_biz.business_code,
             "trial_end_at": to_utc_iso(trial_end), "card_last4": new_sub.card_last4, "card_type": new_sub.card_type,
             "permissions": get_effective_permissions(admin),
-            **serialize_business(new_biz), **serialize_user(admin)}
+            **serialize_business(new_biz, db), **serialize_user(admin)}
 
 @app.post("/auth/verify-business")
 def verify_business(data: BusinessVerifyRequest, request: Request, db: Session = Depends(get_db)):
@@ -6324,7 +6343,7 @@ def admin_login(data: AdminLoginRequest, request: Request, response: Response, d
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     access = issue_token(user, db)
     set_refresh_cookie(response, create_refresh_session(db, user))
-    return {"access_token": access, "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz), **serialize_user(user)}
+    return {"access_token": access, "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz, db), **serialize_user(user)}
 
 @app.post("/auth/employee-login")
 def employee_login(data: EmployeeLoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
@@ -6334,7 +6353,7 @@ def employee_login(data: EmployeeLoginRequest, request: Request, response: Respo
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     access = issue_token(user, db)
     set_refresh_cookie(response, create_refresh_session(db, user))
-    return {"access_token": access, "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz), **serialize_user(user)}
+    return {"access_token": access, "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz, db), **serialize_user(user)}
 
 @app.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), request: Request = None, response: Response = None, db: Session = Depends(get_db)):
@@ -6346,12 +6365,12 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), request: Request = N
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     access = issue_token(user, db)
     if response is not None: set_refresh_cookie(response, create_refresh_session(db, user))
-    return {"access_token": access, "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz), **serialize_user(user)}
+    return {"access_token": access, "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz, db), **serialize_user(user)}
 
 @app.get("/auth/me")
 def auth_me(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-    return {"permissions": get_effective_permissions(user), **serialize_business(biz), **serialize_user(user)}
+    return {"permissions": get_effective_permissions(user), **serialize_business(biz, db), **serialize_user(user)}
 
 @app.post("/auth/logout")
 def auth_logout(response: Response, payload_body: Optional[PresenceHeartbeatRequest] = None, token: str = Depends(oauth2_scheme), refresh_token: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME), user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
@@ -6382,7 +6401,7 @@ def _reject_refresh(response: Response) -> Response:
 
 def _issue_refresh_success(db: Session, user: User) -> dict:
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-    return {"access_token": issue_token(user, db), "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz), **serialize_user(user)}
+    return {"access_token": issue_token(user, db), "token_type": "bearer", "permissions": get_effective_permissions(user), **serialize_business(biz, db), **serialize_user(user)}
 
 @app.post("/auth/refresh")
 def auth_refresh(response: Response, refresh_token: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME), db: Session = Depends(get_db)):

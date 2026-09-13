@@ -220,7 +220,7 @@ def install(g):
             "unread_count": sum(not n.is_read for n in notifications)}, "verified_at": _utcnow().isoformat()}
         return jsonable_encoder({"schema_version": 2, "verified_at": _utcnow(),
             "user": {**g["serialize_user"](user), "business_id": user.business_id},
-            "business": g["serialize_business"](business), "permissions": permissions(user),
+            "business": g["serialize_business"](business, db), "permissions": permissions(user),
             "products": products, "suppliers": suppliers, "stocks": stocks,
             "warehouses": g["list_warehouses"](user, db), "locations": locations,
             "days": days, "sales": [], "sales_history": history, "expenses": expenses,

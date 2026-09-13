@@ -17232,17 +17232,49 @@
         // Updated by checkSubscriptionWarningForDashboard() on every login/refresh, and
         // again by renderBillingAiUsage() whenever Settings → Subscription & Billing is
         // opened, both from the server-authoritative /subscription/usage response.
-        // Defaults to true so the button isn't wrongly shown as locked before that first
-        // fetch resolves — the backend (require_ai_access in main.py) is the real
-        // enforcement either way, this is only ever used to decide whether to show a
-        // helpful upgrade prompt early.
-        let currentAiEntitled = true;
+        // Defaults to FALSE and fails closed. It previously defaulted to true so the
+        // button was never briefly shown as locked before that first fetch resolved —
+        // but both correcting fetches are Admin/Manager-only, so on the Staff path the
+        // correction never ran at all and Starter Staff were shown AI Center and
+        // Predictive. An entitlement flag whose default is "allow" is the wrong way
+        // round: treat unknown entitlement as not entitled until proven otherwise.
+        //
+        // The brief-lock concern the old default addressed is handled instead by
+        // applyAiEntitlement(), which sets this from the authentication payload's
+        // ai_included (serialize_business in main.py) on sign-in and on every session
+        // restore — a surface every role can read — so the value is known immediately
+        // rather than after a billing/dashboard fetch that some roles never make.
+        //
+        // The backend (require_ai_access in main.py) remains the real enforcement; this
+        // only decides whether to open the feature or show the upgrade prompt.
+        let currentAiEntitled = false;
         // Business Brain is deterministic/internal intelligence, not
         // billable external AI (section 13) — it must never be blocked
         // behind AI-plan entitlement, on the frontend or the backend (see
         // main.py's business_brain()/business_brain_history(), which no
         // longer depend on require_ai_access either).
         const AI_GATED_FEATURE_NAMES = new Set(['ai center', 'predictive monitor']);
+
+        // Applies AI entitlement from an authentication payload (sign-in, /auth/me,
+        // /auth/refresh) or an offline snapshot's business object. This is the only
+        // entitlement source every role receives; the /subscription/usage corrections
+        // in renderBillingAiUsage() and checkSubscriptionWarningForDashboard() still
+        // run for Admin/Manager and simply re-affirm the same value.
+        //
+        // A missing ai_included is deliberately NOT treated as "entitled": if the field
+        // is absent the fail-closed default stands. That keeps a frontend deployed
+        // ahead of its backend safe rather than silently reopening the gate.
+        // Re-applies the settings menu when the value actually changes, because
+        // settingsMenuVisibility() reads currentAiEntitled for "AI Credits & Usage"
+        // and applyRoleRestrictions() runs BEFORE this on the session-restore path.
+        // Without this an entitled Admin would lose that destination after a reload
+        // until some unrelated event happened to re-render the nav.
+        function applyAiEntitlement(source) {
+            if (!source || typeof source.ai_included !== 'boolean') return;
+            if (currentAiEntitled === source.ai_included) return;
+            currentAiEntitled = source.ai_included;
+            try { applySettingsMenuPermissions(); } catch (_) { /* nav not mounted yet; the next render picks it up */ }
+        }
 
         function featureDisplayName(featureName) {
             const map = {
@@ -18458,7 +18490,7 @@
             employeeDirectoryUsers = [];
             posCart = [];
             billingUsageCache = null;
-            currentAiEntitled = true; // same default a fresh guest load starts with
+            currentAiEntitled = false; // same fail-closed default a fresh guest load starts with
             inventoryStatusCounts = { healthy: 0, low: 0, out: 0 };
             inventoryStatusFilter = null;
             selectedWarehouseFilter = "ALL";
@@ -19383,6 +19415,7 @@
                     startAuthRefreshHeartbeat();
                     startPresenceHeartbeat(); // Presence session established immediately on a fresh sign-in — never left to some unrelated screen (section 21)
                     currentEffectivePermissions = data.permissions || {};
+                    applyAiEntitlement(data);
                     scheduleSyncSoon(); // a fresh sign-in is one of the sensible moments to drain any pending offline work
 
                     verifiedOnboardingReference = null; // consumed server-side; never reusable
@@ -19638,6 +19671,7 @@
                 startAuthRefreshHeartbeat();
                 startPresenceHeartbeat(); // Presence session established immediately on a fresh sign-in — never left to some unrelated screen (section 21)
                 currentEffectivePermissions = data.permissions || {};
+                applyAiEntitlement(data);
                 scheduleSyncSoon(); // a fresh sign-in is one of the sensible moments to drain any pending offline work
 
                 closeBusinessAuthModal();
@@ -25515,6 +25549,7 @@
                     // fresh page load/app-startup session restoration.
                     startPresenceHeartbeat();
                     currentEffectivePermissions = data.permissions || {};
+                    applyAiEntitlement(data);
                     scheduleSyncSoon();
                     return true;
                 } catch (e) {
@@ -25551,6 +25586,7 @@
             currentUserProfile = { ...snapshot.user, role: String(snapshot.user.role || grant?.role || "").toLowerCase(), auth_version: snapshot.user.auth_version ?? grant?.auth_version };
             businessProfile = { ...snapshot.business, id: snapshot.business.id || snapshot.business.business_id };
             currentEffectivePermissions = snapshot.permissions || grant?.permissions || {};
+            applyAiEntitlement(snapshot.business); // snapshot carries the same ai_included the auth payload does
             globalProducts = Array.isArray(snapshot.products) ? snapshot.products : [];
             globalSuppliers = Array.isArray(snapshot.suppliers) ? snapshot.suppliers : [];
             warehouseRecords = Array.isArray(snapshot.warehouses) ? snapshot.warehouses : [];
@@ -25767,6 +25803,7 @@
                 startAuthRefreshHeartbeat();
                 startPresenceHeartbeat(); // Presence session established immediately (section 21)
                 currentEffectivePermissions = data.permissions || {};
+                applyAiEntitlement(data);
                 scheduleSyncSoon(); // session validated — a sensible moment to drain any pending offline work
                 if (currentUserProfile.must_change_password) {
                     const lock = document.getElementById("password-change-modal");
