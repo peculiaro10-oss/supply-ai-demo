@@ -15,3 +15,6 @@ __pycache__/
 # Capacitor web root — a generated copy of frontend/ (see MOBILE_PACKAGING.md)
 www/
 node_modules/
+
+# BUILD-001 APK output (build-apk.bat <target>)
+/build/

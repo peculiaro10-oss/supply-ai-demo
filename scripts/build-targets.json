@@ -1,0 +1,19 @@
+{
+  "//": "The only place a Cauldra frontend build may learn which backend it points at. scripts/build-target-config.js validates every entry and refuses anything not declared here. Adding a target is a tracked, reviewable change.",
+  "defaultTarget": null,
+  "sourceTarget": "web",
+  "targets": {
+    "web": {
+      "apiBaseUrl": "",
+      "description": "Ordinary web deployment served by backend/main.py from frontend/. Same-origin; no override is emitted. This is the target the checked-in frontend/js/build-target.js must match."
+    },
+    "qa": {
+      "apiBaseUrl": "https://cauldra-qa.up.railway.app",
+      "description": "QA service cauldra-qa. The only target permitted for QA/audit Android builds."
+    },
+    "production": {
+      "apiBaseUrl": "https://cauldra.up.railway.app",
+      "description": "Production service supply-ai-demo. Shipping Android releases only."
+    }
+  }
+}
