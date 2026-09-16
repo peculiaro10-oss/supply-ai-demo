@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.example.cauldra",
+      "sha256_cert_fingerprints": [
+        "83:71:CC:48:D7:73:68:4A:14:A6:64:08:07:B3:96:73:17:8A:6E:7A:8F:A1:1D:E9:05:E4:D1:27:85:48:DB:10"
+      ]
+    }
+  }
+]
