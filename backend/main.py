@@ -76,6 +76,8 @@ INDEX_PATH = FRONTEND_DIR / "index.html"
 ASSETS_DIR = FRONTEND_DIR / "assets"
 CSS_DIR = FRONTEND_DIR / "css"
 JS_DIR = FRONTEND_DIR / "js"
+WELL_KNOWN_DIR = FRONTEND_DIR / ".well-known"
+ASSETLINKS_PATH = WELL_KNOWN_DIR / "assetlinks.json"
 # Platform Owner Control Panel (V31): a COMPLETELY SEPARATE static bundle,
 # never mounted under /frontend, /assets, /css or /js, and never linked from
 # the customer app. See the "CAULDRA PLATFORM OWNER CONTROL PANEL" section
@@ -16574,6 +16576,21 @@ def public_app_config():
     internal, database/Supabase/Sentry/Paystack credentials, or any other
     environment secret — see section 6 of the About/legal requirements."""
     return {"version": CAULDRA_VERSION, "build": CAULDRA_BUILD, "contact_email": CAULDRA_CONTACT_EMAIL}
+
+@app.get("/.well-known/assetlinks.json", include_in_schema=False)
+def serve_android_assetlinks():
+    """Serve Android Digital Asset Links from the canonical frontend source.
+
+    Android App Links requires this exact HTTPS path to return the JSON file
+    directly, without authentication or redirects.
+    """
+    if not ASSETLINKS_PATH.is_file():
+        raise HTTPException(status_code=404, detail="Not found.")
+    return FileResponse(
+        str(ASSETLINKS_PATH),
+        media_type="application/json",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 @app.get("/")
 def serve_index():
