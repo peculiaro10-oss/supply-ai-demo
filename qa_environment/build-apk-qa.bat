@@ -9,26 +9,29 @@ rem  "-x verifyCauldraFrontend" because that injection broke it. Both of those
 rem  are gone. QA is now an ordinary, supported, fully verified build target.
 rem
 rem  It is kept only as a convenience wrapper that also drops the APK where the
-rem  QA harness expects it.
+rem  QA harness expects it. Every path is resolved from this script's own
+rem  location, never from the caller's working directory.
 rem ============================================================================
-cd /d "%~dp0.."
+for %%I in ("%~dp0..") do set "REPO=%%~fI"
+cd /d "%REPO%"
 
-call build-apk.bat qa
+call "%REPO%\build-apk.bat" qa
 if errorlevel 1 exit /b 1
 
-set "APK_PATH=%cd%\build\apk\cauldra-qa.apk"
+set "APK_PATH=%REPO%\build\apk\cauldra-qa.apk"
 if not exist "%APK_PATH%" goto :missing
 
-if not exist "qa_environment\APK" mkdir "qa_environment\APK"
-copy /Y "%APK_PATH%" "qa_environment\APK\cauldra-qa.apk" >nul
+if not exist "%REPO%\qa_environment\APK" mkdir "%REPO%\qa_environment\APK"
+copy /Y "%APK_PATH%" "%REPO%\qa_environment\APK\cauldra-qa.apk" >nul
 if errorlevel 1 goto :failed
 
 echo.
-echo QA APK: %cd%\qa_environment\APK\cauldra-qa.apk
-certutil -hashfile "qa_environment\APK\cauldra-qa.apk" SHA256
+echo QA APK: %REPO%\qa_environment\APK\cauldra-qa.apk
+certutil -hashfile "%REPO%\qa_environment\APK\cauldra-qa.apk" SHA256
+
 echo.
 echo Re-checking the copy that will actually be installed:
-call node scripts\verify-apk-target.js --apk="qa_environment\APK\cauldra-qa.apk" --target=qa
+call node "%REPO%\scripts\verify-apk-target.js" --apk="%REPO%\qa_environment\APK\cauldra-qa.apk" --target=qa
 if errorlevel 1 goto :failed
 exit /b 0
 
