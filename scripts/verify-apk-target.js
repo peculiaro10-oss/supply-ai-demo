@@ -82,6 +82,9 @@ function main() {
     // The packaged manifest names a target; the registry -- not the artifact --
     // says what that name means. Unknown names fail closed here.
     const declared = buildTarget.resolveTarget(manifest.target);
+    if (!declared.apiBaseUrl) {
+        failures.push('APK declares same-origin target "' + declared.name + '"; native builds must target an explicit backend (qa or production)');
+    }
     if (!override.equals(buildTarget.renderTargetFile(declared))) {
         failures.push('packaged ' + buildTarget.EMITTED_FILE + ' does not match the registry rendering of target "' + declared.name + '"');
     }

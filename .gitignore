@@ -19,5 +19,5 @@ node_modules/
 # BUILD-001 APK output (build-apk.bat <target>)
 /build/
 
-# QA harness APK copy (qa_environmentuild-apk-qa.bat) - a QA-targeted binary, never committed
+# QA harness APK copy (qa_environment\build-apk-qa.bat) - a QA-targeted binary, never committed
 /qa_environment/APK/

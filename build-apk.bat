@@ -74,8 +74,10 @@ exit /b 0
 echo.
 echo ERROR: no build target given.
 echo.
-echo     build-apk.bat qa           -^> https://cauldra-qa.up.railway.app
-echo     build-apk.bat production   -^> https://cauldra.up.railway.app
+echo     build-apk.bat qa
+echo     build-apk.bat production
+echo.
+echo Each target's backend is declared once, in scripts\build-targets.json.
 echo.
 echo There is no default on purpose: an unstated target would ship production.
 goto :failed

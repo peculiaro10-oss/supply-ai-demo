@@ -6,20 +6,23 @@
 ## Android workflow
 
 From the repository root, install locked dependencies once (and whenever the
-lockfile changes), then prepare before every Android build:
+lockfile changes), then prepare before every Android build **with an explicit
+target**:
 
 ```sh
 npm ci
-npm run android:prepare
+npm run android:prepare:prod   # production -> https://cauldra.cohren.com
+npm run android:prepare:qa     # QA         -> https://cauldra-qa.up.railway.app
 ```
 
-Preparation runs build:www, Capacitor Android sync, then full SHA-256 parity
-verification. `npm run cap:sync:android` is an alias. `npm run cap:sync` prepares
-the web bundle, syncs installed platforms, and checks Android parity.
-`npm run build:www` regenerates only www. A raw `npx cap sync android` does not
+Preparation runs build:www for that target, Capacitor Android sync, then full
+SHA-256 parity verification. There is no default target: `npm run build:www`,
+`npm run android:prepare`, `npm run cap:sync` and `npm run cap:sync:android` fail
+unless `CAULDRA_BUILD_TARGET` is set. A raw `npx cap sync android` does not
 regenerate frontend output; Gradle still refuses stale output.
 
-With JDK 21 configured, run `build-apk.bat` on Windows, or open Android Studio
+With JDK 21 configured, run `build-apk.bat production` (or `build-apk.bat qa`) on
+Windows, or open Android Studio
 after preparation and choose Build. Set Android Studio's Gradle JDK to a full
 JDK 21 with jlink. Every normal variant's preBuild depends on
 verifyCauldraFrontend, an always-executed task. It exits nonzero on stale/missing
@@ -28,7 +31,7 @@ calls npm or Gradle recursively. Do not exclude this task with Gradle -x.
 
 Do not manually copy app.js or index.html between generated directories. If
 verification fails, edit frontend/, fix the missing dependency/source issue,
-then rerun android:prepare. `tests/test_native_bundle.cjs` demonstrates negative
+then rerun android:prepare:<qa|prod>. `tests/test_native_bundle.cjs` demonstrates negative
 checks using its own disposable copy after preparation.
 
 `www/build-manifest.json` contains the app version, content-derived source
@@ -39,9 +42,19 @@ assets must remain byte-identical across the three trees.
 ## API, cookies and returns
 
 The packaged page loads locally; keep server.url unset. Android's configured
-origin is https://localhost. The native API default remains
-https://cauldra.up.railway.app. The API meta override is empty in source; any
-intentional future override belongs in frontend/index.html before preparation.
+origin is https://localhost.
+
+Every build declares its backend explicitly (BUILD-001). Targets live only in
+scripts/build-targets.json: `qa` -> https://cauldra-qa.up.railway.app and
+`production` -> **https://cauldra.cohren.com**, the canonical production address.
+https://cauldra.up.railway.app is the underlying Railway service URL for that
+same deployment; it is infrastructure, never a build target. Build with
+`build-apk.bat <qa|production>` or `npm run android:prepare:<qa|prod>`; there is
+no default target. Confirm every APK before installing or distributing it with
+`npm run verify:apk -- --apk=<path> --target=<name>`. The fallback constant
+NATIVE_PRODUCTION_API_BASE_URL in frontend/js/app.js must equal the production
+target; the parity gate fails otherwise. Never hand-inject an override and never
+exclude verifyCauldraFrontend with Gradle -x.
 
 Credentialed CORS must explicitly allow https://localhost. The backend scopes
 Secure/HttpOnly/SameSite=None refresh cookies to the allowed native origin;

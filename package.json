@@ -2,7 +2,7 @@
   "name": "cauldra",
   "version": "1.0.0",
   "private": true,
-  "description": "Cauldra â€” Inventory & Procurement Management. Native Android/iOS packaging via Capacitor around the existing FastAPI-served web frontend.",
+  "description": "Cauldra \u00e2\u20ac\u201d Inventory & Procurement Management. Native Android/iOS packaging via Capacitor around the existing FastAPI-served web frontend.",
   "scripts": {
     "sync:build-target": "node scripts/sync-source-build-target.js",
     "build:www": "node scripts/build-www.js",

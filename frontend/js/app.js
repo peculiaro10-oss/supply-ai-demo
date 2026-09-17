@@ -7,14 +7,18 @@
         // resolution would silently point every request at nothing. See
         // MOBILE_PACKAGING.md for how to configure the real URL per platform.
         //
-        // Native production backend. This is the ONLY thing that needs to
-        // change when the backend moves (e.g. to https://api.cauldra.cohren.com)
-        // — update this one constant, nothing else in resolveApiBaseUrl().
+        // Native production backend — the canonical production address.
+        // It MUST equal targets.production.apiBaseUrl in
+        // scripts/build-targets.json; scripts/verify-native-bundle.js fails
+        // every build if the two disagree (BUILD-001). Every supported native
+        // build also emits an explicit override (js/build-target.js), so this
+        // is only the last-resort fallback. https://cauldra.up.railway.app is
+        // the underlying Railway service URL, not a client-facing address.
         // Never point this at a device-local address: on a real Android
         // device 127.0.0.1/http://127.0.0.1:8000 resolves to the device
         // itself, not a real backend, and silently produces requests that
         // can never succeed.
-        const NATIVE_PRODUCTION_API_BASE_URL = "https://cauldra.up.railway.app";
+        const NATIVE_PRODUCTION_API_BASE_URL = "https://cauldra.cohren.com";
         function resolveApiBaseUrl() {
             if (window.CAULDRA_API_BASE_URL) return window.CAULDRA_API_BASE_URL;
             const metaTag = document.querySelector('meta[name="cauldra-api-base-url"]');

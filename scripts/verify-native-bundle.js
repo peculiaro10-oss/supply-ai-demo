@@ -62,6 +62,13 @@ function verify(native = true, target) {
         ? targetFromGeneratedManifest()
         : buildTarget.resolveTarget(typeof target === 'object' ? target.name : target);
     const expected = sourceManifest(resolved), failures = [];
+    // A packaged native shell runs at https://localhost, where "same origin" is never
+    // the API. The same-origin `web` target emits no override, so a native build made
+    // from it would silently depend on the app.js fallback. Refuse it: every native
+    // bundle must name its backend explicitly.
+    if (native && !resolved.apiBaseUrl) {
+        failures.push('Build target "' + resolved.name + '" is same-origin (web only) and cannot be packaged for Android; use qa or production');
+    }
     for (const rel of ['index.html',buildTarget.EMITTED_FILE,'js/app.js','js/payments.js','js/offline.js','css/base.css','css/payments.css','css/offline.css','sw.js'])
         if (!expected.files[rel]) failures.push('frontend/' + rel + ' missing');
     const dirs = ['www'];
@@ -92,6 +99,24 @@ function verify(native = true, target) {
         if (!fs.readFileSync(file).equals(buildTarget.renderTargetFile(resolved))) {
             failures.push(dir+'/'+buildTarget.EMITTED_FILE+' does not declare build target ' + resolved.name + ' (' + (resolved.apiBaseUrl||'same origin') + ')');
         }
+    }
+    // One canonical production address. The registry's production target and the
+    // native last-resort fallback in app.js are two spellings of the same fact;
+    // if they ever disagree, an override-less native shell and a declared
+    // production build would talk to different hosts. Checked on every build,
+    // whatever the target, so the drift is caught long before a release.
+    {
+        const declarations = [...fs.readFileSync(path.join(root,'frontend/js/app.js'),'utf8')
+            .matchAll(/const NATIVE_PRODUCTION_API_BASE_URL = "([^"]*)";/g)].map(m => m[1]);
+        let production;
+        try { production = buildTarget.resolveTarget('production'); }
+        catch (error) { failures.push('scripts/build-targets.json must declare a valid production target: ' + error.message); }
+        if (declarations.length !== 1) {
+            failures.push('frontend/js/app.js must declare NATIVE_PRODUCTION_API_BASE_URL exactly once (found ' + declarations.length + ')');
+        } else if (production && declarations[0] !== production.apiBaseUrl) {
+            failures.push('frontend/js/app.js NATIVE_PRODUCTION_API_BASE_URL (' + declarations[0] + ') disagrees with the production build target (' + production.apiBaseUrl + ') in scripts/build-targets.json');
+        }
+        if (production && !production.apiBaseUrl) failures.push('production build target must not be same-origin');
     }
     // An override that loads after app.js is an override that never applied.
     for (const dir of ['frontend',...dirs]) {
@@ -163,7 +188,7 @@ function verify(native = true, target) {
             if (!appGradle.includes('androidx.biometric:biometric:1.1.0')) failures.push('Stable AndroidX Biometric dependency missing');
         } catch (_) { failures.push('Android Capacitor config/plugin metadata missing'); }
     }
-    if (failures.length) throw new Error(failures.join('\n')+'\nRun npm run android:prepare from the repository root.');
+    if (failures.length) throw new Error(failures.join('\n')+'\nRebuild from the repository root with an explicit target: npm run android:prepare:qa or npm run android:prepare:prod.');
     console.log('PASS bundle parity: ' + expected.buildId + '  [target ' + resolved.name + ' -> ' + (resolved.apiBaseUrl || 'same origin') + ']');
 }
 module.exports = {sourceManifest, verify};
