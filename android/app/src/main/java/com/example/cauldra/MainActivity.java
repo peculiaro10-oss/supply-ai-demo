@@ -12,7 +12,8 @@ import com.getcapacitor.BridgeActivity;
  * on the backend) surviving a full app restart. The app's WebView runs from
  * its own local-bundle origin (https://localhost, per capacitor.config.json's
  * androidScheme) and calls a different origin
- * (https://cauldra.up.railway.app) for POST /auth/refresh with
+ * (the build target's API origin -- in production https://cauldra.cohren.com,
+ * see scripts/build-targets.json) for POST /auth/refresh with
  * credentials:"include" — from Android's CookieManager's point of view that
  * is a cross-site ("third-party") cookie exchange, and Android's
  * CookieManager withholds third-party cookies by default unless a WebView

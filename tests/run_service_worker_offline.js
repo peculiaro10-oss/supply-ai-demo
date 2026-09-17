@@ -5,6 +5,10 @@ const port = Number(process.argv[2] || 9333);
 const originPort = Number(process.argv[3] || 8769);
 const origin = `http://127.0.0.1:${originPort}`;
 const frontend = path.resolve(__dirname, '..', 'frontend');
+// Read the live cache name rather than pinning it: sw.js is REQUIRED to bump it on
+// every app-shell change, and a pinned literal silently goes stale on each bump.
+const shellCacheName = (fs.readFileSync(path.join(frontend, 'sw.js'), 'utf8').match(/const SHELL_CACHE = "([^"]+)";/) || [])[1];
+if (!shellCacheName) throw new Error('SHELL_CACHE not found in frontend/sw.js');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.woff2': 'font/woff2' };
 
@@ -64,7 +68,7 @@ async function connect(url) {
     await pause(2000);
   }
   const cached = await cdp.call('Runtime.evaluate', {
-    expression: `(async()=>{const cacheName='cauldra-shell-v8-offline-first';const cache=await caches.open(cacheName);const urls=['/','/js/app.js','/js/offline.js','/css/offline.css'];const found={};for(const url of urls)found[url]=!!(await cache.match(new Request(location.origin+url)));found.controlled=!!navigator.serviceWorker.controller;found.cacheNames=await caches.keys();found.entries=(await cache.keys()).map(request=>new URL(request.url).pathname);return found})()`,
+    expression: `(async()=>{const cacheName=${JSON.stringify(shellCacheName)};const cache=await caches.open(cacheName);const urls=['/','/js/app.js','/js/offline.js','/css/offline.css'];const found={};for(const url of urls)found[url]=!!(await cache.match(new Request(location.origin+url)));found.controlled=!!navigator.serviceWorker.controller;found.cacheNames=await caches.keys();found.entries=(await cache.keys()).map(request=>new URL(request.url).pathname);return found})()`,
     awaitPromise: true,
     returnByValue: true,
   });

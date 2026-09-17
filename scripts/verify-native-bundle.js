@@ -1,6 +1,8 @@
 "use strict";
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
 const root = path.resolve(__dirname, '..');
+const buildTarget = require('./build-target-config');
+const NL = '\n';
 const hash = p => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 function inventory(dir, prefix = '') {
     const result = {};
@@ -12,8 +14,18 @@ function inventory(dir, prefix = '') {
     }
     return result;
 }
-function sourceManifest() {
+// BUILD-001: a manifest describes a bundle built for ONE declared backend target.
+// The expected bytes of js/build-target.js are re-derived here from the tracked
+// registry -- never read back from the artifact being checked.
+function sourceManifest(target) {
+    const resolved = (target && typeof target === 'object') ? buildTarget.resolveTarget(target.name) : buildTarget.resolveTarget(target);
     const files = inventory(path.join(root,'frontend'));
+    const sourceBytes = buildTarget.renderTargetFile(buildTarget.sourceTargetName());
+    if (files[buildTarget.EMITTED_FILE] !== crypto.createHash('sha256').update(sourceBytes).digest('hex')) {
+        throw new Error('frontend/' + buildTarget.EMITTED_FILE + ' has drifted from scripts/build-targets.json.' + NL +
+            'It is generated, not hand-written: restore it with `npm run sync:build-target`.');
+    }
+    files[buildTarget.EMITTED_FILE] = crypto.createHash('sha256').update(buildTarget.renderTargetFile(resolved)).digest('hex');
     const html = fs.readFileSync(path.join(root,'frontend/index.html'),'utf8');
     for (const match of html.matchAll(/(?:src|href)="(\/[^"#]+)"/g)) {
         const asset = match[1].slice(1).split('?')[0];
@@ -22,12 +34,42 @@ function sourceManifest() {
     const version = JSON.parse(fs.readFileSync(path.join(root,'package.json'))).version;
     const configHash = hash(path.join(root,'capacitor.config.json'));
     const dependencyHash = hash(path.join(root,'package-lock.json'));
-    const buildId = crypto.createHash('sha256').update(JSON.stringify({version, configHash, dependencyHash, files})).digest('hex');
-    return {version, sourceVersion:buildId, buildId, configHash, dependencyHash, files};
+    const buildId = crypto.createHash('sha256').update(JSON.stringify({version, target:resolved.name, configHash, dependencyHash, files})).digest('hex');
+    return {version, target:resolved.name, apiBaseUrl:resolved.apiBaseUrl, sourceVersion:buildId, buildId, configHash, dependencyHash, files};
 }
-function verify(native = true) {
-    const expected = sourceManifest(), failures = [];
-    for (const rel of ['index.html','js/app.js','js/payments.js','js/offline.js','css/base.css','css/payments.css','css/offline.css','sw.js'])
+// The target is an input, not a belief. When it is not supplied explicitly (Gradle
+// calls this with no arguments) it is read from the generated manifest and then
+// re-validated against the tracked registry, so an artifact cannot assert its own
+// correctness: the name must be declared in scripts/build-targets.json, and the
+// emitted file must match the bytes this repository renders for that name.
+function targetFromGeneratedManifest() {
+    const file = path.join(root,'www','build-manifest.json');
+    let declared;
+    try { declared = JSON.parse(fs.readFileSync(file,'utf8')).target; }
+    catch (_) {
+        throw new Error('www/build-manifest.json missing or unreadable, so the build target is unknown.' + NL +
+            'Run: npm run build:www -- --target=<' + buildTarget.targetNames().join('|') + '>');
+    }
+    if (!declared) {
+        throw new Error('www/build-manifest.json declares no build target.' + NL +
+            'This bundle predates BUILD-001; rebuild it with an explicit --target.');
+    }
+    return buildTarget.resolveTarget(declared);
+}
+
+function verify(native = true, target) {
+    const resolved = (target === undefined || target === null || target === '')
+        ? targetFromGeneratedManifest()
+        : buildTarget.resolveTarget(typeof target === 'object' ? target.name : target);
+    const expected = sourceManifest(resolved), failures = [];
+    // A packaged native shell runs at https://localhost, where "same origin" is never
+    // the API. The same-origin `web` target emits no override, so a native build made
+    // from it would silently depend on the app.js fallback. Refuse it: every native
+    // bundle must name its backend explicitly.
+    if (native && !resolved.apiBaseUrl) {
+        failures.push('Build target "' + resolved.name + '" is same-origin (web only) and cannot be packaged for Android; use qa or production');
+    }
+    for (const rel of ['index.html',buildTarget.EMITTED_FILE,'js/app.js','js/payments.js','js/offline.js','css/base.css','css/payments.css','css/offline.css','sw.js'])
         if (!expected.files[rel]) failures.push('frontend/' + rel + ' missing');
     const dirs = ['www'];
     if (native) dirs.push('android/app/src/main/assets/public');
@@ -48,6 +90,45 @@ function verify(native = true) {
             }
         } catch (_) { failures.push(dir+'/build-manifest.json missing or unreadable'); }
     }
+    // BUILD-001: the emitted override must match the declared target byte-for-byte in
+    // every generated tree. Asserted explicitly so a wrong-target build reports the
+    // target it actually carries instead of a nondescript stale-file hash mismatch.
+    for (const dir of dirs) {
+        const file = path.join(root,dir,buildTarget.EMITTED_FILE);
+        if (!fs.existsSync(file)) { failures.push(dir+'/'+buildTarget.EMITTED_FILE+' missing; rebuild with an explicit --target'); continue; }
+        if (!fs.readFileSync(file).equals(buildTarget.renderTargetFile(resolved))) {
+            failures.push(dir+'/'+buildTarget.EMITTED_FILE+' does not declare build target ' + resolved.name + ' (' + (resolved.apiBaseUrl||'same origin') + ')');
+        }
+    }
+    // One canonical production address. The registry's production target and the
+    // native last-resort fallback in app.js are two spellings of the same fact;
+    // if they ever disagree, an override-less native shell and a declared
+    // production build would talk to different hosts. Checked on every build,
+    // whatever the target, so the drift is caught long before a release.
+    {
+        const declarations = [...fs.readFileSync(path.join(root,'frontend/js/app.js'),'utf8')
+            .matchAll(/const NATIVE_PRODUCTION_API_BASE_URL = "([^"]*)";/g)].map(m => m[1]);
+        let production;
+        try { production = buildTarget.resolveTarget('production'); }
+        catch (error) { failures.push('scripts/build-targets.json must declare a valid production target: ' + error.message); }
+        if (declarations.length !== 1) {
+            failures.push('frontend/js/app.js must declare NATIVE_PRODUCTION_API_BASE_URL exactly once (found ' + declarations.length + ')');
+        } else if (production && declarations[0] !== production.apiBaseUrl) {
+            failures.push('frontend/js/app.js NATIVE_PRODUCTION_API_BASE_URL (' + declarations[0] + ') disagrees with the production build target (' + production.apiBaseUrl + ') in scripts/build-targets.json');
+        }
+        if (production && !production.apiBaseUrl) failures.push('production build target must not be same-origin');
+    }
+    // An override that loads after app.js is an override that never applied.
+    for (const dir of ['frontend',...dirs]) {
+        const file = path.join(root,dir,'index.html');
+        if (!fs.existsSync(file)) continue;
+        const html = fs.readFileSync(file,'utf8');
+        const overrideAt = html.indexOf('src="/'+buildTarget.EMITTED_FILE+'"');
+        const appAt = html.indexOf('src="/js/app.js"');
+        if (overrideAt < 0) failures.push(dir+'/index.html must load /'+buildTarget.EMITTED_FILE);
+        else if (appAt >= 0 && overrideAt > appAt) failures.push(dir+'/index.html must load /'+buildTarget.EMITTED_FILE+' BEFORE /js/app.js');
+    }
+
     // A concrete regression assertion on source AND both generated shells.
     for (const dir of ['frontend',...dirs]) {
         const file = path.join(root,dir,'index.html');
@@ -107,11 +188,12 @@ function verify(native = true) {
             if (!appGradle.includes('androidx.biometric:biometric:1.1.0')) failures.push('Stable AndroidX Biometric dependency missing');
         } catch (_) { failures.push('Android Capacitor config/plugin metadata missing'); }
     }
-    if (failures.length) throw new Error(failures.join('\n')+'\nRun npm run android:prepare from the repository root.');
-    console.log('PASS bundle parity: ' + expected.buildId);
+    if (failures.length) throw new Error(failures.join('\n')+'\nRebuild from the repository root with an explicit target: npm run android:prepare:qa or npm run android:prepare:prod.');
+    console.log('PASS bundle parity: ' + expected.buildId + '  [target ' + resolved.name + ' -> ' + (resolved.apiBaseUrl || 'same origin') + ']');
 }
 module.exports = {sourceManifest, verify};
 if (require.main === module) {
-    try {verify(!process.argv.includes('--www-only'));}
+    const flag = process.argv.find(a => a.startsWith('--target='));
+    try {verify(!process.argv.includes('--www-only'), flag ? flag.slice('--target='.length) : undefined);}
     catch (error) {console.error(error.message); process.exitCode=1;}
 }

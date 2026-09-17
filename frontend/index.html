@@ -89,13 +89,13 @@
             safetyTimer = window.setTimeout(releaseAuthBootCloak, 12000);
         })();
     </script>
-    <!-- Backend base URL override for packaged Android/iOS builds (Capacitor),
-         where this page is loaded from a local bundle at a synthetic origin
-         (https://localhost) that is never the actual API server. Leave the
-         content attribute empty for the ordinary web deployment — same-origin
-         resolution (see resolveApiBaseUrl() in the main script) is correct
-         there and this tag is simply ignored. Set it to the real backend URL
-         (e.g. https://api.yourdomain.com) before building the native apps.
+    <!-- Legacy backend base URL override. KEEP THE CONTENT ATTRIBUTE EMPTY.
+         The ordinary web deployment resolves the API same-origin (see
+         resolveApiBaseUrl() in the main script). Packaged Android/iOS builds
+         no longer use this tag: every native build declares its backend
+         explicitly through /js/build-target.js, generated from
+         scripts/build-targets.json (production = https://cauldra.cohren.com).
+         Setting a value here would bypass that verified mechanism.
          See MOBILE_PACKAGING.md. -->
     <meta name="cauldra-api-base-url" content="">
     <script src="/assets/vendor/tailwindcss-3.4.17.js"></script>
@@ -3285,6 +3285,9 @@
         </section>
     </div>
 
+    <!-- BUILD-001: generated per build target; declares the backend this bundle
+         targets. Must stay ahead of every script that reads API_URL. -->
+    <script src="/js/build-target.js"></script>
     <script src="/js/payments.js"></script>
     <script src="/js/offline.js"></script>
     <script src="/js/app.js"></script>

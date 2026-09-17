@@ -1,0 +1,5 @@
+# BUILD-001 — js/build-target.js is generated per build target and verified
+# byte-for-byte against scripts/build-target-config.js in www/, in the Android
+# assets and inside the packaged APK. core.autocrlf=true would rewrite it on
+# checkout and break that hash on every fresh clone, so it is pinned to LF.
+frontend/js/build-target.js text eol=lf

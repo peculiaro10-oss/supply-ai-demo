@@ -4,7 +4,11 @@
   "private": true,
   "description": "Cauldra \u00e2\u20ac\u201d Inventory & Procurement Management. Native Android/iOS packaging via Capacitor around the existing FastAPI-served web frontend.",
   "scripts": {
+    "sync:build-target": "node scripts/sync-source-build-target.js",
     "build:www": "node scripts/build-www.js",
+    "build:www:web": "node scripts/build-www.js --target=web",
+    "build:www:qa": "node scripts/build-www.js --target=qa",
+    "build:www:prod": "node scripts/build-www.js --target=production",
     "cap:sync": "npm run build:www && npx cap sync && node scripts/verify-native-bundle.js",
     "cap:sync:android": "npm run android:prepare",
     "cap:sync:ios": "npm run build:www && npx cap sync ios",
@@ -13,7 +17,10 @@
     "cap:add:android": "npx cap add android",
     "cap:add:ios": "npx cap add ios",
     "android:prepare": "npm run build:www && npx cap sync android && node scripts/verify-native-bundle.js",
-    "verify:native": "node scripts/verify-native-bundle.js"
+    "android:prepare:qa": "npm run build:www:qa && npx cap sync android && node scripts/verify-native-bundle.js --target=qa",
+    "android:prepare:prod": "npm run build:www:prod && npx cap sync android && node scripts/verify-native-bundle.js --target=production",
+    "verify:native": "node scripts/verify-native-bundle.js",
+    "verify:apk": "node scripts/verify-apk-target.js"
   },
   "dependencies": {
     "@capacitor/app": "8.1.1",

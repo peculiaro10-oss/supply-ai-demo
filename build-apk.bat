@@ -45,8 +45,11 @@ if errorlevel 1 goto :failed
 
 set "APK_PATH=%~dp0android\app\build\outputs\apk\debug\app-debug.apk"
 if exist "%APK_PATH%" del /q "%APK_PATH%"
-cd android
-call gradlew.bat "-Dorg.gradle.java.home=%JAVA_HOME%" assembleDebug
+rem Explicit path: never rely on cmd searching the current directory. Hardened
+rem shells set NoDefaultCurrentDirectoryInExePath, under which a bare "gradlew.bat"
+rem is "not recognized" even from inside android\.
+cd /d "%~dp0android"
+call "%~dp0android\gradlew.bat" "-Dorg.gradle.java.home=%JAVA_HOME%" assembleDebug
 if errorlevel 1 goto :failed
 cd ..
 if not exist "%APK_PATH%" goto :missing_apk
@@ -71,8 +74,10 @@ exit /b 0
 echo.
 echo ERROR: no build target given.
 echo.
-echo     build-apk.bat qa           -^> https://cauldra-qa.up.railway.app
-echo     build-apk.bat production   -^> https://cauldra.cohren.com
+echo     build-apk.bat qa
+echo     build-apk.bat production
+echo.
+echo Each target's backend is declared once, in scripts\build-targets.json.
 echo.
 echo There is no default on purpose: an unstated target would ship production.
 goto :failed

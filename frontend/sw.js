@@ -16,7 +16,7 @@
 // below deletes every cache whose name doesn't match the current one, which
 // is the only thing standing between a fixed startup bug and a browser
 // silently keeping the old broken app.js around after the fix ships.
-const SHELL_CACHE = "cauldra-shell-v8-offline-first";
+const SHELL_CACHE = "cauldra-shell-v10-canonical-production";
 
 // Precached at install time. Kept small and static-only — anything dynamic
 // (products, sales, etc.) never belongs in this cache.
@@ -27,6 +27,7 @@ const SHELL_CACHE = "cauldra-shell-v8-offline-first";
 // fully usable offline otherwise. SHELL_ASSETS are third-party/vendor files
 // already versioned by filename, so they stay cache-first below.
 const SHELL_DOCUMENTS = [
+    "/js/build-target.js",
     "/js/app.js",
     "/js/payments.js",
     "/js/offline.js",

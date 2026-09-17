@@ -12,8 +12,8 @@
       "description": "QA service cauldra-qa. The only target permitted for QA/audit Android builds."
     },
     "production": {
-  "apiBaseUrl": "https://cauldra.cohren.com",
-  "description": "Production service supply-ai-demo via the canonical custom domain cauldra.cohren.com. Shipping Android releases only."
-}
+      "apiBaseUrl": "https://cauldra.cohren.com",
+      "description": "Canonical production address. Custom domain for Railway service supply-ai-demo, whose underlying service URL is https://cauldra.up.railway.app (infrastructure only; never a build target). Shipping Android releases only. Must equal NATIVE_PRODUCTION_API_BASE_URL in frontend/js/app.js; verify-native-bundle.js fails the build otherwise."
+    }
   }
 }
