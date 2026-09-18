@@ -40,8 +40,16 @@ ADMIN_URL = os.getenv("TEST_POSTGRES_ADMIN_URL", "").strip()
 # the same interpreter.
 _ENV_KEYS_TO_RESTORE = (
     "DATABASE_URL", "PGOPTIONS", "SUPPLY_AI_ENV", "SUPPLY_AI_SECRET_KEY",
-    "SUPPLY_AI_DB_SEARCH_PATH",
+    "SUPPLY_AI_DB_SEARCH_PATH", "DATABASE_POOL_SIZE", "DATABASE_MAX_OVERFLOW",
 )
+
+# Managed poolers cap CLIENT connections (Supabase session mode: 15, shared
+# with every other client of the same database, including a running app). The
+# application's own defaults (pool 5 + overflow 10) could claim all of them on
+# their own, so the test process is bounded well below the cap. main.py already
+# reads both variables; nothing about isolation depends on them.
+_TEST_POOL_SIZE = "2"
+_TEST_MAX_OVERFLOW = "2"
 
 
 @dataclass
@@ -138,7 +146,9 @@ def create_postgres_test_schema(prefix: str, extra_env: Optional[dict] = None) -
 
     schema = f"{prefix}_{uuid.uuid4().hex[:12]}"
     _validate_schema_name(schema, prefix)
-    admin_engine = create_engine(ADMIN_URL, pool_pre_ping=True)
+    # pool 1 + overflow 1: exactly the two concurrent connections the
+    # session-scoping proof needs, and no more.
+    admin_engine = create_engine(ADMIN_URL, pool_pre_ping=True, pool_size=1, max_overflow=1)
     _assert_session_scoped_backend(admin_engine)
     with admin_engine.begin() as connection:
         connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
@@ -149,6 +159,8 @@ def create_postgres_test_schema(prefix: str, extra_env: Optional[dict] = None) -
         "SUPPLY_AI_DB_SEARCH_PATH": schema,
         "SUPPLY_AI_ENV": "development",
         "SUPPLY_AI_SECRET_KEY": TEST_SECRET,
+        "DATABASE_POOL_SIZE": _TEST_POOL_SIZE,
+        "DATABASE_MAX_OVERFLOW": _TEST_MAX_OVERFLOW,
     })
     # PGOPTIONS is deliberately NOT set, and any inherited value is removed.
     # libpq forwards it as the `options` startup parameter, which managed
@@ -212,7 +224,7 @@ def create_postgres_test_schema(prefix: str, extra_env: Optional[dict] = None) -
         # the exact validated test schema; always restore process environment.
         admin_engine.dispose()
         try:
-            cleanup_engine = create_engine(ADMIN_URL, pool_pre_ping=True)
+            cleanup_engine = create_engine(ADMIN_URL, pool_pre_ping=True, pool_size=1, max_overflow=0)
             with cleanup_engine.begin() as connection:
                 connection.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
             cleanup_engine.dispose()
