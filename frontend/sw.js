@@ -16,7 +16,7 @@
 // below deletes every cache whose name doesn't match the current one, which
 // is the only thing standing between a fixed startup bug and a browser
 // silently keeping the old broken app.js around after the fix ships.
-const SHELL_CACHE = "cauldra-shell-v10-canonical-production";
+const SHELL_CACHE = "cauldra-shell-v11-perm001-enforcement";
 
 // Precached at install time. Kept small and static-only — anything dynamic
 // (products, sales, etc.) never belongs in this cache.

@@ -2,6 +2,13 @@
 create products and use the Add Product barcode workflow, but must remain
 blocked from editing, deleting, and transferring stock.
 
+PERM-001 Phase A (product decision D13) additionally pins the fact that
+"Staff may add products" is a DEFAULT, not an exemption: `POST /products/`
+enforces the EFFECTIVE `inventory.add_product` permission, so an individually
+revoked Staff member is denied (403) and an explicitly granted one is allowed.
+The denial must also be clean — no product row, no idempotency record, and no
+effect on the plan's product count.
+
 PostgreSQL-backed (skipped unless TEST_POSTGRES_ADMIN_URL is configured —
 see tests/postgres_test_support.py): one disposable schema for the whole
 module, dropped in tearDownModule even on failure. No test here contacts
@@ -143,6 +150,77 @@ class StaffAddProductPermissionTests(unittest.TestCase):
         r2 = self.client.post("/products/", json=self.product_payload(name="Replay Item", client_ref=client_ref), headers=self.auth(self.token_staff_a))
         self.assertEqual(r2.status_code, 200, r2.text)
         self.assertEqual(r1.json()["id"], r2.json()["id"])
+
+    # --- PERM-001 B1: the permission is a DEFAULT, still enforced -------
+
+    def _set_override(self, user, code, granted):
+        """Write exactly one explicit override key, the same shape
+        set_permission_override() stores, then expire the cached ORM state so
+        the next request re-reads it."""
+        import json as _json
+        overrides = _json.loads(user.permission_overrides) if user.permission_overrides else {}
+        overrides[code] = granted
+        user.permission_overrides = _json.dumps(overrides)
+        self.db.commit()
+        self.db.expire_all()
+
+    def test_registry_default_allows_staff_to_add_products(self):
+        self.assertTrue(main.PERMISSIONS["inventory.add_product"]["staff"])
+        self.assertTrue(main.get_effective_permissions(self.staff_a)["inventory.add_product"])
+
+    def test_staff_with_explicit_grant_can_create_a_product(self):
+        self._set_override(self.staff_a, "inventory.add_product", True)
+        r = self.client.post("/products/", json=self.product_payload(name="Explicit Grant Widget"), headers=self.auth(self.token_staff_a))
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_staff_with_explicit_denial_cannot_create_a_product(self):
+        self._set_override(self.staff_a, "inventory.add_product", False)
+        r = self.client.post("/products/", json=self.product_payload(name="Denied Widget"), headers=self.auth(self.token_staff_a))
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertIn("Add Products", r.json()["detail"])
+
+    def test_denied_staff_create_leaves_no_row_no_claim_and_no_plan_usage(self):
+        client_ref = f"denied-create-{self.suffix}"
+        before = self.db.query(main.Product).filter(main.Product.business_id == self.biz_a.id).count()
+        before_usage = main.get_current_entitlement_usage(self.db, self.biz_a, "product")
+        self._set_override(self.staff_a, "inventory.add_product", False)
+        r = self.client.post(
+            "/products/",
+            json=self.product_payload(name="Denied No Side Effects", client_ref=client_ref),
+            headers=self.auth(self.token_staff_a),
+        )
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(self.db.query(main.Product).filter(main.Product.business_id == self.biz_a.id).count(), before)
+        self.assertIsNone(
+            self.db.query(main.Product).filter(
+                main.Product.business_id == self.biz_a.id, main.Product.name == "Denied No Side Effects",
+            ).first()
+        )
+        self.assertIsNone(
+            self.db.query(main.MutationIdempotency).filter(
+                main.MutationIdempotency.business_id == self.biz_a.id,
+                main.MutationIdempotency.operation == "product_create",
+                main.MutationIdempotency.client_ref == client_ref,
+            ).first()
+        )
+        self.assertEqual(main.get_current_entitlement_usage(self.db, self.biz_a, "product"), before_usage)
+
+    def test_revoking_then_restoring_the_default_restores_access(self):
+        self._set_override(self.staff_a, "inventory.add_product", False)
+        denied = self.client.post("/products/", json=self.product_payload(name="Temporarily Denied"), headers=self.auth(self.token_staff_a))
+        self.assertEqual(denied.status_code, 403, denied.text)
+        # Dropping the key (what set_permission_override does when the
+        # requested value equals the role default) restores inheritance.
+        self.staff_a.permission_overrides = None
+        self.db.commit(); self.db.expire_all()
+        allowed = self.client.post("/products/", json=self.product_payload(name="Access Restored"), headers=self.auth(self.token_staff_a))
+        self.assertEqual(allowed.status_code, 200, allowed.text)
+
+    def test_manager_and_admin_are_unaffected_by_a_staff_denial(self):
+        self._set_override(self.staff_a, "inventory.add_product", False)
+        for token, name in ((self.token_manager_a, "Manager Unaffected"), (self.token_admin_a, "Admin Unaffected")):
+            r = self.client.post("/products/", json=self.product_payload(name=name), headers=self.auth(token))
+            self.assertEqual(r.status_code, 200, r.text)
 
     # --- Staff CAN use the Add Product barcode workflow (item 2) --------
 

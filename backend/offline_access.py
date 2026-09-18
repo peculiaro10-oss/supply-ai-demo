@@ -166,22 +166,46 @@ def install(g):
         products = []
         for offset in range(0, count, 500):
             products.extend(g["list_products"](500, offset, None, None, user, db))
+        # PERM-001 O1 — the snapshot is a SECOND read path to the same data as
+        # GET /suppliers/, so it enforces the same permission. It must not
+        # simply call through and let the 403 escape: these calls are outside
+        # the cached() wrapper below, so an escaping 403 would fail the whole
+        # provisioning for a Staff member who is legitimately allowed to work
+        # offline. Denied => empty list plus a freshness marker, exactly like
+        # the expenses block already does.
+        suppliers_permitted = bool(permissions(user).get("supplier.view"))
         suppliers = []
-        offset = 0
-        while True:
-            page = g["list_suppliers"](500, offset, user, db)
-            suppliers.extend(page)
-            if len(page) < 500:
-                break
-            offset += 500
-            if offset >= 20000:
-                failure("CATALOG_TOO_LARGE", "Supplier snapshot limit exceeded.", 413)
+        if suppliers_permitted:
+            offset = 0
+            while True:
+                page = g["list_suppliers"](500, offset, user, db)
+                suppliers.extend(page)
+                if len(page) < 500:
+                    break
+                offset += 500
+                if offset >= 20000:
+                    failure("CATALOG_TOO_LARGE", "Supplier snapshot limit exceeded.", 413)
         stocks = [{"product_id": r.product_id, "warehouse_id": r.warehouse_id,
                    "quantity": r.quantity} for r in db.query(g["WarehouseStock"]).filter_by(business_id=user.business_id).all()]
         locations = [g["serialize_location"](r, db) for r in db.query(g["Location"]).filter_by(business_id=user.business_id, is_active=True).all()]
         days = [{"id": d.id, "location_id": d.location_id, "is_open": d.is_open}
                 for d in db.query(g["BusinessDay"]).filter_by(business_id=user.business_id, is_open=True).all()]
         cache, freshness = {}, {}
+        if not suppliers_permitted:
+            freshness["/suppliers/"] = "permission unavailable"
+        # PERM-001 O2 — warehouses follow the same rule as their endpoints:
+        # the full management listing only with warehouse.view, otherwise the
+        # minimal operational projection (id/name/location_id) that offline
+        # POS and offline product-create actually need, and nothing at all if
+        # the device's user has neither operational permission.
+        if permissions(user).get("warehouse.view"):
+            warehouses = g["list_warehouses"](user, db)
+        elif permissions(user).get("inventory.view") or permissions(user).get("sales.create"):
+            warehouses = g["operational_warehouse_projection"](db, user.business_id)
+            freshness["/warehouses/"] = "operational projection"
+        else:
+            warehouses = []
+            freshness["/warehouses/"] = "permission unavailable"
         def cached(path, fn, *args):
             try:
                 value = fn(*args)
@@ -222,7 +246,7 @@ def install(g):
             "user": {**g["serialize_user"](user), "business_id": user.business_id},
             "business": g["serialize_business"](business, db), "permissions": permissions(user),
             "products": products, "suppliers": suppliers, "stocks": stocks,
-            "warehouses": g["list_warehouses"](user, db), "locations": locations,
+            "warehouses": warehouses, "locations": locations,
             "days": days, "sales": [], "sales_history": history, "expenses": expenses,
             "cache": cache, "freshness": freshness, "history_since": since})
 

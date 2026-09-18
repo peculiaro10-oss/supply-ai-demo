@@ -4123,7 +4123,13 @@ def add_audit(db: Session, user: Optional[User], action: str, description: str, 
 PERMISSIONS = {
     # --- INVENTORY -----------------------------------------------------------
     "inventory.view":            {"category": "INVENTORY", "label": "View Inventory",        "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
-    "inventory.add_product":     {"category": "INVENTORY", "label": "Add Products",          "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
+    # PERM-001 Phase A / product decision D13: adding a product is a normal
+    # Staff duty, so Staff defaults to TRUE here — but this is still a real,
+    # enforceable permission, not an exemption: create_product() checks the
+    # EFFECTIVE permission, so an Admin/Manager who revokes it for one Staff
+    # member (stored as an explicit false override) genuinely blocks that
+    # person online, offline and in the UI. Never role-check this instead.
+    "inventory.add_product":     {"category": "INVENTORY", "label": "Add Products",          "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
     "inventory.edit_product":    {"category": "INVENTORY", "label": "Edit Products",         "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     "inventory.delete_product":  {"category": "INVENTORY", "label": "Delete Products",       "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
     "inventory.adjust_stock":    {"category": "INVENTORY", "label": "Adjust Stock",          "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
@@ -7876,10 +7882,60 @@ def update_location(location_id: int, data: LocationUpdate, user: User = Depends
     db.commit(); db.refresh(row)
     return serialize_location(row, db)
 
+def operational_warehouse_projection(db: Session, business_id: int) -> list:
+    """PERM-001 B3 — the MINIMUM warehouse information an allowed stock or
+    sales action needs: identity only (`id`, `name`, `location_id`) for the
+    business's ACTIVE warehouses.
+
+    Deliberately not a serialize_warehouse() call: the management listing's
+    `sku_count` (an inventory aggregate), `created_at`, `is_active` history
+    and `location_name` are administration data and stay behind
+    warehouse.view. Shared by GET /warehouses/operational and the offline
+    snapshot so the two can never disagree about what "minimal" means."""
+    rows = (
+        db.query(Warehouse)
+        .filter(Warehouse.business_id == business_id, Warehouse.is_active == True)
+        .order_by(Warehouse.name.asc())
+        .all()
+    )
+    return [{"id": w.id, "name": w.name, "location_id": w.location_id} for w in rows]
+
 @app.get("/warehouses/")
 def list_warehouses(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # PERM-001 B2 — the warehouse DIRECTORY/management view (names plus
+    # sku_count, created_at, location names). Gated on warehouse.view;
+    # operational callers use GET /warehouses/operational below instead.
+    require_permission(user, "warehouse.view")
     rows = db.query(Warehouse).filter(Warehouse.business_id == user.business_id, Warehouse.is_active == True).order_by(Warehouse.name.asc()).all()
     return [serialize_warehouse(w, db) for w in rows]
+
+@app.get("/warehouses/operational")
+def list_operational_warehouses(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """READ-ONLY operational warehouse context (PERM-001 B3) — deliberately
+    separate from GET /warehouses/ above (warehouse administration), exactly
+    as GET /locations/operational is separate from GET /locations/.
+
+    Why this does not bypass warehouse.view: that permission governs the
+    management directory (stock counts, creation dates, location names) and
+    every warehouse mutation, all of which stay denied without it. This
+    endpoint returns only the identity a permitted action must already
+    reference — a caller with inventory.view can already read warehouse
+    NAMES through GET /products/?warehouse=<name>, so no new class of
+    information is disclosed. It is read-only with no create/update/
+    deactivate counterpart, business-scoped like every other endpoint here,
+    and active warehouses only (this answers "where can I work now", never
+    "what did this business once have").
+
+    Permission-gated rather than role-gated (section 5): inventory.view OR
+    sales.create — the permissions that genuinely need warehouse identity —
+    so a future grantable permission needing the same context reuses this
+    endpoint without a code change.
+
+    NOTE (Phase A boundary): no Branch/Location access filtering happens
+    here. Location-scoped access is Phase C of the multi-business design."""
+    if not (has_permission(user, "inventory.view") or has_permission(user, "sales.create")):
+        raise HTTPException(status_code=403, detail="Your account does not have the 'View Inventory' or 'Make Sales' permission.")
+    return operational_warehouse_projection(db, user.business_id)
 
 @app.post("/warehouses/")
 def create_warehouse(data: WarehouseCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -8382,9 +8438,16 @@ def products_duplicate_check(req: ProductDuplicateCheckRequest, user: User = Dep
 @app.post("/products/")
 def create_product(data: ProductCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_offline_replay_identity(request, user)
-    # Staff MAY create products (Add Product is a normal Staff duty) —
-    # Edit (update_product), Delete (delete_product), and Transfer
-    # (transfer_stock) remain Manager/Admin(+approval) only, unchanged.
+    # PERM-001 B1. Staff MAY create products by default (Add Product is a
+    # normal Staff duty — see PERMISSIONS["inventory.add_product"]), but the
+    # permission is still ENFORCED here on the EFFECTIVE map, so a Staff
+    # member whose grant was individually revoked is denied. This check runs
+    # FIRST — before the idempotency claim and before the plan-limit check —
+    # so a denied call leaves no product row, no mutation_idempotency record
+    # and no plan-count side effect, and reports the real reason (403) rather
+    # than a plan-limit error. Edit (update_product), Delete (delete_product)
+    # and Transfer (transfer_stock) remain separately permissioned, unchanged.
+    require_permission(user, "inventory.add_product")
     client_ref = (data.client_ref or "").strip()[:100] or None
     claim, replay = claim_idempotent_mutation(
         db, user.business_id, "product_create", client_ref,
@@ -10075,9 +10138,26 @@ def _build_expenses_query(db: Session, user: User, business: "BusinessProfile", 
     """Shared filter-building for /expenses/ and /expenses/export — the two
     endpoints must never be able to disagree about which rows a given set of
     filters matches, so both call this exact same function rather than each
-    maintaining their own copy of the filter logic."""
+    maintaining their own copy of the filter logic.
+
+    PERM-001 B6 — it is also the ONE place the owner scope is applied, for
+    the same reason: `expenses.view` means "View Own Expenses" and
+    `expenses.view_all` means all of the business's expenses. Enforcing it
+    here (rather than in each endpoint) means the list, its `total`, the CSV
+    export, the Excel export and the offline snapshot are all computed from
+    the SAME scoped query, and no filter combination (category, payment
+    source, search, date range, location, pagination) can widen it.
+
+    Phase A boundary: ownership only. Branch/Location access intersection is
+    Phase C of the multi-business design and is deliberately not done here."""
     tz = business_local_zoneinfo(business)
     q = db.query(Expense).filter(Expense.business_id == user.business_id)  # tenant scope — never trusts the request
+    if not has_permission(user, "expenses.view_all"):
+        # Own rows only. A request for someone ELSE's user_id is already
+        # rejected with 403 by the callers before reaching this point, so
+        # this can only ever narrow to the caller's own expenses — never
+        # silently substitute a different owner's rows.
+        q = q.filter(Expense.owner_id == user.id)
     if location_id is not None:
         # History remains valid for a deactivated Location (section 14) —
         # deliberately NOT filtered to is_active here, only same-business.
@@ -10291,6 +10371,11 @@ def export_generic_xlsx(payload: XlsxExportRequest, user: User = Depends(get_cur
 # -----------------------------------------------------------------------------
 @app.get("/suppliers/")
 def list_suppliers(limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # PERM-001 B4 — the supplier directory exposes commercial contact details
+    # (contact_email, phone, lead times). Gated on the effective permission,
+    # never a role string. The offline snapshot calls this same function and
+    # handles the denial itself (see offline_access.snapshot).
+    require_permission(user, "supplier.view")
     rows = db.query(Supplier).filter(Supplier.business_id == user.business_id).order_by(Supplier.id.desc()).offset(offset).limit(limit).all()
     return [{"id": s.id, "name": s.name, "contact_email": s.contact_email, "phone": s.phone, "lead_time_days": s.lead_time_days} for s in rows]
 
@@ -12055,6 +12140,11 @@ def export_sales_xlsx(period: str = Query("all"), custom_start: Optional[str] = 
 
 @app.get("/sales/analytics")
 def sales_analytics(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # PERM-001 B5 — closed-day revenue series, averages and trend are Sales
+    # Reports data. `reports.sales` had zero call sites before this; the 403
+    # the audit saw on /sales/export came from sales.view_history, which is a
+    # different permission and stays exactly as it is.
+    require_permission(user, "reports.sales")
     days = db.query(BusinessDay).filter(BusinessDay.business_id == user.business_id, BusinessDay.is_open == False).order_by(BusinessDay.date.asc()).all()
     rows=[]
     for d in days:

@@ -24273,7 +24273,11 @@
             } catch (_) { panel.innerHTML = '<div class="text-danger py-2 text-center">Activity could not be loaded.</div>'; }
         }
 
-        async function renderSalesChart(){ try { const r=await fetch(`${API_URL}/sales/analytics`,{headers:{"Authorization":`Bearer ${authToken}`}}); const d=await r.json(); const rows=d.days.slice(-12); const max=Math.max(1,...rows.map(x=>x.sales)); const chart=document.getElementById('sales-chart'); if(!rows.length){chart.innerHTML='<div class="h-[170px] flex items-center justify-center text-textSec text-xs">Sales history will appear here after business days are closed.</div>';return;} chart.innerHTML=`<div class="flex items-end gap-2 h-[150px] px-2 border-b border-borderCol">${rows.map(x=>`<div class="flex-1 flex flex-col items-center justify-end h-full gap-1"><div class="w-full max-w-[42px] bg-primary/70 rounded-t" style="height:${Math.max(4,(x.sales/max)*100)}%" title="${x.date}: ${formatCurrency(x.sales)}"></div><span class="text-[8px] text-textSec rotate-[-35deg] origin-top">${x.date.slice(5)}</span></div>`).join('')}</div><div class="mt-3 flex items-center justify-between text-[10px]"><span class="font-semibold">Trend: ${d.trend}</span><span class="font-mono ${d.change_percent>=0?'text-success':'text-danger'}">${d.change_percent>=0?'+':''}${d.change_percent}%</span><span class="text-textSec">Avg ${formatCurrency(d.average_daily_sales)}</span></div>`; } catch(_){} }
+        // PERM-001 F3 — /sales/analytics is now gated on reports.sales. Without
+        // that permission the request is skipped entirely and the chart card is
+        // hidden, so the Sales screen never shows an empty bordered box or a
+        // stale chart left over from a previous session/role.
+        async function renderSalesChart(){ const chartBlock=document.getElementById('sales-chart'); if(!hasPermission('reports.sales')){ if(chartBlock){ chartBlock.innerHTML=''; chartBlock.classList.add('hidden'); } return; } if(chartBlock) chartBlock.classList.remove('hidden'); try { const r=await fetch(`${API_URL}/sales/analytics`,{headers:{"Authorization":`Bearer ${authToken}`}}); const d=await r.json(); const rows=d.days.slice(-12); const max=Math.max(1,...rows.map(x=>x.sales)); const chart=document.getElementById('sales-chart'); if(!rows.length){chart.innerHTML='<div class="h-[170px] flex items-center justify-center text-textSec text-xs">Sales history will appear here after business days are closed.</div>';return;} chart.innerHTML=`<div class="flex items-end gap-2 h-[150px] px-2 border-b border-borderCol">${rows.map(x=>`<div class="flex-1 flex flex-col items-center justify-end h-full gap-1"><div class="w-full max-w-[42px] bg-primary/70 rounded-t" style="height:${Math.max(4,(x.sales/max)*100)}%" title="${x.date}: ${formatCurrency(x.sales)}"></div><span class="text-[8px] text-textSec rotate-[-35deg] origin-top">${x.date.slice(5)}</span></div>`).join('')}</div><div class="mt-3 flex items-center justify-between text-[10px]"><span class="font-semibold">Trend: ${d.trend}</span><span class="font-mono ${d.change_percent>=0?'text-success':'text-danger'}">${d.change_percent>=0?'+':''}${d.change_percent}%</span><span class="text-textSec">Avg ${formatCurrency(d.average_daily_sales)}</span></div>`; } catch(_){} }
         let salesHistoryActivePeriod = "all";
         let salesHistoryCustomFilters = { date_from: "", date_to: "" };
 
@@ -25827,8 +25831,27 @@
                 updateWarehouseUIElements();
                 return;
             }
+            // PERM-001 F1 — pick the endpoint this user is actually allowed to
+            // read. warehouse.view is the management directory; a user without
+            // it who may still work with stock or sell (inventory.view /
+            // sales.create) gets the minimal operational projection instead, so
+            // the Inventory warehouse filter, the dashboard warehouse metric
+            // and offline POS keep working without a guaranteed 403. Someone
+            // with none of the three simply has no warehouse context — an
+            // empty list, never a thrown error.
+            const canReadWarehouseDirectory = hasPermission('warehouse.view');
+            const canReadWarehousesOperationally = hasPermission('inventory.view') || hasPermission('sales.create');
+            if (!canReadWarehouseDirectory && !canReadWarehousesOperationally) {
+                warehouseRecords = [];
+                customWarehouses = [];
+                warehousesReady = true;
+                updateWarehouseUIElements();
+                updateDashboardMetrics();
+                return;
+            }
             try {
-                const res = await fetch(`${API_URL}/warehouses/`, { credentials: "include", headers: { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" } });
+                const warehousesPath = canReadWarehouseDirectory ? "/warehouses/" : "/warehouses/operational";
+                const res = await fetch(`${API_URL}${warehousesPath}`, { credentials: "include", headers: { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" } });
                 if (res.status === 401) { handleAuthenticationFailure(); return; }
                 if (!res.ok) throw new Error("Unable to load warehouses.");
                 warehouseRecords = await res.json();
@@ -27308,13 +27331,20 @@
                     renderAuthButton(); updateGuestHeaderState(); renderMobileNav();
                     return;
                 }
+                // PERM-001 F2 — the supplier directory is now gated on
+                // supplier.view, so only request it when this user actually
+                // holds that permission. Without it the request would be a
+                // guaranteed 403 on every single core data load.
+                const canReadSuppliers = hasPermission('supplier.view');
                 const [productRes, supplierRes] = await Promise.all([
                     fetchWithTimeout(`${API_URL}/products/?limit=500&offset=0`, { credentials: "include", headers }, 6500),
-                    fetchWithTimeout(`${API_URL}/suppliers/?limit=500&offset=0`, { credentials: "include", headers }, 6500)
+                    canReadSuppliers
+                        ? fetchWithTimeout(`${API_URL}/suppliers/?limit=500&offset=0`, { credentials: "include", headers }, 6500)
+                        : Promise.resolve(null)
                 ]);
-                if (productRes.status === 401 || supplierRes.status === 401) { handleAuthenticationFailure(); return; }
+                if (productRes.status === 401 || supplierRes?.status === 401) { handleAuthenticationFailure(); return; }
                 const serverProducts = productRes.ok ? await productRes.json() : [];
-                const serverSuppliers = supplierRes.ok ? await supplierRes.json() : [];
+                const serverSuppliers = supplierRes?.ok ? await supplierRes.json() : [];
                 const unresolvedLocalWork = (await getOutboxForCurrentBusiness().catch(() => [])).some((row) => row.status !== "synced");
                 globalProducts = unresolvedLocalWork ? await getCachedProducts() : serverProducts;
                 globalSuppliers = unresolvedLocalWork ? await getCachedSuppliers() : serverSuppliers;
