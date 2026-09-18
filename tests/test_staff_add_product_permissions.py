@@ -153,9 +153,14 @@ class StaffAddProductPermissionTests(unittest.TestCase):
 
     def test_staff_offline_replay_client_ref_still_deduplicates(self):
         client_ref = f"staff-replay-{self.suffix}"
-        r1 = self.client.post("/products/", json=self.product_payload(name="Replay Item", client_ref=client_ref), headers=self.auth(self.token_staff_a))
+        # A replay is the SAME request sent again, so build the payload once.
+        # product_payload() deliberately varies size/prices per call; calling it
+        # twice here made the second request genuinely different, and the
+        # idempotency layer correctly answered 409 "different data".
+        payload = self.product_payload(name="Replay Item", client_ref=client_ref)
+        r1 = self.client.post("/products/", json=payload, headers=self.auth(self.token_staff_a))
         self.assertEqual(r1.status_code, 200, r1.text)
-        r2 = self.client.post("/products/", json=self.product_payload(name="Replay Item", client_ref=client_ref), headers=self.auth(self.token_staff_a))
+        r2 = self.client.post("/products/", json=payload, headers=self.auth(self.token_staff_a))
         self.assertEqual(r2.status_code, 200, r2.text)
         self.assertEqual(r1.json()["id"], r2.json()["id"])
 
