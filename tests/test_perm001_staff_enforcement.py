@@ -429,9 +429,9 @@ class Perm001EnforcementTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         return device_id
 
-    def _replay_product_create(self, token, device_id, user_row):
+    def _replay_product_create(self, token, device_id, user_row, op_id=None):
         return self.client.post("/offline/replay", headers=self.auth(token), json={
-            "schema_version": 2, "op_id": str(uuid.uuid4()), "device_id": device_id,
+            "schema_version": 2, "op_id": op_id or str(uuid.uuid4()), "device_id": device_id,
             "user_id": user_row.id, "business_id": self.biz_a.id,
             "auth_version": int(user_row.auth_version or 1), "type": "product_create",
             "captured_at": datetime.now(timezone.utc).isoformat(),
@@ -444,9 +444,27 @@ class Perm001EnforcementTests(unittest.TestCase):
         self.assertEqual(allowed.status_code, 200, allowed.text)
 
         denied_device = self._provision_device(self.t_staff_deny)
-        denied = self._replay_product_create(self.t_staff_deny, denied_device, self.staff_deny_a)
+        denied_op = str(uuid.uuid4())
+        before = self.db.query(main.Product).filter(main.Product.business_id == self.biz_a.id).count()
+        denied = self._replay_product_create(self.t_staff_deny, denied_device, self.staff_deny_a, op_id=denied_op)
         self.assertEqual(denied.status_code, 403, denied.text)
-        self.assertIn("Add Products", denied.json()["detail"]["message"])
+        # require_permission() raises with a plain-string detail; the offline
+        # layer's own failures use {code, message}. The app's sync accepts both
+        # (a 403 without a code is treated as PERMISSION_CHANGED), so assert on
+        # the text wherever it lives rather than on one shape.
+        detail = denied.json()["detail"]
+        message = detail if isinstance(detail, str) else detail.get("message", "")
+        self.assertIn("Add Products", message)
+        # The replay route claims idempotency BEFORE the permission check (the
+        # opposite order to POST /products/). Prove the claim does not survive
+        # the denial: no product and no offline_v2 claim for this op, so a
+        # retry after the permission is restored is processed, not swallowed.
+        self.db.expire_all()
+        self.assertEqual(self.db.query(main.Product).filter(main.Product.business_id == self.biz_a.id).count(), before)
+        self.assertIsNone(self.db.query(main.MutationIdempotency).filter(
+            main.MutationIdempotency.business_id == self.biz_a.id,
+            main.MutationIdempotency.client_ref == denied_op,
+        ).first())
 
     def test_changing_the_permission_invalidates_an_existing_offline_grant(self):
         device_id = self._provision_device(self.t_staff)
