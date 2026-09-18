@@ -270,7 +270,6 @@ FORGOT_RESEND_SECONDS = int(os.getenv("SUPPLY_AI_FORGOT_RESEND", "60"))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 TERMII_BASE_URL = os.getenv("TERMII_BASE_URL", "https://api.ng.termii.com").rstrip("/")
-RESEND_FROM = os.getenv("RESEND_FROM", "onboarding@resend.dev")
 PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY", "").strip()
 PAYSTACK_PUBLIC_KEY = os.getenv("PAYSTACK_PUBLIC_KEY", "").strip()
 PAYSTACK_CALLBACK_URL = os.getenv("PAYSTACK_CALLBACK_URL", "").strip()
@@ -322,6 +321,45 @@ except RuntimeError:
     EMAIL_PAYMENT_PUBLIC_URLS = {"frontend_origin": "", "email_callback_origin": "",
                                  "supabase_return_origin": ""}
     print("[startup] EMAIL_PAYMENT_PUBLIC_URL_CONFIG_INVALID")
+
+# -----------------------------------------------------------------------------
+# EMAIL SENDER (AUTH-RECOVERY-001 / A2). Resend's shared testing sender,
+# onboarding@resend.dev, may only deliver to the Resend account owner's own
+# address. Defaulting to it made every deployment LOOK configured while password
+# recovery (and PO dispatch) was rejected for every real recipient. So:
+#   * development/local/test keeps the tester as a convenience;
+#   * everywhere else RESEND_FROM must be set explicitly, to an address on a
+#     verified domain — never the shared tester;
+#   * production fails closed at startup (same contract as the public-URL
+#     settings above); other non-development environments stay importable but
+#     every send is refused with 503 until it is fixed.
+# Errors name only the variable, never its value.
+# -----------------------------------------------------------------------------
+_RESEND_SHARED_TEST_SENDER = "onboarding@resend.dev"
+_EMAIL_DEVELOPMENT_ENVIRONMENTS = {"development", "dev", "local", "test", "testing"}
+_EMAIL_ADDRESS_RE = re.compile(r"[^@\s<>]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}")
+
+def validate_resend_sender(raw: Optional[str], environment: str) -> str:
+    value = str(raw or "").strip()
+    if environment in _EMAIL_DEVELOPMENT_ENVIRONMENTS:
+        return value or _RESEND_SHARED_TEST_SENDER
+    if not value:
+        raise RuntimeError("RESEND_FROM is required outside development: set it to a sender on a verified email domain.")
+    match = re.fullmatch(r"[^<>]*<\s*([^<>\s]+)\s*>|([^<>\s]+)", value)
+    address = (match.group(1) or match.group(2)) if match else ""
+    if not _EMAIL_ADDRESS_RE.fullmatch(address) or address.lower().endswith("@resend.dev"):
+        raise RuntimeError("RESEND_FROM must be a sender on a verified email domain; the shared resend.dev testing sender is not allowed outside development.")
+    return value
+
+RESEND_SENDER_CONFIG_ERROR = ""
+try:
+    RESEND_FROM = validate_resend_sender(os.getenv("RESEND_FROM"), ENVIRONMENT)
+except RuntimeError:
+    if IS_PRODUCTION:
+        raise
+    RESEND_FROM = ""
+    RESEND_SENDER_CONFIG_ERROR = "RESEND_FROM"
+    print("[startup] EMAIL_SENDER_CONFIG_INVALID: RESEND_FROM")
 # Web Push (VAPID). VAPID_PUBLIC_KEY is safe to hand to the frontend (served
 # via GET /push/vapid-public-key) — it's what the browser's
 # pushManager.subscribe({applicationServerKey}) call needs. VAPID_PRIVATE_KEY
@@ -6550,27 +6588,96 @@ def delete_own_account(user: User = Depends(get_current_user), db: Session = Dep
 # -----------------------------------------------------------------------------
 # PASSWORD RECOVERY / EMAIL
 # -----------------------------------------------------------------------------
-def send_recovery_email(to_email: str, username: str, code: str):
+class EmailDeliveryError(Exception):
+    """Raised by send_resend_email(); `category` is one of the
+    classify_email_delivery_failure() values, or missing_api_key /
+    sender_not_configured. Deliberately carries no provider text."""
+    def __init__(self, category: str):
+        super().__init__(category)
+        self.category = category
+
+_EMAIL_CONFIGURATION_ERRORS = {"missing_api_key", "invalid_api_key", "restricted_api_key", "invalid_from_address"}
+_EMAIL_OUTAGE_ERRORS = {"application_error", "internal_server_error"}
+
+def classify_email_delivery_failure(status_code: Optional[int], provider_error: Optional[str]) -> str:
+    """AUTH-RECOVERY-001 / A1: provider_rejection | configuration_error |
+    provider_outage | other_delivery_failure. A misconfigured sender and a
+    provider outage must never look the same to an operator again."""
+    if provider_error in _EMAIL_CONFIGURATION_ERRORS or status_code in (401, 403):
+        return "configuration_error"
+    if provider_error in _EMAIL_OUTAGE_ERRORS or (status_code is not None and status_code >= 500):
+        return "provider_outage"
+    if status_code is not None and 400 <= status_code < 500:
+        return "provider_rejection"
+    return "other_delivery_failure"
+
+def _safe_provider_text(value, limit: int = 200) -> str:
+    """Provider messages are useful but may echo addresses, keys or codes —
+    mask all three before anything is logged."""
+    text_value = re.sub(r"[^\s@<>()]+@[^\s@<>()]+", "<email>", str(value or ""))
+    text_value = re.sub(r"\bre_[A-Za-z0-9_]+", "<redacted>", text_value)
+    text_value = re.sub(r"\b\d{6}\b", "<code>", text_value)
+    return text_value[:limit]
+
+def log_email_delivery_failure(purpose: str, category: str, **fields) -> None:
+    """One structured line per failed send. Never the API key, Authorization
+    header, recipient, subject/body, recovery code, password or tokens."""
+    record = {"event": "email_delivery_failed", "provider": "resend", "purpose": purpose, "category": category}
+    record.update(fields)
+    print("[email-delivery] " + json.dumps(record, sort_keys=True, default=str))
+
+def send_resend_email(*, purpose: str, to_email: str, subject: str, html: str) -> None:
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     if not api_key:
-        raise HTTPException(status_code=503, detail="Email recovery is not configured. Add RESEND_API_KEY to the server environment.")
+        log_email_delivery_failure(purpose, "configuration_error", setting="RESEND_API_KEY")
+        raise EmailDeliveryError("missing_api_key")
+    if not RESEND_FROM:
+        log_email_delivery_failure(purpose, "configuration_error", setting="RESEND_FROM")
+        raise EmailDeliveryError("sender_not_configured")
     import requests
     try:
         r = requests.post(
             "https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "from": RESEND_FROM,
-                "to": [to_email],
-                "subject": f"{APP_NAME} password recovery code",
-                "html": f"<p>Hello {username},</p><p>Your password recovery code is <strong>{code}</strong>.</p><p>This code expires in 10 minutes.</p>",
-            },
+            json={"from": RESEND_FROM, "to": [to_email], "subject": subject, "html": html},
             timeout=15,
         )
-        if not r.ok:
-            raise RuntimeError(r.text)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail="We could not send the recovery email right now.") from exc
+    except requests.exceptions.RequestException as exc:
+        category = "provider_outage" if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)) else "other_delivery_failure"
+        log_email_delivery_failure(purpose, category, exception_type=type(exc).__name__)
+        raise EmailDeliveryError(category) from None
+    if r.ok:
+        return
+    try:
+        body = r.json()
+    except ValueError:
+        body = None
+    body = body if isinstance(body, dict) else {}
+    provider_error = body.get("name") if isinstance(body.get("name"), str) else None
+    category = classify_email_delivery_failure(r.status_code, provider_error)
+    headers = getattr(r, "headers", None) or {}
+    request_id = next((headers.get(h) for h in ("x-request-id", "x-resend-request-id", "cf-ray") if headers.get(h)), None)
+    log_email_delivery_failure(
+        purpose, category, http_status=r.status_code, provider_error=provider_error,
+        provider_message=_safe_provider_text(body.get("message")) if body.get("message") else None,
+        request_id=_safe_provider_text(request_id, 80) if request_id else None,
+    )
+    raise EmailDeliveryError(category)
+
+def send_recovery_email(to_email: str, username: str, code: str):
+    try:
+        send_resend_email(
+            purpose="password_recovery", to_email=to_email,
+            subject=f"{APP_NAME} password recovery code",
+            html=f"<p>Hello {username},</p><p>Your password recovery code is <strong>{code}</strong>.</p><p>This code expires in 10 minutes.</p>",
+        )
+    except EmailDeliveryError as exc:
+        # User-facing text stays generic; the classification is in the log.
+        if exc.category == "missing_api_key":
+            raise HTTPException(status_code=503, detail="Email recovery is not configured. Add RESEND_API_KEY to the server environment.") from None
+        if exc.category == "sender_not_configured":
+            raise HTTPException(status_code=503, detail="Email recovery is not configured. Set RESEND_FROM on the server.") from None
+        raise HTTPException(status_code=502, detail="We could not send the recovery email right now.") from None
 
 def send_recovery_sms(phone: str, code: str):
     termii_key = os.getenv("TERMII_API_KEY", "").strip()
@@ -10795,31 +10902,23 @@ def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Se
     # BEFORE calling the email provider so a plan that's already at its limit
     # never even attempts (and never appears to almost-succeed at) a send.
     check_plan_limit(db, business, "purchase_order", _po_sent_count_this_period(db, business))
-    api_key = os.getenv("RESEND_API_KEY", "").strip()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="Email dispatch is not configured. Add RESEND_API_KEY to the server environment.")
-    import requests
     try:
-        r = requests.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "from": RESEND_FROM,
-                "to": [supplier.contact_email],
-                "subject": f"Purchase Order #{po.id}",
-                "html": f"<p>Hello {supplier.name},</p><p>{(po.email_draft or '').replace(chr(10), '<br>')}</p>",
-            },
-            timeout=15,
+        send_resend_email(
+            purpose="purchase_order", to_email=supplier.contact_email,
+            subject=f"Purchase Order #{po.id}",
+            html=f"<p>Hello {supplier.name},</p><p>{(po.email_draft or '').replace(chr(10), '<br>')}</p>",
         )
-        if not r.ok:
-            raise RuntimeError(r.text)
-    except Exception as exc:
+    except EmailDeliveryError as exc:
         # Nothing is persisted above this point (status/sent_at are only ever
         # set below, after a confirmed-successful send) — a failed/rejected
         # email leaves the purchase order exactly as it was: still a DRAFT,
         # still not counted against the plan's allowance. Only a genuinely
         # provider-accepted send can consume it.
-        raise HTTPException(status_code=502, detail="We could not email this purchase order right now.") from exc
+        if exc.category == "missing_api_key":
+            raise HTTPException(status_code=503, detail="Email dispatch is not configured. Add RESEND_API_KEY to the server environment.") from None
+        if exc.category == "sender_not_configured":
+            raise HTTPException(status_code=503, detail="Email dispatch is not configured. Set RESEND_FROM on the server.") from None
+        raise HTTPException(status_code=502, detail="We could not email this purchase order right now.") from None
     po.status = "SENT"; po.sent_at = datetime.utcnow()
     po_location = db.query(Location).filter(Location.id == po.location_id).first() if po.location_id else None
     location_suffix = f" for {po_location.name}" if po_location else ""
