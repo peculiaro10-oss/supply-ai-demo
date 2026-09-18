@@ -37,19 +37,47 @@ from postgres_test_support import ADMIN_URL, create_postgres_test_schema, drop_p
 
 _ctx = None
 main = None
+_previous_signing_key = None
+_product_seq = 0
+
+
+def _install_test_offline_signing_key():
+    """A throwaway P-256 key for this module only, exactly as
+    tests/test_offline_access.py does. Offline provisioning returns 503 without
+    one, which previously made the offline cases SKIP; the test process must
+    never inherit a real environment's key either."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    previous = os.environ.get("CAULDRA_OFFLINE_SIGNING_KEY")
+    os.environ["CAULDRA_OFFLINE_SIGNING_KEY"] = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
+    ).decode()
+    return previous
+
+
+def _restore_offline_signing_key(previous):
+    if previous is None:
+        os.environ.pop("CAULDRA_OFFLINE_SIGNING_KEY", None)
+    else:
+        os.environ["CAULDRA_OFFLINE_SIGNING_KEY"] = previous
 
 
 def setUpModule():
-    global _ctx, main
+    global _ctx, main, _previous_signing_key
     if not ADMIN_URL:
         return
+    _previous_signing_key = _install_test_offline_signing_key()
     _ctx = create_postgres_test_schema("cauldra_perm001")
     main = _ctx.main
 
 
 def tearDownModule():
-    if _ctx is not None:
-        drop_postgres_test_schema(_ctx, "cauldra_perm001")
+    try:
+        if _ctx is not None:
+            drop_postgres_test_schema(_ctx, "cauldra_perm001")
+    finally:
+        if ADMIN_URL:
+            _restore_offline_signing_key(_previous_signing_key)
 
 
 @unittest.skipUnless(ADMIN_URL, "TEST_POSTGRES_ADMIN_URL is not configured")
@@ -66,6 +94,13 @@ class Perm001EnforcementTests(unittest.TestCase):
         biz_a = main.BusinessProfile(business_code=f"P1-A-{suffix}", company_name="PERM001 A")
         biz_b = main.BusinessProfile(business_code=f"P1-B-{suffix}", company_name="PERM001 B")
         db.add_all([biz_a, biz_b])
+        db.flush()
+
+        # Real registration creates a Main Location; the ORM shortcut here
+        # did not, which previously SKIPPED the location_id expense filter.
+        loc_a = main.Location(business_id=biz_a.id, name="Main Location", is_main=True, is_active=True)
+        loc_b = main.Location(business_id=biz_b.id, name="Main Location", is_main=True, is_active=True)
+        db.add_all([loc_a, loc_b])
         db.flush()
 
         wh_a = main.Warehouse(business_id=biz_a.id, name="Main Central Warehouse", is_active=True)
@@ -107,11 +142,11 @@ class Perm001EnforcementTests(unittest.TestCase):
         # Expenses: two owned by Staff A, three by Admin A, one in Tenant B.
         now = datetime.utcnow()
         db.add_all([
-            main.Expense(business_id=biz_a.id, category="Transport", amount=1000.0, owner_id=staff_a.id, created_at=now - timedelta(days=1), note="staff own one"),
+            main.Expense(business_id=biz_a.id, category="Transport", amount=1000.0, owner_id=staff_a.id, created_at=now - timedelta(days=1), note="staff own one", location_id=loc_a.id),
             main.Expense(business_id=biz_a.id, category="Fuel", amount=2000.0, owner_id=staff_a.id, created_at=now - timedelta(days=2), note="staff own two"),
-            main.Expense(business_id=biz_a.id, category="Rent", amount=50000.0, owner_id=admin_a.id, created_at=now - timedelta(days=1), note="admin one"),
+            main.Expense(business_id=biz_a.id, category="Rent", amount=50000.0, owner_id=admin_a.id, created_at=now - timedelta(days=1), note="admin one", location_id=loc_a.id),
             main.Expense(business_id=biz_a.id, category="Transport", amount=3000.0, owner_id=admin_a.id, created_at=now - timedelta(days=3), note="admin two"),
-            main.Expense(business_id=biz_a.id, category="Power", amount=4000.0, owner_id=manager_a.id, created_at=now - timedelta(days=4), note="manager one"),
+            main.Expense(business_id=biz_a.id, category="Power", amount=4000.0, owner_id=manager_a.id, created_at=now - timedelta(days=4), note="manager one", location_id=loc_a.id),
             main.Expense(business_id=biz_b.id, category="Rent", amount=9999.0, owner_id=admin_b.id, created_at=now - timedelta(days=1), note="tenant b"),
         ])
         db.commit()
@@ -138,6 +173,7 @@ class Perm001EnforcementTests(unittest.TestCase):
         self.admin_a, self.manager_a = admin_a, manager_a
         self.staff_a, self.staff_grant_a, self.staff_deny_a = staff_a, staff_grant_a, staff_deny_a
         self.admin_b = admin_b
+        self.loc_a = loc_a
 
         self.t_admin = admin_token(biz_a.business_code, admin_a.username, "AdminPass9")
         self.t_manager = employee_token(biz_a.business_code, manager_a.username, "ManagerPass9", "manager")
@@ -157,10 +193,17 @@ class Perm001EnforcementTests(unittest.TestCase):
         return self.client.get(path, headers=self.auth(token), params=params or None)
 
     def product_payload(self, **overrides):
+        # Every generated product is genuinely distinct. Identical size and
+        # prices made the real duplicate detector (GC-011) answer 409
+        # "possible duplicate" on the ALLOWED cases - a correct product rule,
+        # so the fixture changes rather than overriding the duplicate check.
+        global _product_seq
+        _product_seq += 1
+        n = _product_seq
         payload = {
-            "name": f"Widget {uuid.uuid4().hex[:6]}", "category": "General", "size": "1 unit",
+            "name": f"Widget {uuid.uuid4().hex[:6]}", "category": "General", "size": f"{n * 7} unit",
             "warehouse": "Main Central Warehouse", "quantity": 5, "min_stock_level": 1,
-            "cost_price": 5.0, "wholesale_price": 8.0, "retail_price": 12.0,
+            "cost_price": 5.0 + n * 13, "wholesale_price": 8.0 + n * 17, "retail_price": 12.0 + n * 23,
         }
         payload.update(overrides)
         return payload
@@ -265,12 +308,13 @@ class Perm001EnforcementTests(unittest.TestCase):
         self.assertEqual(r.status_code, 403, r.text)
 
     def test_staff_expense_location_filter_stays_own_scoped(self):
-        location = self.db.query(main.Location).filter(main.Location.business_id == self.biz_a.id).first()
-        if location is None:
-            self.skipTest("this business has no Location row")
-        r = self.get("/expenses/", self.t_staff, location_id=location.id)
+        r = self.get("/expenses/", self.t_staff, location_id=self.loc_a.id)
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertTrue(self._expense_ids(r.json()) <= self._own_expense_ids(self.staff_a))
+        ids = self._expense_ids(r.json())
+        self.assertTrue(ids <= self._own_expense_ids(self.staff_a))
+        # Non-vacuous: the Location also holds Admin and Manager rows, and
+        # exactly one of Staff A's own rows - that one and only that one.
+        self.assertEqual(len(ids), 1, r.text)
 
     def test_expense_exports_use_the_same_scope(self):
         # Staff default has neither expenses.export nor view_all.

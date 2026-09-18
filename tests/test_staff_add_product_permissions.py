@@ -23,6 +23,7 @@ from postgres_test_support import ADMIN_URL, create_postgres_test_schema, drop_p
 
 _ctx = None
 main = None
+_product_seq = 0
 
 
 def setUpModule():
@@ -93,10 +94,17 @@ class StaffAddProductPermissionTests(unittest.TestCase):
         return {"Authorization": f"Bearer {token}"}
 
     def product_payload(self, **overrides):
+        # Distinct size and prices per generated product, so two products a
+        # test creates on purpose are not "possible duplicates" of each other
+        # under the real duplicate detector (GC-011). Tests that exercise the
+        # duplicate rules pass an explicit sku/barcode, which stays decisive.
+        global _product_seq
+        _product_seq += 1
+        n = _product_seq
         payload = {
-            "name": "Staff Test Widget", "category": "General", "size": "1 unit",
+            "name": "Staff Test Widget", "category": "General", "size": f"{n * 7} unit",
             "warehouse": "Main Central Warehouse", "quantity": 10, "min_stock_level": 2,
-            "cost_price": 5.0, "wholesale_price": 8.0, "retail_price": 12.0,
+            "cost_price": 5.0 + n * 13, "wholesale_price": 8.0 + n * 17, "retail_price": 12.0 + n * 23,
         }
         payload.update(overrides)
         return payload
