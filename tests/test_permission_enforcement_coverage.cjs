@@ -159,4 +159,17 @@ assert.match(appJs, /const canReadSuppliers = hasPermission\('supplier\.view'\)/
 assert.match(appJs, /if\(!hasPermission\('reports\.sales'\)\)/, 'F3: the sales chart must be skipped without reports.sales');
 assert.match(appJs, /'add product': 'inventory\.add_product'/, 'F4: Add Product must stay mapped to the effective permission');
 
+// Presets are ABSOLUTE sets (applying one unticks every code it omits), so the
+// "ordinary Staff" preset must list every Staff-default capability or it
+// silently revokes one. Only general_staff is anchored here — the specialist
+// presets (Sales / Procurement / Finance) are deliberately narrower.
+const generalStaffPreset = appJs.match(/general_staff:\s*\{[^}]*grants:\s*\[([^\]]*)\]/);
+assert.ok(generalStaffPreset, 'the general_staff preset must be parseable');
+for (const code of ['inventory.view', 'sales.create', 'inventory.add_product']) {
+    assert.ok(
+        generalStaffPreset[1].includes(`'${code}'`) || generalStaffPreset[1].includes(`"${code}"`),
+        `the General Staff preset must not revoke the Staff default ${code}`,
+    );
+}
+
 console.log(`PASS permission enforcement coverage — ${registry.size} codes, ${sites.size} enforced, ${ALLOW_LIST.size} allow-listed`);

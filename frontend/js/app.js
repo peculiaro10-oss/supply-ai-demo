@@ -20751,7 +20751,15 @@
         // checkboxes it set are saved.
         // =====================================================================
         const JOB_PRESETS = {
-            general_staff: { label: "General Staff", grants: ["inventory.view", "sales.create"] },
+            // "General Staff" means "the ordinary Staff job", so it must not
+            // silently take a capability AWAY from a Staff member who already
+            // has it by role default. `inventory.add_product` is Staff-default
+            // true (product decision D13 / PERM-001 Phase A); because a preset
+            // is an ABSOLUTE set — applying one unticks every code it does not
+            // list — leaving it out here revoked Add Product from ordinary
+            // Staff, contradicting that policy. The specialist presets below
+            // are deliberately narrower and are NOT treated this way.
+            general_staff: { label: "General Staff", grants: ["inventory.view", "sales.create", "inventory.add_product"] },
             sales: { label: "Sales", grants: ["inventory.view", "sales.create", "sales.wholesale", "sales.refund", "sales.view_history"] },
             inventory_warehouse: { label: "Inventory / Warehouse", grants: ["inventory.view", "inventory.add_product", "inventory.edit_product", "inventory.adjust_stock", "inventory.transfer_stock", "warehouse.view"] },
             procurement: { label: "Procurement", grants: ["supplier.view", "po.view", "po.create", "po.send", "procurement.price_monitor"] },
