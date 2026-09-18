@@ -4,8 +4,9 @@ Formalizes the exact pattern already used by tests/test_mutation_idempotency_pos
 (and test_registration_atomicity_postgres.py, test_paystack_verification_postgres.py,
 test_sales_checkout_atomicity_postgres.py, test_paystack_webhook_atomicity_postgres.py):
 create a uniquely-named schema on a real PostgreSQL server, point DATABASE_URL/
-PGOPTIONS at it, run `alembic upgrade head` against it in a subprocess, import
-`main` bound to that schema, and drop the schema afterward. This module exists
+SUPPLY_AI_DB_SEARCH_PATH at it, run `alembic upgrade head` against it in a
+subprocess, import `main` bound to that schema, and drop the schema afterward.
+This module exists
 only to remove the copy-pasted setUpClass/tearDownClass boilerplate every one
 of those files already repeats — it is not a new testing framework, and it
 does not change how any of them behave.
@@ -56,9 +57,72 @@ def _validate_schema_name(schema: str, prefix: str) -> None:
         raise RuntimeError(f"Unsafe generated test schema name: {schema!r}")
 
 
+def _assert_session_scoped_backend(admin_engine) -> None:
+    """Refuses to run when the endpoint is a TRANSACTION-mode pooler.
+
+    Schema pinning here is session state: `SET search_path` applied once per
+    pool checkout. That is only sound if one client connection owns one server
+    backend for the whole lease. Under transaction pooling the backend can be
+    swapped between statements, and an unqualified write would then fall
+    through to `public` — i.e. straight into the real application tables. This
+    check is the proof, not an assumption: it holds a single connection open
+    across several separate transactions and requires the server backend to be
+    the same one every time, then requires a second connection to get a
+    different backend (so the first result cannot be a coincidence of a shared
+    single backend). Fails closed — the caller aborts before any schema is
+    created.
+    """
+    from sqlalchemy import text
+
+    with admin_engine.connect() as connection:
+        pids = []
+        for _ in range(4):
+            with connection.begin():
+                pids.append(connection.execute(text("SELECT pg_backend_pid()")).scalar_one())
+        if len(set(pids)) != 1:
+            raise RuntimeError(
+                "Refusing to run: the PostgreSQL endpoint reassigns server backends between "
+                "transactions (transaction-mode pooling), so a session-scoped search_path "
+                "cannot isolate the test schema."
+            )
+        with admin_engine.connect() as other:
+            other_pid = other.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        if other_pid == pids[0]:
+            raise RuntimeError(
+                "Refusing to run: two concurrent connections share one PostgreSQL backend, "
+                "so per-connection schema pinning cannot be relied on."
+            )
+
+
+def _install_checkout_schema_guard(main_module, schema: str) -> None:
+    """Verifies the pin on EVERY pool checkout, not just once at import.
+
+    backend/main.py already SETs search_path on checkout; this adds the
+    matching assertion in test-only code, so a connection that is somehow not
+    bound to the isolated schema raises at checkout and can never carry a test
+    write into the real `public` tables. Registered after the application's own
+    listener, so it observes the state the tests will actually run against.
+    """
+    from sqlalchemy import event
+
+    @event.listens_for(main_module.engine, "checkout")
+    def _verify_test_schema(dbapi_connection, _record, _proxy):  # pragma: no cover - guard
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("SELECT current_schema(), current_schemas(false)")
+            current, explicit = cursor.fetchone()
+        finally:
+            cursor.close()
+        if current != schema or list(explicit or []) != [schema]:
+            raise RuntimeError(
+                "Isolated PostgreSQL test connection is not bound exclusively to its own schema; "
+                "refusing to hand it to a test."
+            )
+
+
 def create_postgres_test_schema(prefix: str, extra_env: Optional[dict] = None) -> PostgresTestSchema:
     """Creates a uniquely-named PostgreSQL schema, points DATABASE_URL/
-    PGOPTIONS at it, migrates it with `alembic upgrade head` (run as a
+    SUPPLY_AI_DB_SEARCH_PATH at it, migrates it with `alembic upgrade head` (run as a
     subprocess so it always sees a fresh environment regardless of what this
     process has already imported), then imports `main` bound to that schema.
 
@@ -75,17 +139,28 @@ def create_postgres_test_schema(prefix: str, extra_env: Optional[dict] = None) -
     schema = f"{prefix}_{uuid.uuid4().hex[:12]}"
     _validate_schema_name(schema, prefix)
     admin_engine = create_engine(ADMIN_URL, pool_pre_ping=True)
+    _assert_session_scoped_backend(admin_engine)
     with admin_engine.begin() as connection:
         connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
 
     original_env = {key: os.environ.get(key) for key in _ENV_KEYS_TO_RESTORE}
     os.environ.update({
         "DATABASE_URL": ADMIN_URL,
-        "PGOPTIONS": f"-csearch_path={schema}",
         "SUPPLY_AI_DB_SEARCH_PATH": schema,
         "SUPPLY_AI_ENV": "development",
         "SUPPLY_AI_SECRET_KEY": TEST_SECRET,
     })
+    # PGOPTIONS is deliberately NOT set, and any inherited value is removed.
+    # libpq forwards it as the `options` startup parameter, which managed
+    # poolers (Supabase/Supavisor, PgBouncer) reject outright — that rejection
+    # is what blocked this harness from ever running against the QA database.
+    # Schema pinning does not depend on it: SUPPLY_AI_DB_SEARCH_PATH makes
+    # alembic/env.py `SET LOCAL search_path` inside its own transaction and
+    # makes backend/main.py `SET search_path` on every pool checkout, and BOTH
+    # verify the binding with current_schema()/current_schemas(false) before
+    # running anything. Clearing it also stops a stale PGOPTIONS in the caller's
+    # environment from silently re-introducing the rejected parameter.
+    os.environ.pop("PGOPTIONS", None)
     if extra_env:
         os.environ.update(extra_env)
 
@@ -128,6 +203,7 @@ def create_postgres_test_schema(prefix: str, extra_env: Optional[dict] = None) -
             explicit_schemas = connection.execute(text("SELECT current_schemas(false)" )).scalar_one()
         if current_schema != schema or list(explicit_schemas or []) != [schema]:
             raise RuntimeError("PostgreSQL test connection did not bind exclusively to its isolated schema")
+        _install_checkout_schema_guard(main_module, schema)
     except Exception:
         # Import performs the application's startup connectivity check. If a
         # remote PostgreSQL disconnect happens after migration but before the
