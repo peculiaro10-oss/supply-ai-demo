@@ -93,7 +93,7 @@ class ChallengeTests(unittest.TestCase):
         first=self.send().json()['challenge_id']
         with self.Session() as db:
             db.get(main.OnboardingEmailChallenge,first).created_at=datetime.utcnow()-timedelta(minutes=2);db.commit()
-        old=self.token(issued=datetime.utcnow()-timedelta(seconds=30))  # a link opened before the second email existed
+        old=self.token(issued=datetime.utcnow()-timedelta(seconds=90))  # a link opened before the second email existed
         second=self.send().json()['challenge_id']
         r=self.confirm(second,email_token=old);self.assertEqual(r.status_code,400);self.assertIn('earlier verification email',r.text)
         self.assertEqual(self.confirm(second).json()['status'],'pending')
@@ -128,6 +128,10 @@ class ChallengeTests(unittest.TestCase):
         again=self.confirm(c,email_token='h.unknown.s')  # already verified: idempotent state, no re-proof
         self.assertEqual(again.json()['status'],'verified')
         self.assertNotIn('email_token',ok.text);self.assertNotIn('access_token',ok.text)
+    def test_cb001_small_clock_skew_tolerated_but_not_older_sessions(self):
+        c=self.send().json()['challenge_id']
+        self.assertEqual(self.click(c,issued=datetime.utcnow()-timedelta(seconds=45)).status_code,400)
+        self.assertEqual(self.click(c,issued=datetime.utcnow()-timedelta(seconds=10)).json()['status'],'verified')
     def test_cb001_legacy_pkce_link_still_verifies(self):
         c=self.send().json()['challenge_id']
         self.assertEqual(self.legacy_click(c).json()['status'],'verified')

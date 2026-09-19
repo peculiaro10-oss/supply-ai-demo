@@ -14277,7 +14277,9 @@ def onboarding_email_verify_confirm(data: OnboardingEmailConfirmRequest, request
             user, issued_at = _onboarding_email_token_proof(data.email_token)
             # Only a link opened for THIS challenge counts: a session issued
             # before the challenge existed (an older email) cannot verify it.
-            if issued_at < row.created_at.replace(microsecond=0):
+            # 30 s absorbs clock skew between Supabase and Cauldra; any earlier
+            # email is older than the 60 s resend cooldown.
+            if issued_at < row.created_at.replace(microsecond=0) - timedelta(seconds=30):
                 raise HTTPException(400, "This link belongs to an earlier verification email. Please use the newest email.")
         else:
             # Legacy PKCE links sent before CB-001 (flow state lives 300 s).
