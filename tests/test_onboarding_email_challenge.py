@@ -27,9 +27,10 @@ class ChallengeTests(unittest.TestCase):
         def db():
             with self.Session() as session: yield session
         main.app.dependency_overrides[main.get_db]=db
-        self.codes={};self.sends=[];self.tokens={};self.revoked=[]
+        self.codes={};self.sends=[];self.tokens={};self.revoked=[];self.provider_refuses=False
         def provider(path,body,params=None):
             if path=='otp':
+                if self.provider_refuses: raise HTTPException(429,{'message':'The email provider is temporarily rate limiting verification requests.','reason':'provider_rate_limit'})
                 self.sends.append((body,params));return {}
             expected=self.codes.get(body['auth_code'])
             actual=base64.urlsafe_b64encode(hashlib.sha256(body['code_verifier'].encode()).digest()).decode().rstrip('=')
@@ -150,6 +151,31 @@ class ChallengeTests(unittest.TestCase):
         self.revoked.clear()
         self.assertEqual(self.confirm(d,email_token='not-a-token').status_code,200)  # verified: state returned
         self.confirm(d);self.assertEqual(self.revoked,[])
+    def test_cb001_refused_resend_keeps_the_original_link_usable(self):
+        # QA Test E: the provider refused the resend and the original link died with it.
+        c=self.send().json()['challenge_id']
+        with self.Session() as db:
+            db.get(main.OnboardingEmailChallenge,c).created_at=datetime.utcnow()-timedelta(minutes=2);db.commit()
+        self.provider_refuses=True
+        r=self.send(challenge_id=c);self.assertEqual(r.status_code,429,r.text)
+        self.provider_refuses=False
+        self.assertEqual(self.confirm(c).json()['status'],'pending')   # the waiting tab keeps waiting
+        with self.Session() as db:
+            rows={x.challenge_id:x.status for x in db.query(main.OnboardingEmailChallenge).all()}
+        self.assertEqual(rows[c],'pending');self.assertEqual(sorted(v for k,v in rows.items() if k!=c),['invalidated'])
+        self.assertEqual(self.click(c).json()['status'],'verified')     # the email already received still works
+    def test_cb001_accepted_resend_retires_the_original(self):
+        c=self.send().json()['challenge_id']
+        with self.Session() as db:
+            db.get(main.OnboardingEmailChallenge,c).created_at=datetime.utcnow()-timedelta(minutes=2);db.commit()
+        d=self.send(challenge_id=c).json()['challenge_id']
+        self.assertNotEqual(c,d);self.assertEqual(self.confirm(c).status_code,410)
+        self.assertEqual(self.click(d).json()['status'],'verified')
+    def test_cb001_refused_send_for_a_changed_email_leaves_the_original_alone(self):
+        c=self.send().json()['challenge_id'];self.provider_refuses=True
+        self.assertEqual(self.send(email='other@example.com',challenge_id=c).status_code,429)
+        self.provider_refuses=False
+        self.assertEqual(self.confirm(c).json()['status'],'pending')
     def test_cb001_legacy_pkce_link_still_verifies(self):
         c=self.send().json()['challenge_id']
         self.assertEqual(self.legacy_click(c).json()['status'],'verified')

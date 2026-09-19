@@ -14166,6 +14166,7 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
     if data.billing_interval not in ("monthly", "annual") or data.platform not in ("web", "native_android", "native_ios"):
         raise HTTPException(400, "Invalid onboarding platform or billing interval.")
     now = datetime.utcnow()
+    superseded = None  # retired only once the provider has accepted the new email
     if data.challenge_id:
         old = _onboarding_row(db, data.challenge_id, lock=True)
         exact = (old.email, old.plan, old.billing_interval, old.platform) == (email, plan, interval, data.platform)
@@ -14186,12 +14187,12 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
                     },
                     headers={"Retry-After": str(retry_after)},
                 )
-            old.status = "invalidated"
+            superseded = old.challenge_id
         elif old.status not in ("consumed", "verified"):
             # Changing email/plan/platform starts a genuinely new verification
             # attempt. Do not make the new identity inherit the old challenge's
             # resend timer.
-            old.status = "invalidated"
+            superseded = old.challenge_id
     base = _onboarding_web_base()
     callback_base = _onboarding_callback_base()
     row = OnboardingEmailChallenge(challenge_id=secrets.token_hex(32), email=email, plan=plan,
@@ -14209,8 +14210,15 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
         # project's email-link lifetime (must be >= the Cauldra window).
         _onboarding_provider_post("otp", {"email": email, "create_user": True}, {"redirect_to":redirect})
     except HTTPException:
+        # The email the customer already has stays usable: a resend that the
+        # provider refuses (e.g. its rate limit) must not kill the old link.
         row.status = "invalidated"; db.commit()
         raise
+    if superseded:
+        previous = db.query(OnboardingEmailChallenge).filter_by(challenge_id=superseded).with_for_update().first()
+        if previous and previous.status == "pending":
+            previous.status = "invalidated"
+            db.commit()
 
     # Count provider-accepted sends for abuse protection. Provider rejections
     # (especially Supabase 429s) must not also increase Cauldra's own limiter.
