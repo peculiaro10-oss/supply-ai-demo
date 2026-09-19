@@ -14062,8 +14062,8 @@ def _onboarding_provider_post(path, body, params=None):
 def _onboarding_email_token_proof(email_token):
     """Resolve the one-time session Supabase issues when the email link is
     opened (CB-001). Supabase validates the token; Cauldra reads only the
-    user's email, confirmation time and the token's issue time, then revokes
-    the session. Returns (user, issued_at)."""
+    user's email, confirmation time and the token's issue time. The session is
+    revoked by the confirm endpoint afterwards. Returns (user, issued_at)."""
     import requests
     from supabase_client import SupabaseSettings
     try:
@@ -14086,14 +14086,24 @@ def _onboarding_email_token_proof(email_token):
         issued_at = datetime.utcfromtimestamp(int(claims["iat"]))
     except (ValueError, KeyError, IndexError, TypeError):
         raise HTTPException(400, "The verification link could not be processed. Please request a new email.")
-    try:
-        # Cauldra never uses this session: revoke it so the refresh token that
-        # rode in the link's fragment is useless even if it lingers in history.
-        requests.post(settings.url + "/auth/v1/logout", headers=headers, params={"scope": "local"},
-                      timeout=10, allow_redirects=False)
-    except requests.RequestException:
-        pass
     return (user if isinstance(user, dict) else {}), issued_at
+
+_ONBOARDING_LINK_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+
+def _onboarding_revoke_link_session(email_token):
+    """Best-effort revoke of the one-time session an email link produced.
+    Cauldra never uses it, so it must not outlive the callback whatever the
+    outcome (verified, expired, unknown or already-used challenge): the
+    refresh token rode in the link's fragment and may linger in history."""
+    import requests
+    from supabase_client import SupabaseSettings
+    try:
+        settings = SupabaseSettings.from_environment(required=True)
+        requests.post(settings.url + "/auth/v1/logout",
+                      headers={"apikey": settings.secret_key, "Authorization": "Bearer " + email_token},
+                      params={"scope": "local"}, timeout=10, allow_redirects=False)
+    except (SupabaseConfigurationError, requests.RequestException):
+        pass
 
 def _onboarding_web_base():
     try:
@@ -14224,6 +14234,15 @@ class OnboardingEmailConfirmRequest(BaseModel):
 def onboarding_email_verify_confirm(data: OnboardingEmailConfirmRequest, request: Request, db: Session = Depends(get_db)):
     ip = request.client.host if request.client else "unknown"
     check_rate_limit(db, "onboarding-email-confirm-ip", ip)
+    link_token = data.email_token if (len(data.email_token) <= 4096 and
+        _ONBOARDING_LINK_TOKEN_SHAPE.fullmatch(data.email_token)) else ""
+    try:
+        return _onboarding_email_verify_confirm(data, ip, db)
+    finally:
+        if link_token:
+            _onboarding_revoke_link_session(link_token)
+
+def _onboarding_email_verify_confirm(data, ip, db):
     marker = _challenge_diagnostic_id(data.challenge_id)
     proof_present = bool(data.code or data.email_token)
     try:
@@ -14269,8 +14288,8 @@ def onboarding_email_verify_confirm(data: OnboardingEmailConfirmRequest, request
             )
         return _onboarding_state(row)  # polling never consults global confirmation
     proof_value = data.email_token or data.code
-    token_shape = r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+" if data.email_token else r"[A-Za-z0-9_-]+"
-    if len(proof_value) > (4096 if data.email_token else 2048) or not re.fullmatch(token_shape, proof_value):
+    token_shape = _ONBOARDING_LINK_TOKEN_SHAPE if data.email_token else re.compile(r"[A-Za-z0-9_-]+")
+    if len(proof_value) > (4096 if data.email_token else 2048) or not token_shape.fullmatch(proof_value):
         raise HTTPException(400, "Invalid verification code. Please request a new email.")
     try:
         if data.email_token:

@@ -27,7 +27,7 @@ class ChallengeTests(unittest.TestCase):
         def db():
             with self.Session() as session: yield session
         main.app.dependency_overrides[main.get_db]=db
-        self.codes={};self.sends=[];self.tokens={}
+        self.codes={};self.sends=[];self.tokens={};self.revoked=[]
         def provider(path,body,params=None):
             if path=='otp':
                 self.sends.append((body,params));return {}
@@ -43,6 +43,7 @@ class ChallengeTests(unittest.TestCase):
             return {'email':email,'email_confirmed_at':'2026-09-19T00:00:00Z'},issued
         self.patches=[patch.object(main,'_onboarding_provider_post',side_effect=provider),
             patch.object(main,'_onboarding_email_token_proof',side_effect=token_proof),
+            patch.object(main,'_onboarding_revoke_link_session',side_effect=lambda t:self.revoked.append(t)),
             patch.object(main,'_supabase_email_confirmed',side_effect=AssertionError('Global confirmation must not be queried')),
             patch.object(main,'SUPPLY_AI_FRONTEND_URL','https://web.example.com'),
             patch.object(main,'SUPABASE_EMAIL_REDIRECT_URL','https://web.example.com'),
@@ -132,6 +133,23 @@ class ChallengeTests(unittest.TestCase):
         c=self.send().json()['challenge_id']
         self.assertEqual(self.click(c,issued=datetime.utcnow()-timedelta(seconds=45)).status_code,400)
         self.assertEqual(self.click(c,issued=datetime.utcnow()-timedelta(seconds=10)).json()['status'],'verified')
+    def test_cb001_link_session_revoked_whatever_the_outcome(self):
+        # Rejections must not leave a live Supabase session behind (found in QA Test D).
+        c=self.send().json()['challenge_id']
+        with self.Session() as db:
+            row=db.get(main.OnboardingEmailChallenge,c);row.expires_at=datetime.utcnow()-timedelta(seconds=1);db.commit()
+        expired=self.token();self.assertEqual(self.confirm(c,email_token=expired).status_code,410)
+        unknown=self.token();self.assertEqual(self.confirm('b'*64,email_token=unknown).status_code,403)
+        malformed=self.token();self.assertEqual(self.confirm('bad',email_token=malformed).status_code,403)
+        d=self.send(email='fresh@example.com').json()['challenge_id']
+        wrong=self.token();self.assertEqual(self.confirm(d,email_token=wrong).status_code,403)
+        ok=self.token(email='fresh@example.com');self.assertEqual(self.confirm(d,email_token=ok).json()['status'],'verified')
+        again=self.token(email='fresh@example.com');self.assertEqual(self.confirm(d,email_token=again).json()['status'],'verified')
+        self.assertEqual(self.revoked,[expired,unknown,malformed,wrong,ok,again])
+        # a non-token value is never forwarded to Supabase; polls without a token revoke nothing
+        self.revoked.clear()
+        self.assertEqual(self.confirm(d,email_token='not-a-token').status_code,200)  # verified: state returned
+        self.confirm(d);self.assertEqual(self.revoked,[])
     def test_cb001_legacy_pkce_link_still_verifies(self):
         c=self.send().json()['challenge_id']
         self.assertEqual(self.legacy_click(c).json()['status'],'verified')
@@ -205,14 +223,19 @@ class EmailTokenProofTests(unittest.TestCase):
     def tearDown(self): self.p.stop()
     def resp(self,status,body=None):
         r=type('R',(),{})();r.status_code=status;r.json=lambda:(body if body is not None else {});return r
-    def test_valid_token_reads_user_iat_and_revokes_session(self):
+    def test_valid_token_reads_user_and_iat(self):
         user={'email':'Owner@Example.com','email_confirmed_at':'2026-09-19T00:00:00Z'}
-        with patch('requests.get',return_value=self.resp(200,user)) as g, patch('requests.post',return_value=self.resp(204)) as post:
+        with patch('requests.get',return_value=self.resp(200,user)) as g:
             got,issued=main._onboarding_email_token_proof(self.tok)
         self.assertEqual(got,user);self.assertEqual(issued,datetime.utcfromtimestamp(1789000000))
         self.assertEqual(g.call_args.args[0],'https://proj.supabase.co/auth/v1/user')
         self.assertEqual(g.call_args.kwargs['headers']['Authorization'],'Bearer '+self.tok)
+    def test_revoke_helper_calls_logout_with_the_link_token(self):
+        with patch('requests.post',return_value=self.resp(204)) as post:
+            main._onboarding_revoke_link_session(self.tok)
         self.assertEqual(post.call_args.args[0],'https://proj.supabase.co/auth/v1/logout')
+        self.assertEqual(post.call_args.kwargs['headers']['Authorization'],'Bearer '+self.tok)
+        self.assertEqual(post.call_args.kwargs['params'],{'scope':'local'})
     def test_rejected_or_unreadable_tokens(self):
         for status,code in ((401,400),(403,400),(500,502),(503,502)):
             with patch('requests.get',return_value=self.resp(status)),patch('requests.post'):
@@ -221,9 +244,9 @@ class EmailTokenProofTests(unittest.TestCase):
         with patch('requests.get',return_value=self.resp(200,{'email':'a@b.c'})),patch('requests.post'):
             with self.assertRaises(HTTPException) as e: main._onboarding_email_token_proof('hdr.bm90LWpzb24.sig')
         self.assertEqual(e.exception.status_code,400)
-    def test_logout_failure_does_not_block_verification(self):
+    def test_logout_failure_is_swallowed(self):
         import requests
-        with patch('requests.get',return_value=self.resp(200,{'email':'a@b.c'})),patch('requests.post',side_effect=requests.ConnectionError()):
-            self.assertEqual(main._onboarding_email_token_proof(self.tok)[0],{'email':'a@b.c'})
+        with patch('requests.post',side_effect=requests.ConnectionError()):
+            main._onboarding_revoke_link_session(self.tok)  # must not raise
 
 if __name__=='__main__':unittest.main(verbosity=2)
