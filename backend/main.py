@@ -12175,6 +12175,12 @@ SALES_EXPORT_COLUMNS = [
     {"key": "quantity", "label": "QUANTITY", "type": "number"},
     {"key": "unit_price", "label": "UNIT PRICE", "type": "currency"},
     {"key": "total", "label": "TOTAL", "type": "currency"},
+    # REFUND-003: a refunded sale must not export at full value with no trace of
+    # the refund. These three are additive — every original column above keeps
+    # its exact meaning, and NET TOTAL is what actually reconciles to the till.
+    {"key": "refunded_quantity", "label": "REFUNDED QUANTITY", "type": "number"},
+    {"key": "refund_amount", "label": "REFUND AMOUNT", "type": "currency"},
+    {"key": "net_total", "label": "NET TOTAL", "type": "currency"},
     {"key": "currency", "label": "CURRENCY", "type": "text"},
 ]
 
@@ -12219,15 +12225,34 @@ def _sales_export_rows(db, user, business, period, custom_start, custom_end):
             return "Main Location"
         return loc_names.get(loc_id, "Main Location")
 
+    # REFUND-003: refunds against these very sale lines, whenever they were
+    # performed. Keyed by the original sale, exactly as RefundLine records it,
+    # so a refund issued on a later day still shows against the sale it reverses
+    # — without moving the sale's own revenue out of the period it belongs to.
+    refunds_by_sale = {}
+    sale_ids = [s.id for s, _ in rows]
+    if sale_ids:
+        for original_sale_id, qty, amount in (
+            db.query(RefundLine.original_sale_id,
+                     func.coalesce(func.sum(RefundLine.quantity), 0),
+                     func.coalesce(func.sum(RefundLine.refund_amount), 0.0))
+            .filter(RefundLine.business_id == user.business_id, RefundLine.original_sale_id.in_(sale_ids))
+            .group_by(RefundLine.original_sale_id)
+            .all()
+        ):
+            refunds_by_sale[original_sale_id] = (int(qty or 0), float(amount or 0.0))
+
     out_rows = []
     for sale, product in rows:
         local_dt = sale.timestamp.replace(tzinfo=timezone.utc).astimezone(tz)
         unit_price = round(sale.total_price / sale.quantity, 2) if sale.quantity else sale.total_price
+        refunded_qty, refund_amount = refunds_by_sale.get(sale.id, (0, 0.0))
         out_rows.append([
             sale.id, local_dt.strftime("%Y-%m-%d"), local_dt.strftime("%H:%M:%S"),
             product.name if product else "Deleted product", product.sku if product else "", (product.warehouse if product else "") or "",
             location_label(sale),
             sale.quantity, unit_price, sale.total_price,
+            refunded_qty, round(refund_amount, 2), round(sale.total_price - refund_amount, 2),
             sale.currency_snapshot or "",
         ])
     return out_rows

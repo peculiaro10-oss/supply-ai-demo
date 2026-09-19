@@ -26386,6 +26386,16 @@
         // PROFIT
         // =====================================================================
         const PROFIT_PREVIOUS_PERIOD = { today: "yesterday", week: "previous_week", month: "previous_month", year: "previous_year" };
+        // REFUND-002: "nothing happened" must mean every component is zero. A period
+        // containing only refunds has no sales transactions and no expenses, yet money
+        // moved — counting refunds (and any non-zero figure, negative included) keeps
+        // the Profit view honest about it.
+        function profitPeriodHasActivity(summary) {
+            if (!summary) return false;
+            const counts = ["transaction_count", "expense_count", "refund_transaction_count", "refunded_units", "sale_line_count"];
+            const amounts = ["sales", "gross_sales", "refund_amount", "expenses", "cogs", "gross_profit", "net_profit"];
+            return counts.some(k => Number(summary[k] || 0) !== 0) || amounts.some(k => Number(summary[k] || 0) !== 0);
+        }
 
         // Used to populate four separate "Today/Week/Month/Year" profit
         // cards as their own dashboard section — consolidated into a single
@@ -26618,7 +26628,12 @@
                     if (prevRes.ok) previous = await prevRes.json();
                 }
 
-                if (summary.transaction_count === 0 && summary.expense_count === 0) {
+                // REFUND-002: a period whose only activity is a refund is NOT empty.
+                // Refunds are not sales, so transaction_count stays 0 for them — a
+                // refund-only period was therefore shown as "nothing recorded" while
+                // the same payload reported the money leaving. Treat any component as
+                // activity, including negative ones.
+                if (!profitPeriodHasActivity(summary)) {
                     body.innerHTML = `<div class="text-center py-10 text-textSec">No sales or expenses recorded yet for this period.</div>`;
                     return;
                 }
@@ -26699,7 +26714,7 @@
                 const rows = await res.json();
                 lastProfitData = null; // this grouped view has no single-table export shape yet — export stays disabled for it (see exportProfitCsv/Excel below)
 
-                const withActivity = rows.filter(r => (r.transaction_count || 0) > 0 || (r.expense_count || 0) > 0);
+                const withActivity = rows.filter(r => profitPeriodHasActivity(r));   // REFUND-002: refunds count as activity
                 if (!withActivity.length) {
                     body.innerHTML = `<div class="text-center py-10 text-textSec">No sales or expenses recorded yet for this period, at any location.</div>`;
                     return;
