@@ -27,7 +27,7 @@ class ChallengeTests(unittest.TestCase):
         def db():
             with self.Session() as session: yield session
         main.app.dependency_overrides[main.get_db]=db
-        self.codes={};self.sends=[]
+        self.codes={};self.sends=[];self.tokens={}
         def provider(path,body,params=None):
             if path=='otp':
                 self.sends.append((body,params));return {}
@@ -36,7 +36,13 @@ class ChallengeTests(unittest.TestCase):
             if not expected or expected[0]!=actual: raise HTTPException(400,'Invalid code')
             self.codes.pop(body['auth_code'])
             return {'user':{'email':expected[1],'email_confirmed_at':'2026-09-08T00:00:00Z'},'refresh_token':'never-return-to-browser'}
+        def token_proof(token):
+            # Stands in for Supabase's GET /auth/v1/user: validates the link session.
+            if token not in self.tokens: raise HTTPException(400,'The verification link could not be processed. Please request a new email.')
+            email,issued=self.tokens[token]
+            return {'email':email,'email_confirmed_at':'2026-09-19T00:00:00Z'},issued
         self.patches=[patch.object(main,'_onboarding_provider_post',side_effect=provider),
+            patch.object(main,'_onboarding_email_token_proof',side_effect=token_proof),
             patch.object(main,'_supabase_email_confirmed',side_effect=AssertionError('Global confirmation must not be queried')),
             patch.object(main,'SUPPLY_AI_FRONTEND_URL','https://web.example.com'),
             patch.object(main,'SUPABASE_EMAIL_REDIRECT_URL','https://web.example.com'),
@@ -53,8 +59,14 @@ class ChallengeTests(unittest.TestCase):
         return self.client.post('/onboarding/email/verify',json={'email':'owner@example.com','plan':'starter','billing_interval':'monthly',**extra})
     def confirm(self,c,**extra):
         return self.client.post('/onboarding/email/verify/confirm',json={'challenge_id':c,**extra})
-    def click(self,c):
-        code=secrets.token_hex(20);self.codes[code]=(self.sends[-1][0]['code_challenge'],'owner@example.com')
+    def token(self,email='owner@example.com',issued=None):
+        t='h.'+secrets.token_urlsafe(24)+'.s';self.tokens[t]=(email,(issued or datetime.utcnow()).replace(microsecond=0));return t
+    def click(self,c,**kw):
+        return self.confirm(c,email_token=self.token(**kw))
+    def legacy_click(self,c):
+        # A PKCE link emailed before CB-001: its code is bound to the challenge's verifier.
+        v=main._onboarding_verifier(c);code=secrets.token_hex(20)
+        self.codes[code]=(base64.urlsafe_b64encode(hashlib.sha256(v.encode()).digest()).decode().rstrip('='),'owner@example.com')
         return self.confirm(c,code=code)
     def payment(self,c='',key=None,**extra):
         return self.client.post('/onboarding/payment/init',headers={'Idempotency-Key':key or secrets.token_hex(12)},json={'email':'owner@example.com','plan':'starter','billing_interval':'monthly','challenge_id':c,**extra})
@@ -78,11 +90,47 @@ class ChallengeTests(unittest.TestCase):
             self.assertEqual(row.email_challenge_id,c);self.assertEqual(row.email,proof.email)
             self.assertIsNotNone(proof.consumed_at)
     def test_wrong_challenge_code_cannot_verify_new_attempt(self):
-        first=self.send().json()['challenge_id'];body=self.sends[-1][0]
-        second=self.send().json()['challenge_id'];self.codes['old-code']=(body['code_challenge'],'owner@example.com')
-        self.assertEqual(self.confirm(second,code='old-code').status_code,400)
+        first=self.send().json()['challenge_id']
+        with self.Session() as db:
+            db.get(main.OnboardingEmailChallenge,first).created_at=datetime.utcnow()-timedelta(minutes=2);db.commit()
+        old=self.token(issued=datetime.utcnow()-timedelta(seconds=30))  # a link opened before the second email existed
+        second=self.send().json()['challenge_id']
+        r=self.confirm(second,email_token=old);self.assertEqual(r.status_code,400);self.assertIn('earlier verification email',r.text)
         self.assertEqual(self.confirm(second).json()['status'],'pending')
-        self.assertEqual(self.confirm(first,code='old-code').json()['status'],'verified')
+        self.assertEqual(self.confirm(first,email_token=old).json()['status'],'verified')
+        # a legacy PKCE code for one challenge cannot verify another
+        v=main._onboarding_verifier(first);self.codes['old-code']=(base64.urlsafe_b64encode(hashlib.sha256(v.encode()).digest()).decode().rstrip('='),'owner@example.com')
+        self.assertEqual(self.confirm(second,code='old-code').status_code,400)
+    def test_cb001_send_does_not_start_a_pkce_flow(self):
+        self.send();body,params=self.sends[-1]
+        self.assertNotIn('code_challenge',body);self.assertNotIn('code_challenge_method',body)
+        self.assertEqual(body,{'email':'owner@example.com','create_user':True})
+        self.assertIn('/auth/email-verified?',params['redirect_to'])
+    def test_cb001_verifies_across_the_whole_window(self):
+        # Before CB-001 Supabase's sign-up flow state died 300 s after the send.
+        for minutes,expected in ((0,200),(3,200),(7,200),(19.5,200),(20.5,410)):
+            c=self.send(email=f'owner{int(minutes*10)}@example.com').json()['challenge_id']
+            with self.Session() as db:
+                row=db.get(main.OnboardingEmailChallenge,c)
+                row.created_at=datetime.utcnow()-timedelta(minutes=minutes);row.expires_at=row.created_at+timedelta(minutes=main.ONBOARDING_EMAIL_CHALLENGE_MINUTES);db.commit()
+            r=self.click(c,email=f'owner{int(minutes*10)}@example.com')
+            self.assertEqual(r.status_code,expected,(minutes,r.text))
+            if expected==200: self.assertEqual(r.json()['status'],'verified')
+    def test_cb001_token_proof_rules(self):
+        c=self.send().json()['challenge_id']
+        self.assertEqual(self.click(c,email='someone-else@example.com').status_code,403)
+        self.assertEqual(self.confirm(c).json()['status'],'pending')
+        for bad in ('not-a-token','a.b','a.b.c.d','a.b.c<script>','x'*5000):
+            self.assertEqual(self.confirm(c,email_token=bad).status_code,400,bad[:20])
+        self.assertEqual(self.confirm(c,email_token='h.unknown.s').status_code,400)
+        self.assertEqual(self.confirm(c).json()['status'],'pending')
+        ok=self.click(c);self.assertEqual(ok.json()['status'],'verified')
+        again=self.confirm(c,email_token='h.unknown.s')  # already verified: idempotent state, no re-proof
+        self.assertEqual(again.json()['status'],'verified')
+        self.assertNotIn('email_token',ok.text);self.assertNotIn('access_token',ok.text)
+    def test_cb001_legacy_pkce_link_still_verifies(self):
+        c=self.send().json()['challenge_id']
+        self.assertEqual(self.legacy_click(c).json()['status'],'verified')
     def test_expiry_tamper_boolean_and_missing_challenge(self):
         c=self.send().json()['challenge_id']
         self.assertEqual(self.confirm('tampered',verified=True).status_code,403)
@@ -141,5 +189,37 @@ class ChallengeTests(unittest.TestCase):
         finally: main._native_cookie_request.reset(marker)
         r=Response();main.set_refresh_cookie(r,'test-only');self.assertIn('SameSite=lax',r.headers['set-cookie'])
         self.assertEqual(self.client.post('/auth/refresh',headers={'Origin':'https://untrusted.example'}).status_code,403)
+
+class EmailTokenProofTests(unittest.TestCase):
+    """The real Supabase token check behind CB-001, with HTTP mocked."""
+    def setUp(self):
+        import supabase_client, json as _json
+        self.settings=type('S',(),{'url':'https://proj.supabase.co','secret_key':'service-test-key'})()
+        self.p=patch.object(supabase_client.SupabaseSettings,'from_environment',return_value=self.settings);self.p.start()
+        claims=base64.urlsafe_b64encode(_json.dumps({'iat':1789000000,'sub':'u'}).encode()).decode().rstrip('=')
+        self.tok='hdr.'+claims+'.sig'
+    def tearDown(self): self.p.stop()
+    def resp(self,status,body=None):
+        r=type('R',(),{})();r.status_code=status;r.json=lambda:(body if body is not None else {});return r
+    def test_valid_token_reads_user_iat_and_revokes_session(self):
+        user={'email':'Owner@Example.com','email_confirmed_at':'2026-09-19T00:00:00Z'}
+        with patch('requests.get',return_value=self.resp(200,user)) as g, patch('requests.post',return_value=self.resp(204)) as post:
+            got,issued=main._onboarding_email_token_proof(self.tok)
+        self.assertEqual(got,user);self.assertEqual(issued,datetime.utcfromtimestamp(1789000000))
+        self.assertEqual(g.call_args.args[0],'https://proj.supabase.co/auth/v1/user')
+        self.assertEqual(g.call_args.kwargs['headers']['Authorization'],'Bearer '+self.tok)
+        self.assertEqual(post.call_args.args[0],'https://proj.supabase.co/auth/v1/logout')
+    def test_rejected_or_unreadable_tokens(self):
+        for status,code in ((401,400),(403,400),(500,502),(503,502)):
+            with patch('requests.get',return_value=self.resp(status)),patch('requests.post'):
+                with self.assertRaises(HTTPException) as e: main._onboarding_email_token_proof(self.tok)
+            self.assertEqual(e.exception.status_code,code,status)
+        with patch('requests.get',return_value=self.resp(200,{'email':'a@b.c'})),patch('requests.post'):
+            with self.assertRaises(HTTPException) as e: main._onboarding_email_token_proof('hdr.bm90LWpzb24.sig')
+        self.assertEqual(e.exception.status_code,400)
+    def test_logout_failure_does_not_block_verification(self):
+        import requests
+        with patch('requests.get',return_value=self.resp(200,{'email':'a@b.c'})),patch('requests.post',side_effect=requests.ConnectionError()):
+            self.assertEqual(main._onboarding_email_token_proof(self.tok)[0],{'email':'a@b.c'})
 
 if __name__=='__main__':unittest.main(verbosity=2)

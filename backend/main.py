@@ -13865,6 +13865,10 @@ def ensure_verification_refund(db: Session, row, transaction_reference: str, pro
 # Where Supabase should send the guest after they click the verification link.
 # Must also be added to the Supabase project's Auth "Redirect URLs" allow-list.
 ONBOARDING_EMAIL_RESEND_SECONDS = int(os.getenv("ONBOARDING_EMAIL_RESEND_SECONDS", "60"))
+# How long a verification email stays usable (CB-001). The Supabase project's
+# email-link lifetime (Auth "Email OTP Expiration", mailer_otp_exp) must be at
+# least this long, or links die before Cauldra says they do.
+ONBOARDING_EMAIL_CHALLENGE_MINUTES = 20
 
 def _supabase_auth_or_503():
     """The trusted server-side Supabase Auth client. 503 (never a silent pass)
@@ -13965,9 +13969,12 @@ def _onboarding_check_rate_limit(db: Session, scope: str, key: str, reason: str,
         headers = {"Retry-After": str(retry_after)} if retry_after is not None else None
         raise HTTPException(status_code=429, detail=detail, headers=headers)
 
-# Onboarding uses a unique S256 PKCE verifier for EACH challenge. An old
-# Supabase user/session/token cannot complete a new challenge. The verifier is
-# derived server-side and never returned to clients or stored in URLs.
+# Challenges created before CB-001 used a unique S256 PKCE verifier each; the
+# verifier is still honoured for links already in inboxes. It is derived
+# server-side and never returned to clients or stored in URLs. New challenges
+# are proven by the email-link token instead, which must be issued after the
+# challenge was created, so an old Supabase session still cannot complete a
+# new challenge.
 def _onboarding_verifier(challenge_id):
     return hmac.new(SECRET_KEY.encode(), ("onboarding-pkce-v1:" + challenge_id).encode(), "sha256").hexdigest()
 
@@ -14051,6 +14058,42 @@ def _onboarding_provider_post(path, body, params=None):
         return response.json()
     except ValueError:
         raise HTTPException(502, "Email verification returned an invalid response. Please try again.")
+
+def _onboarding_email_token_proof(email_token):
+    """Resolve the one-time session Supabase issues when the email link is
+    opened (CB-001). Supabase validates the token; Cauldra reads only the
+    user's email, confirmation time and the token's issue time, then revokes
+    the session. Returns (user, issued_at)."""
+    import requests
+    from supabase_client import SupabaseSettings
+    try:
+        settings = SupabaseSettings.from_environment(required=True)
+    except SupabaseConfigurationError:
+        raise HTTPException(503, "Email verification is not configured. Please contact support.")
+    headers = {"apikey": settings.secret_key, "Authorization": "Bearer " + email_token}
+    try:
+        response = requests.get(settings.url + "/auth/v1/user", headers=headers, timeout=20, allow_redirects=False)
+    except requests.RequestException:
+        raise HTTPException(502, "Email verification could not connect. Please try again.")
+    if response.status_code >= 500:
+        raise HTTPException(502, "Email verification is temporarily unavailable. Please try again.")
+    if response.status_code != 200:
+        raise HTTPException(400, "The verification link could not be processed. Please request a new email.")
+    try:
+        user = response.json()
+        payload = email_token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        issued_at = datetime.utcfromtimestamp(int(claims["iat"]))
+    except (ValueError, KeyError, IndexError, TypeError):
+        raise HTTPException(400, "The verification link could not be processed. Please request a new email.")
+    try:
+        # Cauldra never uses this session: revoke it so the refresh token that
+        # rode in the link's fragment is useless even if it lingers in history.
+        requests.post(settings.url + "/auth/v1/logout", headers=headers, params={"scope": "local"},
+                      timeout=10, allow_redirects=False)
+    except requests.RequestException:
+        pass
+    return (user if isinstance(user, dict) else {}), issued_at
 
 def _onboarding_web_base():
     try:
@@ -14144,14 +14187,17 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
     row = OnboardingEmailChallenge(challenge_id=secrets.token_hex(32), email=email, plan=plan,
         billing_interval=interval, platform=data.platform,
         return_target=base + "/" if data.platform == "web" else "cauldra://auth/email-verified",
-        status="pending", created_at=now, expires_at=now + timedelta(minutes=20))
+        status="pending", created_at=now, expires_at=now + timedelta(minutes=ONBOARDING_EMAIL_CHALLENGE_MINUTES))
     db.add(row)
     db.commit()  # durable pending state before any external side effect
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(_onboarding_verifier(row.challenge_id).encode()).digest()).decode().rstrip("=")
     redirect = callback_base + "/auth/email-verified?" + urlencode({"challenge":row.challenge_id,"purpose":"onboarding"})
     try:
-        _onboarding_provider_post("otp", {"email": email, "create_user": True,
-            "code_challenge": challenge, "code_challenge_method": "s256"}, {"redirect_to":redirect})
+        # CB-001: no PKCE here. For a first-time address Supabase treats this as
+        # a sign-up, and its PKCE flow state expires 300 s after THIS request,
+        # regardless of when the link is opened, which silently broke
+        # Cauldra's 20-minute window. Without PKCE the link lives for the
+        # project's email-link lifetime (must be >= the Cauldra window).
+        _onboarding_provider_post("otp", {"email": email, "create_user": True}, {"redirect_to":redirect})
     except HTTPException:
         row.status = "invalidated"; db.commit()
         raise
@@ -14171,6 +14217,7 @@ def onboarding_email_verify(data: OnboardingEmailVerifyRequest, request: Request
 class OnboardingEmailConfirmRequest(BaseModel):
     challenge_id: str = ""
     code: str = ""
+    email_token: str = ""
     platform: str = ""
 
 @app.post("/onboarding/email/verify/confirm")
@@ -14178,16 +14225,17 @@ def onboarding_email_verify_confirm(data: OnboardingEmailConfirmRequest, request
     ip = request.client.host if request.client else "unknown"
     check_rate_limit(db, "onboarding-email-confirm-ip", ip)
     marker = _challenge_diagnostic_id(data.challenge_id)
+    proof_present = bool(data.code or data.email_token)
     try:
         row = _onboarding_row(db, data.challenge_id, lock=True)
     except HTTPException:
         _integration_diagnostic(
-            "EMAIL_VERIFY_CALLBACK_RECEIVED" if data.code else "EMAIL_VERIFY_RESUME_REQUESTED",
+            "EMAIL_VERIFY_CALLBACK_RECEIVED" if proof_present else "EMAIL_VERIFY_RESUME_REQUESTED",
             challenge=marker, current_platform=data.platform or None,
-            challenge_matched=False, code_present=bool(data.code),
+            challenge_matched=False, code_present=proof_present,
         )
         raise
-    if data.code:
+    if proof_present:
         _integration_diagnostic(
             "EMAIL_VERIFY_CALLBACK_RECEIVED", challenge=marker,
             platform=row.platform, challenge_matched=True, code_present=True,
@@ -14212,24 +14260,34 @@ def onboarding_email_verify_confirm(data: OnboardingEmailConfirmRequest, request
             })
     if row.status == "consumed":
         raise HTTPException(409, "This email verification has already been used for payment.")
-    if row.status == "verified" or not data.code:
-        if not data.code:
+    if row.status == "verified" or not proof_present:
+        if not proof_present:
             _integration_diagnostic(
                 "EMAIL_VERIFY_RESUME_RESULT", challenge=marker,
                 platform=row.platform, current_platform=data.platform or None,
                 status=row.status,
             )
         return _onboarding_state(row)  # polling never consults global confirmation
-    if len(data.code) > 2048 or not re.fullmatch(r"[A-Za-z0-9_-]+", data.code):
+    proof_value = data.email_token or data.code
+    token_shape = r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+" if data.email_token else r"[A-Za-z0-9_-]+"
+    if len(proof_value) > (4096 if data.email_token else 2048) or not re.fullmatch(token_shape, proof_value):
         raise HTTPException(400, "Invalid verification code. Please request a new email.")
     try:
-        proof = _onboarding_provider_post("token", {"auth_code":data.code,
-            "code_verifier":_onboarding_verifier(row.challenge_id)}, {"grant_type":"pkce"})
+        if data.email_token:
+            user, issued_at = _onboarding_email_token_proof(data.email_token)
+            # Only a link opened for THIS challenge counts: a session issued
+            # before the challenge existed (an older email) cannot verify it.
+            if issued_at < row.created_at.replace(microsecond=0):
+                raise HTTPException(400, "This link belongs to an earlier verification email. Please use the newest email.")
+        else:
+            # Legacy PKCE links sent before CB-001 (flow state lives 300 s).
+            proof = _onboarding_provider_post("token", {"auth_code":data.code,
+                "code_verifier":_onboarding_verifier(row.challenge_id)}, {"grant_type":"pkce"})
+            user = proof.get("user") or {}
     except HTTPException:
         db.rollback()
         record_failure(db, "onboarding-email-confirm-ip", ip)
         raise
-    user = proof.get("user") or {}
     if str(user.get("email") or "").strip().lower() != row.email or not user.get("email_confirmed_at"):
         raise HTTPException(403, "The verified email does not match this onboarding attempt.")
     # Provider session/refresh credentials are deliberately discarded here.

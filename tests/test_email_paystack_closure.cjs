@@ -22,11 +22,12 @@ function emailElements(navigate) {
   return map;
 }
 
-async function runEmailReturn(data, {search, reject = false} = {}) {
-  const navigations = [], replacements = [], timers = [];
+async function runEmailReturn(data, {search, hash = '', reject = false} = {}) {
+  const navigations = [], replacements = [], timers = [], posts = [];
   const elements = emailElements(url => navigations.push({type: 'click', url}));
   const location = {
     search: search || `?purpose=onboarding&challenge=${challenge}&code=pkce-code`,
+    hash,
     pathname: '/auth/email-verified',
     replace(url) {navigations.push({type: 'replace', url});},
     set href(url) {navigations.push({type: 'href', url});},
@@ -35,14 +36,15 @@ async function runEmailReturn(data, {search, reject = false} = {}) {
     URL, URLSearchParams, location,
     history: {replaceState(_a, _b, url) {replacements.push(url);}},
     document: {title: 'Email verification', getElementById(id) {return elements[id];}},
-    fetch: reject ? async () => {throw new Error('network');} : async () => ({
-      ok: true, status: 200, json: async () => data,
-    }),
+    fetch: reject ? async () => {throw new Error('network');} : async (_url, init) => {
+      posts.push(JSON.parse(init.body));
+      return {ok: true, status: 200, json: async () => data};
+    },
     setTimeout(fn) {timers.push(fn); return timers.length;},
   });
   await vm.runInContext(emailReturnSource, context);
   await flush();
-  return {elements, navigations, replacements, runTimers() {timers.splice(0).forEach(fn => fn());}};
+  return {elements, navigations, replacements, posts, runTimers() {timers.splice(0).forEach(fn => fn());}};
 }
 
 function createStorage() {
@@ -155,8 +157,30 @@ async function runNativePayment(width, height) {
   native.elements['email-return-open'].click();
   assert.match(native.navigations[0].url, /^cauldra:\/\/auth\/email-verified\?/);
 
+  // CB-001: links sent since the fix carry a one-time session in the fragment.
+  const token = 'aaa.bbb.ccc';
+  const fragmentReturn = await runEmailReturn({
+    status: 'verified', platform: 'web', return_target: 'https://app.example.com/',
+    expected_return_origin: 'https://app.example.com',
+  }, {search: `?purpose=onboarding&challenge=${challenge}`, hash: `#access_token=${token}&refresh_token=r&type=signup`});
+  assert.deepEqual(fragmentReturn.posts, [{challenge_id: challenge, code: '', email_token: token}]);
+  assert.equal(fragmentReturn.elements['email-return-open'].textContent, 'Return to Cauldra');
+  assert.equal(fragmentReturn.replacements.length, 1, 'fragment must clear after successful confirmation');
+  assert.ok(!JSON.stringify(fragmentReturn.posts).includes('refresh_token'), 'refresh token never leaves the page');
+  // Legacy PKCE links still post their code.
+  assert.deepEqual(web.posts, [{challenge_id: challenge, code: 'pkce-code', email_token: ''}]);
+
+  const expiredLink = await runEmailReturn({}, {
+    search: `?purpose=onboarding&challenge=${challenge}`,
+    hash: '#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired',
+  });
+  assert.equal(expiredLink.posts.length, 0, 'an expired link is not sent to the server');
+  assert.equal(expiredLink.elements['email-return-status'].textContent,
+    'This verification link has expired. Return to Cauldra and request a new email.');
+  assert.equal(expiredLink.replacements.length, 1);
+
   const transient = await runEmailReturn({}, {reject: true});
-  assert.equal(transient.replacements.length, 0, 'transient failure must retain recoverable PKCE query');
+  assert.equal(transient.replacements.length, 0, 'transient failure must retain the recoverable link proof');
 
   const unsafe = await runEmailReturn({
     status: 'verified', platform: 'web', return_target: 'https://evil.example/',
@@ -172,5 +196,5 @@ async function runNativePayment(width, height) {
   for (const [width, height] of [[375,812],[768,1024],[1024,768],[1366,768]]) {
     await runNativePayment(width, height);
   }
-  console.log('EMAIL_PAYSTACK_CLOSURE_PASS web_auto_return fallback_click exact_challenge native_resume_same_reference mobile=375x812 ipad_portrait=768x1024 ipad_landscape=1024x768 desktop=1366x768');
+  console.log('EMAIL_PAYSTACK_CLOSURE_PASS web_auto_return fallback_click exact_challenge fragment_token expired_link_message native_resume_same_reference mobile=375x812 ipad_portrait=768x1024 ipad_landscape=1024x768 desktop=1366x768');
 })().catch(error => {console.error(error); process.exitCode = 1;});

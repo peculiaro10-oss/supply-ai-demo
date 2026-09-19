@@ -2,19 +2,30 @@
 (async () => {
     'use strict';
     const params = new URLSearchParams(location.search), challenge = params.get('challenge');
-    const code = params.get('code') || '';
+    // Links sent since CB-001 return a one-time session in the fragment (never
+    // sent to any server by the browser); older links return a PKCE `code`.
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    const code = params.get('code') || '', emailToken = fragment.get('access_token') || '';
+    const linkError = fragment.get('error_code') || params.get('error_code') || fragment.get('error') || params.get('error') || '';
     const status = document.getElementById('email-return-status'), open = document.getElementById('email-return-open');
     const clearQuery = () => history.replaceState({}, document.title, location.pathname);
     if (params.get('purpose') !== 'onboarding' || !/^[a-f0-9]{64}$/.test(challenge || '')) {
         clearQuery();
         status.textContent = 'This link is not valid. Return to Cauldra and request a new verification email.'; return;
     }
+    if (linkError && !code && !emailToken) {
+        clearQuery();
+        status.textContent = linkError === 'otp_expired'
+            ? 'This verification link has expired. Return to Cauldra and request a new email.'
+            : 'This verification link could not be used. Return to Cauldra and request a new email.';
+        return;
+    }
     try {
         const response = await fetch('/onboarding/email/verify/confirm', {method:'POST',headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({challenge_id:challenge, code})});
+            body:JSON.stringify({challenge_id:challenge, code, email_token:emailToken})});
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.status !== 'verified') {
-            // Preserve the one-time PKCE code across reload for transient server
+            // Preserve the one-time link proof across reload for transient server
             // and rate-limit failures. Definitive client errors are safe to clear.
             if (response.status < 500 && response.status !== 429) clearQuery();
             status.textContent = typeof data.detail === 'string' ? data.detail : 'Verification is not complete. Return to Cauldra and request a new email.'; return;
