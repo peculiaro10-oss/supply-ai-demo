@@ -23,6 +23,8 @@ from zoneinfo import ZoneInfo
 from typing import Optional, List, Dict, Any, Tuple, Literal
 
 from fastapi import FastAPI, Depends, HTTPException, status, Query, Request, Response, Cookie
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
@@ -456,6 +458,27 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(SecurityHeadersMiddleware)
+
+# --- ERR-002: a malformed body must never become an unhandled 500 ----------
+# FastAPI hands the RAW body bytes to validation when the content type is not
+# JSON, and its default 422 handler encodes them with a strict `bytes.decode()`.
+# One non-UTF-8 byte therefore raises *inside* the error handler, which nothing
+# can catch, so the request dies as a 500 — unauthenticated, on every POST that
+# declares a JSON body. Describing such input instead of decoding it keeps the
+# answer the 422 it always should have been. The error shape is otherwise
+# FastAPI's own, so clients see no change for ordinary validation failures.
+def _describe_unreadable_body(value: bytes) -> str:
+    return f"<{len(value)} bytes that are not valid UTF-8 text>"
+
+@app.exception_handler(RequestValidationError)
+async def malformed_request_body_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": jsonable_encoder(
+            exc.errors(),
+            custom_encoder={bytes: _describe_unreadable_body, bytearray: _describe_unreadable_body},
+        )},
+    )
 
 # --- Development-only request timing (performance refactor, section 3) -----
 # Logs `[perf] METHOD PATH duration_ms status_code` for every request, plus a
