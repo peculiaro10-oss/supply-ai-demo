@@ -20193,7 +20193,8 @@
             const trialBox = document.getElementById("billing-trial-dates-box");
             if (usage.status === 'trialing' && usage.trial_start_at) {
                 trialBox.classList.remove("hidden");
-                document.getElementById("billing-trial-dates-value").textContent = `${formatDateShort(usage.trial_start_at)} → ${formatDateShort(usage.trial_ends_at)} (${usage.trial_days_remaining} day${usage.trial_days_remaining === 1 ? '' : 's'} left)`;
+                document.getElementById("billing-trial-dates-value").textContent = `${formatDateShort(usage.trial_start_at)} → ${formatDateShort(usage.trial_ends_at)} (${usage.trial_days_remaining} day${usage.trial_days_remaining === 1 ? '' : 's'} left)`
+                    + (usage.cancel_at_period_end ? ' · cancelled — will not convert to a paid plan' : '');
             } else {
                 trialBox.classList.add("hidden");
             }
@@ -20225,7 +20226,7 @@
             const cancelRow = document.getElementById("billing-cancel-row");
             const cancelBtn = document.getElementById("billing-cancel-btn");
             const isAdmin = getCurrentRole() === 'admin';
-            if (isAdmin && usage.status === 'trialing') {
+            if (isAdmin && usage.status === 'trialing' && !usage.cancel_at_period_end) {
                 cancelRow.classList.remove("hidden");
                 cancelBtn.textContent = 'Cancel Trial';
                 cancelBtn.onclick = () => openCancelConfirm('trial');
@@ -20418,7 +20419,9 @@
             const body = document.getElementById("cancel-confirm-body");
             if (kind === 'trial') {
                 title.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-danger"></i> Cancel your free trial?`;
-                body.textContent = "Cancelling now will prevent your trial from converting into a paid subscription. You won't be charged, and your business data will be kept.";
+                // SUB-001: say what happens to ACCESS, not only to money and data.
+                const trialUntil = billingUsageCache?.trial_ends_at ? formatDateShort(billingUsageCache.trial_ends_at) : 'the end of your trial';
+                body.textContent = `Your trial will not convert into a paid subscription, and you won't be charged. You keep access until ${trialUntil}, when the trial ends. Your business data will be kept.`;
             } else {
                 title.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-danger"></i> Cancel your subscription?`;
                 const until = billingUsageCache?.current_period_end ? formatDateShort(billingUsageCache.current_period_end) : 'the end of your current billing period';

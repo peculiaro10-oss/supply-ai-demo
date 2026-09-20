@@ -14793,6 +14793,8 @@ def trial_cancel(request: Request, user: User = Depends(get_current_user), db: S
     sub = get_or_create_subscription(db, business)
     if sub.status != "trialing":
         raise HTTPException(status_code=409, detail="There is no active trial to cancel.")
+    if sub.cancel_at_period_end:
+        raise HTTPException(status_code=409, detail="This trial is already set to end without converting to a paid subscription.")
     if sub.paystack_subscription_code:
         try:
             fetched = paystack_fetch_subscription(sub.paystack_subscription_code)
@@ -14801,10 +14803,21 @@ def trial_cancel(request: Request, user: User = Depends(get_current_user), db: S
                 paystack_disable_subscription(sub.paystack_subscription_code, email_token)
         except Exception:
             add_audit(db, user, "TRIAL_CANCEL_PAYSTACK_DISABLE_FAILED", "Trial cancelled locally, but disabling the linked Paystack subscription failed. Verify manually to ensure no future charge occurs.", business_id=business.id)
-    sub.status = "cancelled"; sub.cancelled_at = datetime.utcnow()
-    add_audit(db, user, "TRIAL_CANCELLED", "Trial cancelled before conversion. No paid subscription will begin.", business_id=business.id)
+    # SUB-001: cancelling stops the CONVERSION, it does not repossess the trial.
+    # The paid path already works this way (cancel_at_period_end, access to the
+    # end of the period the customer already has), and the dialog promises only
+    # that the trial "will not convert". Ending access on the spot forfeited the
+    # remaining trial days and locked the business out of its own data, which no
+    # copy anywhere warned about. Status stays "trialing" until trial_end_at,
+    # where refresh_subscription_status() expires it exactly as it would for a
+    # trial that simply ran out.
+    sub.cancel_at_period_end = True
+    sub.cancelled_at = datetime.utcnow()
+    add_audit(db, user, "TRIAL_CANCELLED",
+              f"Trial cancelled before conversion. No paid subscription will begin; access continues until the trial ends ({to_utc_iso(sub.trial_end_at) if sub.trial_end_at else 'the end of the trial'}).",
+              business_id=business.id)
     db.commit()
-    return {"status": sub.status}
+    return {"status": sub.status, "cancel_at_period_end": True, "access_until": to_utc_iso(sub.trial_end_at)}
 
 
 @app.post("/subscription/cancel")
