@@ -28785,7 +28785,9 @@
                     method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
                     body: JSON.stringify({ image_data: dataUrl, file_name: `invoice-snapshot-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg` })
                 });
-                const data = await res.json();
+                // OCR-001: a non-JSON error body must be reported as a server
+                // problem, not as "we couldn't reach the server".
+                const data = await res.json().catch(() => ({}));
                 if (res.ok) {
                     setScanResultsState(resultsBox, resultsText, "success", `
                         <div><strong>${t("priceMonitor.supplierLabel")}</strong> ${escapeHtml(data.supplier_name) || t("priceMonitor.detectedVendor")}</div>
@@ -28819,7 +28821,9 @@
                         method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
                         body: JSON.stringify({ image_data: base64Data, file_name: file.name })
                     });
-                    const data = await res.json();
+                    // OCR-001: see captureSnapshotAndAnalyze - never let an
+                    // unreadable error body look like a connectivity failure.
+                    const data = await res.json().catch(() => ({}));
                     if (res.ok) {
                         setScanResultsState(resultsBox, resultsText, "success", `
                             <div><strong>${t("priceMonitor.supplierLabel")}</strong> ${escapeHtml(data.supplier_name) || t("priceMonitor.invoiceVendor")}</div>

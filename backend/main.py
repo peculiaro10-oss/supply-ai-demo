@@ -5689,11 +5689,23 @@ def openai_json_response(prompt: str, image_data: Optional[str] = None, usage_ou
         "required": ["supplier_name", "invoice_number", "invoice_date", "items", "subtotal", "total"],
         "additionalProperties": False,
     }
-    resp = openai_client.responses.create(
-        model=OPENAI_MODEL,
-        input=[{"role": "user", "content": content}],
-        text={"format": {"type": "json_schema", "name": "invoice_extraction", "schema": schema, "strict": True}},
-    )
+    # OCR-001: every failure reaching OpenAI - an exhausted quota, a rate limit,
+    # a timeout, a transport error - used to escape this helper and the endpoint
+    # above it, so Starlette answered with a bare text/plain 500 emitted above
+    # CORSMiddleware. The browser reported "check your connection" and the
+    # Android client saw "Failed to fetch". Provider failures are now translated
+    # exactly as the Gemini helper already translates them: a real status code
+    # with a JSON body the clients can read.
+    try:
+        resp = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            input=[{"role": "user", "content": content}],
+            text={"format": {"type": "json_schema", "name": "invoice_extraction", "schema": schema, "strict": True}},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="The document reader could not complete that scan right now. Please try again.") from exc
     if usage_out is not None:
         usage = getattr(resp, "usage", None)
         if usage is not None:
