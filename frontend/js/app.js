@@ -1630,6 +1630,8 @@
                     lookupFailed: "We could not look up that product. Please try again.",
                     barcodeServiceUnavailable: "The barcode lookup service is temporarily unavailable. You can still enter the product details manually below.",
                     catalogTemporarilyUnavailable: "We're having trouble reaching the product catalog right now. You can still enter the product details manually below.",
+                    barcodeOptional: "Barcode (optional)",
+                    productIdentified: "Product identified: {name}",
                     barcodeAlreadyInInventory: "This barcode is already in your inventory ({name}). Search for it in Stock Inventory to restock or edit it instead.",
                     updateStockFailed: "Unable to update stock right now. Please try again.",
                     addedSuccess: "Product added successfully!", addFailed: "Unable to add the product right now. Please try again.",
@@ -22929,7 +22931,9 @@
             const sizeEl = document.getElementById("p-size");
             const skuEl = document.getElementById("p-sku");
             const barcodeEl = document.getElementById("barcode-input");
-            const SENTINEL = "Searching database...";
+            // Localized through the existing bundle (common.loading exists in every
+            // locale); it must never be a hard-coded English string in the UI.
+            const SENTINEL = t("common.loading");
             // "This scan owns the field" only when the user has NOT typed into
             // it (blank, or still showing our sentinel). We never overwrite a
             // value the user manually entered.
@@ -23011,7 +23015,9 @@
                     console.log("[barcode-flow] populated fields:", filled.join(", ") || "(found:true but carried no identity fields)");
                     if (filled.length) {
                         playProductResolvedBeep();
-                        const msg = "Product identified: " + (data.product_name || data.brand || "\u2713") + " (source: " + (data.source || "catalog") + ")";
+                        // Product language only: which provider or cache answered is an
+                        // implementation detail and never belongs in customer-facing copy.
+                        const msg = t("products.productIdentified", { name: data.product_name || data.brand || "✓" });
                         console.log("[barcode-flow] message shown to user:", msg);
                         showToast(msg, "success");
                     } else {
@@ -27936,6 +27942,7 @@
             document.getElementById("edit-p-sku").value = product.sku;
             document.getElementById("edit-p-category").value = product.category;
             if (document.getElementById("edit-p-size")) document.getElementById("edit-p-size").value = product.size || "";
+            if (document.getElementById("edit-p-barcode")) document.getElementById("edit-p-barcode").value = product.barcode || "";
             document.getElementById("edit-p-qty").value = product.quantity;
             document.getElementById("edit-p-min").value = product.min_stock_level;
             document.getElementById("edit-p-cost").value = product.cost_price;
@@ -27983,7 +27990,12 @@
             const cost_price = parseFloat(document.getElementById("edit-p-cost").value) || 0;
             const retail_price = parseFloat(document.getElementById("edit-p-retail").value) || 0;
             const wholesale_price = parseFloat(document.getElementById("edit-p-wholesale").value) || 0;
-            const payload = { name, sku, category, size, quantity, min_stock_level, cost_price, retail_price, wholesale_price, expiry_date: document.getElementById("edit-p-expiry")?.value || null };
+            // Editing a product never calls the barcode lookup chain: this is a plain
+            // field on the product, and an external identity lookup belongs only to
+            // ADDING a product (see lookupBarcode). An empty field clears the barcode.
+            const barcodeEl = document.getElementById("edit-p-barcode");
+            const barcode = barcodeEl ? (barcodeEl.value.trim() || null) : undefined;
+            const payload = { ...(barcode !== undefined ? { barcode } : {}), name, sku, category, size, quantity, min_stock_level, cost_price, retail_price, wholesale_price, expiry_date: document.getElementById("edit-p-expiry")?.value || null };
 
             // Editing a product that was itself created offline and hasn't
             // synced yet (negative temp id): there is no server record for

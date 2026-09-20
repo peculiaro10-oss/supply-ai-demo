@@ -4620,6 +4620,55 @@ def record_failure(db: Session, scope: str, key: str):
         row.locked_until = now + timedelta(seconds=RATE_LIMIT_WINDOW_SECONDS)
     db.commit()
 
+# Operational safeguard, NOT a plan benefit. UPCitemdb's free plan allows
+# roughly 100 lookups per day PER SOURCE IP, which means every business served
+# by one Cauldra deployment draws on the same daily pool: a single business
+# scanning unknown barcodes can leave every other business with no lookups at
+# all (exactly the state QA was found in). This caps how much of that shared
+# pool one business may consume per day. No plan buys a different number, and
+# nothing here is an entitlement — see EXTERNAL_LOOKUP_SCOPE's use in
+# catalog_barcode_lookup, which falls back to the SAME manual-entry response the
+# provider's own outage already produces.
+EXTERNAL_LOOKUP_DAILY_LIMIT = int(os.getenv("SUPPLY_AI_BARCODE_EXTERNAL_DAILY_LIMIT", "25"))
+EXTERNAL_LOOKUP_WINDOW_SECONDS = int(os.getenv("SUPPLY_AI_BARCODE_EXTERNAL_WINDOW_SECONDS", "86400"))
+EXTERNAL_LOOKUP_SCOPE = "barcode-external-lookup"
+
+def consume_usage_allowance(db: Session, scope: str, key: str, max_uses: int, window_seconds: int) -> bool:
+    """Count-and-cap a costly external call, on the ledger the rate limiter
+    already uses (`auth_failures`) — no new table and no migration.
+
+    Returns True and records one use when the call may proceed, False when this
+    key has spent its allowance for the current window. Unlike
+    check_rate_limit(), this never raises: a caller that is out of allowance
+    should degrade gracefully rather than show the customer an error, so the
+    decision is returned instead of thrown.
+
+    The window is a simple fixed window that restarts on first use after it
+    lapses. Two simultaneous requests can both pass the check, which is
+    acceptable for a safeguard whose purpose is to stop one business draining a
+    shared daily pool, not to enforce an exact quota.
+    """
+    if max_uses <= 0:
+        return False
+    k = fail_key(scope, key)
+    now = datetime.utcnow()
+    row = db.query(AuthFailure).filter(AuthFailure.scope == scope, AuthFailure.key_hash == k).first()
+    if row is None:
+        db.add(AuthFailure(scope=scope, key_hash=k, failures=1, window_started_at=now))
+        db.commit()
+        return True
+    if (now - row.window_started_at).total_seconds() > window_seconds:
+        row.failures = 1
+        row.window_started_at = now
+        row.locked_until = None
+        db.commit()
+        return True
+    if row.failures >= max_uses:
+        return False
+    row.failures += 1
+    db.commit()
+    return True
+
 def clear_failures(db: Session, scope: str, key: str):
     k = fail_key(scope, key)
     row = db.query(AuthFailure).filter(AuthFailure.scope == scope, AuthFailure.key_hash == k).first()
@@ -13142,6 +13191,24 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
     # "catalog did not contain it" outcome — the two are reported separately
     # (source "not_found" vs "upcitemdb_unavailable") so the frontend can show
     # an accurate message.
+    # 3a. Per-business allowance for the SHARED free provider quota. Checked
+    # only here, after both local stages have missed, so a hit in this
+    # business's own inventory or in the General Catalog never consumes any
+    # allowance. When it is spent the answer is the SAME manual-entry response a
+    # provider outage already produces — the customer is never shown a quota,
+    # a limit, or anything else about the provider (see EXTERNAL_LOOKUP_DAILY_LIMIT).
+    if not consume_usage_allowance(db, EXTERNAL_LOOKUP_SCOPE, str(user.business_id),
+                                   EXTERNAL_LOOKUP_DAILY_LIMIT, EXTERNAL_LOOKUP_WINDOW_SECONDS):
+        print(f"[barcode-flow] external lookup allowance SPENT for business {user.business_id} "
+              f"({EXTERNAL_LOOKUP_DAILY_LIMIT} per {EXTERNAL_LOOKUP_WINDOW_SECONDS}s) — not calling the provider")
+        print("[barcode-flow] final response source: upcitemdb_unavailable (allowance_spent)")
+        return {
+            "found": False, "source": "upcitemdb_unavailable", "barcode": barcode,
+            "upcitemdb_outcome": "allowance_spent",
+            "upcitemdb_detail": "per-business external lookup allowance reached",
+            "manual_entry": True,
+        }
+
     print("[barcode-flow] ENTERING UPCITEMDB FALLBACK")
     from upcitemdb_provider import lookup_upcitemdb_detailed
     print("[barcode-flow] UPCitemdb request started")

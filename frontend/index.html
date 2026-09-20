@@ -2152,6 +2152,16 @@
                     <label class="block font-medium text-textSec mb-1" data-i18n="products.sizeMeasure">Size / Measure (e.g. 50cl, 1kg)</label>
                     <input type="text" id="edit-p-size" placeholder="50cl" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
                 </div>
+                <div>
+                    <!-- Barcode is editable here so a product created without one (or with a
+                         mistyped one) can be corrected later. The backend owns the rules:
+                         normalize_barcode() canonicalizes it and PATCH /products/{id} rejects a
+                         barcode already used by another product IN THIS BUSINESS with a 409 whose
+                         message is shown as-is. Leaving it empty clears the barcode. Editing a
+                         product never triggers an external barcode lookup. -->
+                    <label class="block font-medium text-textSec mb-1" data-i18n="products.barcodeOptional">Barcode (optional)</label>
+                    <input type="text" id="edit-p-barcode" inputmode="numeric" autocomplete="off" placeholder="e.g. 5901234123457" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain placeholder-textSec focus:outline-none focus:border-primary font-mono">
+                </div>
                 <div class="grid grid-cols-2 gap-2">
                     <div>
                         <label class="block font-medium text-textSec mb-1" data-i18n="products.stockQuantity">Stock Quantity</label>
