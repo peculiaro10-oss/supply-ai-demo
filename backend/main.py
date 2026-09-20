@@ -12949,6 +12949,40 @@ def check_price_source(source_id: int, user: User = Depends(get_current_user), d
     if s.last_price is None: raise HTTPException(status_code=422, detail="No supplier price has been recorded for this source yet.")
     s.last_checked_at=datetime.utcnow(); db.add(PriceHistory(source_id=s.id, price=s.last_price)); db.commit(); return {"message":"Supplier price checked successfully."}
 
+# products.id is a 32-bit integer, so a value above this cannot be an id. The
+# price-list parser used to coerce the first CSV column to int and compare it
+# against products.id: a real 12/13-digit barcode aborted the whole request with
+# PostgreSQL "integer out of range", which left the browser with an unhandled
+# 500 (PM-004).
+PRODUCT_ID_MAX = 2147483647
+
+def resolve_price_list_product(db: Session, business_id: int, identifier: str) -> Optional[int]:
+    """Resolve one price-list identifier to a product of THIS business, or None.
+
+    A supplier's price list names products the way the supplier's own system
+    does — by barcode, SKU or product name — never by a Cauldra product id, so
+    all three are accepted (a bare number is still honoured as an id, but only
+    when it is inside the id column's range). Every lookup is scoped to the
+    caller's business, and an identifier matching more than one product is
+    refused rather than guessed at.
+    """
+    ident = (identifier or "").strip()
+    if not ident:
+        return None
+    lowered = ident.lower()
+    candidates = [
+        func.lower(Product.sku) == lowered,
+        func.lower(Product.barcode) == lowered,
+        func.lower(Product.name) == lowered,
+    ]
+    if ident.isdigit() and 0 < int(ident) <= PRODUCT_ID_MAX:
+        candidates.append(Product.id == int(ident))
+    for condition in candidates:
+        rows = db.query(Product.id).filter(Product.business_id == business_id, condition).limit(2).all()
+        if len(rows) == 1:
+            return rows[0][0]
+    return None
+
 @app.post("/price-monitor/upload-price-list")
 def upload_price_list(payload: PriceListUploadRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "procurement.price_monitor")
@@ -12967,18 +13001,20 @@ def upload_price_list(payload: PriceListUploadRequest, user: User = Depends(get_
     except Exception as exc:
         raise HTTPException(status_code=422, detail="The price list could not be read.") from exc
     parsed_rows = {}
-    for line in raw.splitlines()[1:]:
-        parts=[p.strip() for p in line.split(",")]
+    unmatched = 0
+    for parts in csv.reader(io.StringIO(raw)):
+        parts=[p.strip() for p in parts]
         if len(parts) < 2: continue
-        try: price=float(parts[-1])
-        except: continue
-        pid=int(product_id) if product_id else (int(parts[0]) if parts[0].isdigit() else None)
-        if not pid: continue
-        if not db.query(Product.id).filter(Product.id == pid, Product.business_id == user.business_id).first():
+        try: price=float(parts[-1].replace(",", ""))
+        except ValueError: continue  # a header row, or a line without a price
+        pid = int(product_id) if product_id else resolve_price_list_product(db, user.business_id, parts[0])
+        if not pid:
+            unmatched += 1
             continue
         parsed_rows[pid] = price
     if not parsed_rows:
-        raise HTTPException(status_code=422, detail="No valid price rows were found in this CSV file.")
+        raise HTTPException(status_code=422, detail="No rows in this CSV matched a product in your inventory. "
+                                                   "The first column should be a product SKU, barcode or name, and the last column the price.")
     existing_by_product = {
         source.product_id: source for source in db.query(PriceMonitorSource).filter(
             PriceMonitorSource.business_id == user.business_id,
@@ -13000,7 +13036,7 @@ def upload_price_list(payload: PriceListUploadRequest, user: User = Depends(get_
         s.last_price=price; s.last_checked_at=datetime.utcnow(); db.add(PriceHistory(source_id=s.id, price=price)); count += 1
     upload = persist_upload(db, user, "price_list", file_name, content_type, raw_bytes)
     add_audit(db, user, "PRICE_LIST_UPLOADED", f"Uploaded and processed price list {upload.original_name}.")
-    db.commit(); return {"count": count, "upload_id": upload.id}
+    db.commit(); return {"count": count, "unmatched_rows": unmatched, "upload_id": upload.id}
 
 # -----------------------------------------------------------------------------
 # GENERAL CATALOG + BARCODE
