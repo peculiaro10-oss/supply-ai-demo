@@ -5646,6 +5646,18 @@ async def notification_sweep_loop():
 async def _start_notification_sweep():
     asyncio.create_task(notification_sweep_loop())
 
+def log_ai_provider_failure(provider: str, call: str, exc: Exception) -> None:
+    """Record WHY an AI provider refused, for the operator only.
+
+    The customer gets a generic 502 that names no vendor internals, but an
+    operator still has to be able to tell an exhausted quota from a rate limit,
+    a bad model name or a network fault. The exception type and a truncated
+    message go to the service log; the prompt, the uploaded image and the API
+    key never do.
+    """
+    reason = " ".join(str(exc).split())[:300]
+    print(f"[ai-provider] {provider} {call} failed: {type(exc).__name__}: {reason}")
+
 def gemini_text_response(system_prompt: str, user_prompt: str, usage_out: Optional[dict] = None) -> str:
     """usage_out (V31): an optional dict the caller passes in and this
     populates with real token counts from Gemini's own response - never
@@ -5665,6 +5677,7 @@ def gemini_text_response(system_prompt: str, user_prompt: str, usage_out: Option
                 usage_out["output_tokens"] = getattr(meta, "candidates_token_count", None)
         return text.strip()
     except Exception as exc:
+        log_ai_provider_failure("gemini", "text", exc)
         raise HTTPException(status_code=502, detail="Gemini could not complete that AI operation right now. Please try again.") from exc
 
 def openai_json_response(prompt: str, image_data: Optional[str] = None, usage_out: Optional[dict] = None) -> dict:
@@ -5705,6 +5718,7 @@ def openai_json_response(prompt: str, image_data: Optional[str] = None, usage_ou
     except HTTPException:
         raise
     except Exception as exc:
+        log_ai_provider_failure("openai", "invoice-scan", exc)
         raise HTTPException(status_code=502, detail="The document reader could not complete that scan right now. Please try again.") from exc
     if usage_out is not None:
         usage = getattr(resp, "usage", None)
@@ -5715,6 +5729,7 @@ def openai_json_response(prompt: str, image_data: Optional[str] = None, usage_ou
     try:
         return json.loads(text)
     except Exception as exc:
+        log_ai_provider_failure("openai", "invoice-parse", exc)
         raise HTTPException(status_code=502, detail="The invoice could not be interpreted reliably. Please review it manually.") from exc
 
 # -----------------------------------------------------------------------------

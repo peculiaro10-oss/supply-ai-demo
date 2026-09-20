@@ -10,6 +10,8 @@ os.environ['PYTHON_DOTENV_DISABLED'] = '1'
 os.environ['SUPPLY_AI_SKIP_DB_STARTUP_CHECK'] = 'true'
 os.environ['DATABASE_URL'] = 'postgresql+psycopg://test:test@127.0.0.1:65432/cauldra_test'
 os.environ['SUPPLY_AI_SECRET_KEY'] = 'isolated-test-secret-012345678901234567890123456789'
+import contextlib
+import io as _io
 import json
 import unittest
 from fastapi import HTTPException
@@ -111,6 +113,66 @@ class ProviderFailureTests(unittest.TestCase):
         self.assertEqual(content[0]['type'], 'input_text')
         self.assertEqual(content[1]['type'], 'input_image')
         self.assertEqual(content[1]['image_url'], 'data:image/png;base64,AAAA')
+
+
+class OperatorDiagnosticsTests(unittest.TestCase):
+    """The customer sees a generic message; the operator must still be able to
+    tell an exhausted quota from a rate limit, from the service log alone."""
+
+    def setUp(self):
+        self.original = main.openai_client
+        self.addCleanup(setattr, main, 'openai_client', self.original)
+
+    def _log_of(self, outcome, image='data:image/png;base64,SECRETIMAGEBYTES'):
+        main.openai_client = _Client(outcome)
+        buffer = _io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            with self.assertRaises(HTTPException):
+                main.openai_json_response('extract this invoice', image_data=image)
+        return buffer.getvalue()
+
+    def test_the_provider_reason_is_logged_for_the_operator(self):
+        class RateLimitError(Exception):
+            pass
+        logged = self._log_of(RateLimitError('Error code: 429 - insufficient_quota: no credits remaining'))
+        self.assertIn('[ai-provider] openai invoice-scan failed', logged)
+        self.assertIn('RateLimitError', logged)
+        self.assertIn('insufficient_quota', logged)
+
+    def test_the_log_never_carries_the_prompt_or_the_image(self):
+        logged = self._log_of(ConnectionError('connection reset'))
+        self.assertNotIn('SECRETIMAGEBYTES', logged)
+        self.assertNotIn('extract this invoice', logged)
+
+    def test_a_long_provider_message_is_truncated(self):
+        logged = self._log_of(ValueError('x' * 5000))
+        self.assertLess(len(logged), 500)
+
+    def test_an_uninterpretable_reply_is_logged_distinctly(self):
+        logged = self._log_of(_Resp('not json at all'))
+        self.assertIn('invoice-parse failed', logged)
+
+    def test_the_gemini_helper_logs_the_same_way(self):
+        original = main.gemini_client
+        self.addCleanup(setattr, main, 'gemini_client', original)
+
+        class _Models:
+            def generate_content(self, **kwargs):
+                raise RuntimeError('429 RESOURCE_EXHAUSTED: quota exceeded')
+
+        class _Gemini:
+            models = _Models()
+
+        main.gemini_client = _Gemini()
+        buffer = _io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            with self.assertRaises(HTTPException) as caught:
+                main.gemini_text_response('system', 'a prompt the log must not keep')
+        self.assertEqual(caught.exception.status_code, 502)
+        logged = buffer.getvalue()
+        self.assertIn('[ai-provider] gemini text failed', logged)
+        self.assertIn('RESOURCE_EXHAUSTED', logged)
+        self.assertNotIn('a prompt the log must not keep', logged)
 
 
 class BilledUsageTests(unittest.TestCase):
