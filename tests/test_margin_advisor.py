@@ -10,7 +10,13 @@ os.environ['SUPPLY_AI_SKIP_DB_STARTUP_CHECK'] = 'true'
 os.environ['DATABASE_URL'] = 'postgresql+psycopg://test:test@127.0.0.1:65432/cauldra_test'
 os.environ['SUPPLY_AI_SECRET_KEY'] = 'isolated-test-secret-012345678901234567890123456789'
 import unittest
+from datetime import datetime, timedelta
+from unittest.mock import patch
 import pydantic
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from fastapi.testclient import TestClient
 import main
 
 
@@ -94,6 +100,79 @@ class MarginFigureTests(unittest.TestCase):
         w, r, _ = main.margin_figures(advice, 50000.0)
         self.assertGreaterEqual(w, 50000.0)
         self.assertGreaterEqual(r, w)
+
+
+class AiPlanEntitlementTests(unittest.TestCase):
+    """The advisor is a paid feature: the entry tier must be refused server-side,
+    whatever the client displays, and every role on an entitled plan allowed."""
+
+    def setUp(self):
+        self.engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+        main.Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+
+        def db_dep():
+            with self.Session() as session:
+                yield session
+        main.app.dependency_overrides[main.get_db] = db_dep
+        self.db = self.Session()
+        now = datetime.utcnow()
+        self.users = {}
+        for plan in ('core', 'business'):
+            biz = main.BusinessProfile(business_code=f'AI-{plan}', company_name=f'{plan} Ltd', currency='NGN (₦)',
+                                       subscription_plan=plan)
+            self.db.add(biz); self.db.commit()
+            self.db.add(main.BusinessSubscription(business_id=biz.id, plan=plan, billing_interval='monthly',
+                                                 status='active', current_period_start=now,
+                                                 current_period_end=now + timedelta(days=30), card_verified=True))
+            self.db.commit()
+            for role in ('admin', 'manager', 'staff'):
+                u = main.User(username=f'{plan}_{role}', email=f'{plan}_{role}@example.com', password='x',
+                              phone=f'+2348030{len(plan)}{len(role)}0000', role=role, business_id=biz.id)
+                self.db.add(u); self.db.commit(); self.db.refresh(u)
+                self.users[(plan, role)] = u
+        self.client = TestClient(main.app)
+        self.gemini = patch.object(main, 'gemini_text_response',
+                                   return_value='Advice.\nCAULDRA_PRICES: wholesale=6100; retail=7600')
+        self.gemini.start()
+
+    def tearDown(self):
+        self.gemini.stop()
+        self.client.close(); main.app.dependency_overrides.clear()
+        self.db.close(); self.engine.dispose()
+
+    def ask(self, user):
+        return self.client.post('/ai/suggest-margin',
+                                json={'product_name': 'AUDIT Bar Soap 12pk', 'category': 'Household',
+                                      'cost_price': 5400.0, 'retail_price': 7000.0},
+                                headers={'Authorization': f'Bearer {main.issue_token(user, self.db)}'})
+
+    def test_the_entry_tier_is_refused_for_every_role(self):
+        for role in ('admin', 'manager', 'staff'):
+            r = self.ask(self.users[('core', role)])
+            self.assertEqual(r.status_code, 403, f'{role}: {r.text}')
+            self.assertIn('not included in your', r.json()['detail'])
+
+    def test_an_entitled_plan_serves_every_role_the_shipped_payload(self):
+        for role in ('admin', 'manager', 'staff'):
+            r = self.ask(self.users[('business', role)])
+            self.assertEqual(r.status_code, 200, f'{role}: {r.text}')
+            body = r.json()
+            self.assertEqual(body['suggested_wholesale'], 6100.0)
+            self.assertEqual(body['suggested_retail'], 7600.0)
+            self.assertNotIn('CAULDRA_PRICES', body['advice'])
+
+    def test_invoice_ocr_is_gated_by_the_same_plan_rule(self):
+        """OCR-001's feature shares this gate, so the entry tier never reaches the provider."""
+        r = self.client.post('/ai/scan-invoice', json={'image_data': 'data:image/png;base64,AAAA'},
+                             headers={'Authorization': f'Bearer {main.issue_token(self.users[("core", "admin")], self.db)}'})
+        self.assertEqual(r.status_code, 403, r.text)
+
+    def test_the_advice_prompt_carries_the_retail_price_the_client_sends(self):
+        with patch.object(main, 'gemini_text_response', return_value='ok') as spy:
+            self.ask(self.users[('business', 'admin')])
+        self.assertIn('Current retail price: 7000.0', spy.call_args[0][1])
+        self.assertIn('CAULDRA_PRICES', spy.call_args[0][1])
 
 
 if __name__ == '__main__':

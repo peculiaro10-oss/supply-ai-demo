@@ -203,6 +203,16 @@ class PriceListUploadTests(unittest.TestCase):
         r = self.upload(f'barcode,price\n{EAN},41000\n', supplier_id=self.other_supplier.id)
         self.assertEqual(r.status_code, 404)
 
+    def test_the_entry_tier_has_no_price_monitoring_at_all(self):
+        """Plan entitlement: "core" (Starter) allows 0 monitored sources."""
+        self.business.subscription_plan = 'core'
+        sub = self.db.query(main.BusinessSubscription).filter_by(business_id=self.business.id).one()
+        sub.plan = 'core'
+        self.db.commit()
+        self.assertEqual(main.get_plan_limit(self.db, self.business, 'price_monitor'), 0)
+        r = self.upload(f'barcode,price\n{EAN},41000\n')
+        self.assertIn(r.status_code, (402, 409), r.text)
+
     def test_the_plan_capacity_limit_still_applies(self):
         limit = main.get_plan_limit(self.db, self.business, 'price_monitor')
         self.assertIsNotNone(limit)
