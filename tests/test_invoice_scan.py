@@ -153,16 +153,28 @@ class OperatorDiagnosticsTests(unittest.TestCase):
         self.assertNotIn('extract this invoice', logged)
 
     def test_a_credential_shape_in_the_provider_message_is_redacted(self):
-        for secret in ('sk-live-ABCDEFGH12345678', 'AIzaSyD-ABCDEFGH12345678', 'key=ABCDEFGH12345678'):
+        for secret in ('sk-live-ABCDEFGH12345678', 'AIzaSyD-ABCDEFGH12345678', 'key=ABCDEFGH12345678',
+                       'Bearer abcd1234efgh5678', 'bearer abcd1234efgh5678',
+                       'eyJhbGciOiJIUzI1NiJ9.abcdefghijklmnop.signature'):
             logged = self._log_of(ValueError(f'request failed for {secret} at the provider'))
             self.assertNotIn(secret, logged, secret)
             self.assertIn('<redacted>', logged)
             self.assertIn('request failed for', logged)
 
     def test_redaction_does_not_eat_an_ordinary_reason(self):
-        logged = self._log_of(ValueError('You have no credits remaining. Add credits to continue.'))
-        self.assertIn('no credits remaining', logged)
-        self.assertNotIn('<redacted>', logged)
+        for reason in ('You have no credits remaining. Add credits to continue.',
+                       "403 PERMISSION_DENIED. Your project has been denied access.",
+                       "insufficient_quota: credit_balance_exhausted"):
+            logged = self._log_of(ValueError(reason))
+            self.assertNotIn('<redacted>', logged, reason)
+            self.assertIn(reason.split('.')[0][:24], logged)
+
+    def test_the_reasons_an_operator_acts_on_survive_verbatim(self):
+        logged = self._log_of(ValueError("Error code: 429 - {'code': 'credit_balance_exhausted'}"))
+        self.assertIn('429', logged)
+        self.assertIn('credit_balance_exhausted', logged)
+        logged = self._log_of(ValueError('403 PERMISSION_DENIED. Your project has been denied access.'))
+        self.assertIn('PERMISSION_DENIED', logged)
 
     def test_a_long_provider_message_is_truncated(self):
         logged = self._log_of(ValueError('x' * 5000))

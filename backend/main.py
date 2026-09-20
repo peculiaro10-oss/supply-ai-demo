@@ -5646,11 +5646,17 @@ async def notification_sweep_loop():
 async def _start_notification_sweep():
     asyncio.create_task(notification_sweep_loop())
 
-# The logged reason is the provider's own text, so the promise that a key never
-# reaches the log cannot rest on the vendor's discretion: a credential shape in
-# that text is removed before it is written. Covers OpenAI (`sk-…`), Google
-# (`AIza…`) and any `key=` query parameter an SDK might quote back.
-PROVIDER_SECRET_SHAPE = re.compile(r"sk-[A-Za-z0-9_\-]{8,}|AIza[A-Za-z0-9_\-]{8,}|[Kk][Ee][Yy]=[A-Za-z0-9_\-]{8,}")
+# The logged reason is the provider's own text, so the promise that a credential
+# never reaches the log cannot rest on the vendor's discretion: a credential
+# shape in that text is removed before it is written. Covers OpenAI (`sk-…`),
+# Google (`AIza…`), any `key=` query parameter an SDK might quote back, an
+# `Authorization: Bearer …` header echoed into an error, and a bare JWT.
+PROVIDER_SECRET_SHAPE = re.compile(
+    r"sk-[A-Za-z0-9_\-]{8,}"
+    r"|AIza[A-Za-z0-9_\-]{8,}"
+    r"|[Kk][Ee][Yy]=[A-Za-z0-9_\-]{8,}"
+    r"|[Bb]earer\s+[A-Za-z0-9._\-]{8,}"
+    r"|eyJ[A-Za-z0-9._\-]{16,}")
 
 def log_ai_provider_failure(provider: str, call: str, exc: Exception) -> None:
     """Record WHY an AI provider refused, for the operator only.
