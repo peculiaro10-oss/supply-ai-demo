@@ -177,6 +177,12 @@ class CooldownEndpointTests(unittest.TestCase):
         return self.client.post('/catalog/barcode-lookup', json={'barcode': barcode},
                                 headers=self.auth(user or self.admin_a))
 
+    def allowance_used(self, business_id):
+        row = self.db.query(main.AuthFailure).filter(
+            main.AuthFailure.scope == main.EXTERNAL_LOOKUP_SCOPE,
+            main.AuthFailure.key_hash == main.fail_key(main.EXTERNAL_LOOKUP_SCOPE, str(business_id))).first()
+        return row.failures if row else 0
+
     def test_a_second_lookup_during_the_cooldown_never_reaches_the_provider(self):
         with patch('requests.get', return_value=_Resp(429, {'Retry-After': '600'})) as first:
             r1 = self.lookup('4006381333931')
@@ -264,6 +270,64 @@ class CooldownEndpointTests(unittest.TestCase):
         self.assertEqual(spent['upcitemdb_outcome'], 'allowance_spent')
         self.assertEqual(provider.cooldown_remaining(), 0, 'an allowance refusal is not a provider cooldown')
         self.assertEqual(other.json()['source'], 'not_found', 'Business B is unaffected by Business A')
+
+    # ---------------------------------------------------------------- ordering: cooldown before allowance
+    def test_a_cooldown_refusal_does_not_spend_the_business_allowance(self):
+        """Cauldra already knows the provider will not be called, so the business
+        must not be charged one of its daily lookups."""
+        with patch('requests.get', return_value=_Resp(429, {'Retry-After': '600'})):
+            self.lookup('4006381333931')
+        spent_by_the_real_attempt = self.allowance_used(self.biz_a.id)
+        self.assertEqual(spent_by_the_real_attempt, 1, 'the attempt that did reach the provider counts')
+        with patch('requests.get', side_effect=AssertionError('cooldown active — must not call the provider')):
+            for suffix in ('2', '3', '4', '5'):
+                body = self.lookup('400638133394' + suffix).json()
+                self.assertEqual(body['upcitemdb_outcome'], 'cooldown')
+        self.assertEqual(self.allowance_used(self.biz_a.id), spent_by_the_real_attempt,
+                         'four cooldown refusals must not have moved the allowance')
+
+    def test_a_cooldown_refusal_spends_no_allowance_for_any_tenant(self):
+        with patch('requests.get', return_value=_Resp(429, {'Retry-After': '600'})):
+            self.lookup('4006381333931', user=self.admin_a)
+        before_b = self.allowance_used(self.biz_b.id)
+        with patch('requests.get', side_effect=AssertionError('must not be called')):
+            self.lookup('4006381333932', user=self.admin_b)
+        self.assertEqual(self.allowance_used(self.biz_b.id), before_b,
+                         'Business B is refused by the global cooldown and charged nothing')
+
+    def test_the_allowance_applies_again_once_the_cooldown_expires(self):
+        with patch('requests.get', return_value=_Resp(429, {'Retry-After': '600'})):
+            self.lookup('4006381333931')
+        used_before = self.allowance_used(self.biz_a.id)
+        with patch('requests.get', side_effect=AssertionError('must not be called')):
+            self.lookup('4006381333932')
+        self.assertEqual(self.allowance_used(self.biz_a.id), used_before)
+        with patch.object(provider, '_rate_limited_until', time.time() - 1):
+            with patch('requests.get', return_value=_Resp(200, {}, '{"code":"NOT_FOUND"}')) as again:
+                body = self.lookup('4006381333933').json()
+                self.assertEqual(again.call_count, 1)
+        self.assertEqual(body['source'], 'not_found')
+        self.assertEqual(self.allowance_used(self.biz_a.id), used_before + 1,
+                         'a provider-eligible lookup consumes allowance again')
+
+    def test_an_exhausted_allowance_after_the_cooldown_still_falls_back_cleanly(self):
+        with patch('requests.get', return_value=_Resp(429, {'Retry-After': '600'})):
+            self.lookup('4006381333931')
+        with patch.object(main, 'EXTERNAL_LOOKUP_DAILY_LIMIT', 1):
+            with patch.object(provider, '_rate_limited_until', time.time() - 1):
+                with patch('requests.get', side_effect=AssertionError('allowance already spent by the 429 attempt')):
+                    body = self.lookup('4006381333932').json()
+        self.assertEqual(body['upcitemdb_outcome'], 'allowance_spent')
+        self.assertTrue(body['manual_entry'])
+
+    def test_local_and_catalog_hits_consume_neither_guard(self):
+        with patch('requests.get', side_effect=AssertionError('a local hit must not reach the provider')):
+            own = self.lookup(EAN_STOCKED).json()
+            cached = self.lookup(EAN_CACHED).json()
+        self.assertEqual(own['source'], 'own_inventory')
+        self.assertEqual(cached['source'], 'cauldra_catalog')
+        self.assertEqual(self.allowance_used(self.biz_a.id), 0, 'no allowance consumed')
+        self.assertEqual(provider.cooldown_remaining(), 0, 'no cooldown recorded')
 
     def test_the_cooldown_is_not_a_plan_or_permission_rule(self):
         """Every role and plan sees the same cooldown: it is an outage, not an entitlement."""

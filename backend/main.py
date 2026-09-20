@@ -13191,12 +13191,38 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
     # "catalog did not contain it" outcome — the two are reported separately
     # (source "not_found" vs "upcitemdb_unavailable") so the frontend can show
     # an accurate message.
-    # 3a. Per-business allowance for the SHARED free provider quota. Checked
-    # only here, after both local stages have missed, so a hit in this
-    # business's own inventory or in the General Catalog never consumes any
-    # allowance. When it is spent the answer is the SAME manual-entry response a
-    # provider outage already produces — the customer is never shown a quota,
-    # a limit, or anything else about the provider (see EXTERNAL_LOOKUP_DAILY_LIMIT).
+    # 3a. Provider cooldown, checked FIRST of the two guards. The free plan is
+    # metered per source IP, and every request sent while the limit is in force
+    # pushes the provider's own reset further out — so once UPCitemdb has said
+    # 429, calling again before it is willing is worse than useless. The provider
+    # module remembers that window in this process (not per tenant, not
+    # persisted, never a product cache) and the answer here is the SAME
+    # manual-entry response an outage produces.
+    #
+    # It comes before the per-business allowance on purpose: when Cauldra already
+    # knows the provider will not be called, a business must not be charged one
+    # of its daily lookups for a request that never leaves the server.
+    from upcitemdb_provider import cooldown_remaining, lookup_upcitemdb_detailed
+    cooling = cooldown_remaining()
+    if cooling > 0:
+        print(f"[barcode-flow] provider cooldown active ({cooling}s remaining) — not calling UPCitemdb, "
+              f"and not spending business {user.business_id}'s external lookup allowance")
+        print("[barcode-flow] final response source: upcitemdb_unavailable (cooldown)")
+        return {
+            "found": False, "source": "upcitemdb_unavailable", "barcode": barcode,
+            "upcitemdb_outcome": "cooldown",
+            "upcitemdb_detail": f"provider rate limit cooldown, {cooling}s remaining",
+            "manual_entry": True,
+        }
+
+    # 3b. Per-business allowance for the SHARED free provider quota, checked only
+    # once a real provider request is actually on the table: after both local
+    # stages have missed AND with no cooldown in force. A hit in this business's
+    # own inventory or in the General Catalog therefore never consumes any
+    # allowance, and neither does a lookup the cooldown just refused. When the
+    # allowance is spent the answer is the SAME manual-entry response a provider
+    # outage produces — the customer is never shown a quota, a limit, or anything
+    # else about the provider (see EXTERNAL_LOOKUP_DAILY_LIMIT).
     if not consume_usage_allowance(db, EXTERNAL_LOOKUP_SCOPE, str(user.business_id),
                                    EXTERNAL_LOOKUP_DAILY_LIMIT, EXTERNAL_LOOKUP_WINDOW_SECONDS):
         print(f"[barcode-flow] external lookup allowance SPENT for business {user.business_id} "
@@ -13206,24 +13232,6 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
             "found": False, "source": "upcitemdb_unavailable", "barcode": barcode,
             "upcitemdb_outcome": "allowance_spent",
             "upcitemdb_detail": "per-business external lookup allowance reached",
-            "manual_entry": True,
-        }
-
-    # 3b. Provider cooldown. The free plan is metered per source IP, and every
-    # request sent while the limit is in force pushes the provider's own reset
-    # further out — so once it has said 429, calling again before it is willing
-    # is worse than useless. The provider module remembers that window in this
-    # process (not per tenant, not persisted, never a product cache) and the
-    # answer here is the SAME manual-entry response an outage produces.
-    from upcitemdb_provider import cooldown_remaining, lookup_upcitemdb_detailed
-    cooling = cooldown_remaining()
-    if cooling > 0:
-        print(f"[barcode-flow] provider cooldown active ({cooling}s remaining) — not calling UPCitemdb")
-        print("[barcode-flow] final response source: upcitemdb_unavailable (cooldown)")
-        return {
-            "found": False, "source": "upcitemdb_unavailable", "barcode": barcode,
-            "upcitemdb_outcome": "cooldown",
-            "upcitemdb_detail": f"provider rate limit cooldown, {cooling}s remaining",
             "manual_entry": True,
         }
 
