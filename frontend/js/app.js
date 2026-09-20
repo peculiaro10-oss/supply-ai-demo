@@ -22375,7 +22375,7 @@
             productAdvisorTimer = setTimeout(async () => {
                 tipEl.textContent = t("products.geminiEvaluating");
                 try {
-                    const res = await fetch(`${API_URL}/ai/suggest-margin`, {method:"POST", headers:{"Content-Type":"application/json","Authorization":`Bearer ${authToken}`}, body:JSON.stringify({product_name:name, category, cost_price:cost, retail_price:retail})});
+                    const res = await fetch(`${API_URL}/ai/suggest-margin`, {method:"POST", headers:{"Content-Type":"application/json","Authorization":`Bearer ${authToken}`}, body:JSON.stringify({name, category, cost_price:cost, retail_price:retail})});
                     const data = await res.json().catch(()=>({}));
                     if (!res.ok) { const err = new Error(data.detail || t("products.geminiUnavailable")); err.status = res.status; throw err; }
                     tipEl.textContent = `${data.advice || t("products.geminiAdviceReady")} ${t("products.suggestedPrices", {wholesale: formatCurrency(data.suggested_wholesale), retail: formatCurrency(data.suggested_retail)})}`;
@@ -22396,7 +22396,7 @@
             editAdvisorTimer = setTimeout(async () => {
                 tipEl.textContent = t("products.geminiEvaluating");
                 try {
-                    const res = await fetch(`${API_URL}/ai/suggest-margin`, {method:"POST", headers:{"Content-Type":"application/json","Authorization":`Bearer ${authToken}`}, body:JSON.stringify({product_name:name, category, cost_price:cost, retail_price:retail})});
+                    const res = await fetch(`${API_URL}/ai/suggest-margin`, {method:"POST", headers:{"Content-Type":"application/json","Authorization":`Bearer ${authToken}`}, body:JSON.stringify({name, category, cost_price:cost, retail_price:retail})});
                     const data = await res.json().catch(()=>({}));
                     if (!res.ok) { const err = new Error(data.detail || t("products.geminiUnavailable")); err.status = res.status; throw err; }
                     tipEl.textContent = `${data.advice || t("products.geminiAdviceReady")} ${t("products.suggestedPrices", {wholesale: formatCurrency(data.suggested_wholesale), retail: formatCurrency(data.suggested_retail)})}`;

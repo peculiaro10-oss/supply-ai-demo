@@ -31,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, EmailStr, ConfigDict, Field, field_validator
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, ForeignKey, Text, Boolean,
     DateTime as SQLDateTime, and_, or_, func, UniqueConstraint, inspect,
@@ -5927,9 +5927,15 @@ class AdminPasswordResetRequest(BaseModel):
     new_password: str
 
 class MarginRequest(BaseModel):
-    name: str
+    # The shipped web and Android clients send `product_name` (and a
+    # `retail_price` this endpoint never read), so a schema that accepted only
+    # `name` rejected every real call with 422 (AI-004). Both spellings are
+    # accepted so already-installed clients work without waiting for an app
+    # update; `name` remains the canonical field.
+    name: str = Field(validation_alias=AliasChoices("name", "product_name"))
     category: str
     cost_price: float
+    retail_price: Optional[float] = None
 
 class ChatRequest(BaseModel):
     message: str
@@ -15634,11 +15640,52 @@ def run_billable_ai(db: Session, user: User, operation: str, provider: str, mode
         db.rollback()  # never let a notification/alert failure affect an already-successful AI call
     return result, credits
 
+# The advisor used to take the FIRST TWO numbers found anywhere in the model's
+# prose as its wholesale/retail figures. That is not a price: in "AUDIT Bar Soap
+# 12pk" it yields 12 and 12, and in "5,400.00" it yields 5 and 400 because the
+# thousands separator ends the match. The UI currency-formats those fields
+# beside the prose, so a 5,400-naira product was advised at 12 naira (AI-004).
+# The model is now asked for one machine-readable line, which is parsed, range-
+# checked against the real cost price, removed from the displayed advice, and
+# falls back to the same deterministic multipliers as before if it is missing or
+# implausible. Prose is never scraped for figures again.
+MARGIN_FIGURE_LINE = "CAULDRA_PRICES"
+_MARGIN_FIGURES = re.compile(
+    MARGIN_FIGURE_LINE + r"\s*:\s*wholesale\s*=\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*[;,]\s*retail\s*=\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+    re.IGNORECASE)
+_MARGIN_FIGURE_STRIP = re.compile(r"^.*" + MARGIN_FIGURE_LINE + r".*$\n?", re.IGNORECASE | re.MULTILINE)
+
+def margin_figures(text: str, cost_price: float) -> tuple[float, float, str]:
+    """Return (wholesale, retail, advice) — figures the product can safely show.
+
+    A quoted figure is used only if it is a real recommendation: both prices
+    positive, retail not below wholesale, and wholesale not below the cost the
+    caller supplied (no advisor recommends selling at a loss). Anything else
+    falls back to the product's existing cost-plus defaults.
+    """
+    advice = _MARGIN_FIGURE_STRIP.sub("", text).strip()
+    fallback = (round(cost_price * 1.15, 2), round(cost_price * 1.30, 2))
+    match = _MARGIN_FIGURES.search(text)
+    if match:
+        try:
+            wholesale = float(match.group(1).replace(",", ""))
+            retail = float(match.group(2).replace(",", ""))
+        except ValueError:
+            return (*fallback, advice or text.strip())
+        if wholesale > 0 and retail >= wholesale and (cost_price <= 0 or wholesale >= cost_price):
+            return round(wholesale, 2), round(retail, 2), advice or text.strip()
+    return (*fallback, advice or text.strip())
+
 @app.post("/ai/suggest-margin")
 def suggest_margin(req: MarginRequest, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
-    text, credits = run_billable_ai(db, user, "margin_advisor", "gemini", GEMINI_MODEL, lambda u: gemini_text_response("You are Cauldra's category-aware pricing advisor. Give useful, practical business pricing guidance without inventing facts.", f"Product: {req.name}\nCategory: {req.category}\nCost price: {req.cost_price}\nGive recommended wholesale and retail prices and explain the reasoning briefly.", usage_out=u))
-    nums=[float(x) for x in re.findall(r"(?<![A-Za-z])(?:\d+(?:\.\d+)?)", text)]
-    return {"suggested_wholesale": round(nums[0],2) if nums else round(req.cost_price*1.15,2), "suggested_retail": round(nums[1],2) if len(nums)>1 else round(req.cost_price*1.30,2), "advice": text, "credits_consumed": credits}
+    retail_line = f"Current retail price: {req.retail_price}\n" if req.retail_price and req.retail_price > 0 else ""
+    prompt = (f"Product: {req.name}\nCategory: {req.category}\nCost price: {req.cost_price}\n{retail_line}"
+              "Give recommended wholesale and retail prices and explain the reasoning briefly. "
+              f"End your reply with exactly one line in this format, using plain digits with no currency symbol "
+              f"and no thousands separators:\n{MARGIN_FIGURE_LINE}: wholesale=<number>; retail=<number>")
+    text, credits = run_billable_ai(db, user, "margin_advisor", "gemini", GEMINI_MODEL, lambda u: gemini_text_response("You are Cauldra's category-aware pricing advisor. Give useful, practical business pricing guidance without inventing facts.", prompt, usage_out=u))
+    wholesale, retail, advice = margin_figures(text, req.cost_price)
+    return {"suggested_wholesale": wholesale, "suggested_retail": retail, "advice": advice, "credits_consumed": credits}
 
 @app.post("/ai/scan-invoice")
 def scan_invoice(req: InvoiceScanRequest, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
