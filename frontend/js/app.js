@@ -18512,6 +18512,7 @@
             lastFinancialIntelData = null;
             dashboardTodayProfit = null;
             dashboardSalesToday = null;
+            dashboardRefundsToday = 0;
             dashboardSubscriptionWarning = null;
             dashboardPendingReopenCount = 0;
             document.getElementById("global-loading-banner")?.classList.add("hidden");
@@ -24694,7 +24695,7 @@
                         <div class="text-[10px] text-textSec">${statusLabel}</div>
                         ${refundLine}
                     </div>
-                    <div class="font-mono font-semibold text-success shrink-0">${formatCurrency(x.net_sales)}</div>
+                    <div class="font-mono font-semibold ${Number(x.net_sales) < 0 ? "text-danger" : "text-success"} shrink-0">${formatCurrency(x.net_sales)}</div>
                 </div>
                 <div class="flex items-center justify-between gap-2 flex-wrap mt-2">
                     <div class="flex items-center gap-2 flex-wrap">${actionHtml}</div>
@@ -25767,6 +25768,7 @@
             lastFinancialIntelData = null;
             dashboardTodayProfit = null;
             dashboardSalesToday = null;
+            dashboardRefundsToday = 0;
             dashboardSubscriptionWarning = null;
             dashboardPendingReopenCount = 0;
             document.getElementById("global-loading-banner")?.classList.add("hidden");
@@ -26427,9 +26429,11 @@
         // helpers) — the two can never disagree because they are two reads
         // of the same underlying aggregate, not two separate calculations.
         let dashboardSalesToday = null;
+        let dashboardRefundsToday = 0;   // REFUND-001: shown beside Sales Today, never folded into it
         async function loadProfitDashboardCards() {
             dashboardTodayProfit = null;
             dashboardSalesToday = null;
+            dashboardRefundsToday = 0;
             if (!hasAuthenticatedBusinessContext() || !hasFeaturePermission('profit')) { renderBusinessInsights(); return; }
             try {
                 // SELECTED-LOCATION scope (Dashboard Location scope table):
@@ -26445,7 +26449,8 @@
                 // exactly 0.0 for that case, which is exactly the neutral
                 // state this headline must show rather than a stale prior
                 // value.
-                if (res.ok) { const d = await res.json(); dashboardTodayProfit = d.net_profit; dashboardSalesToday = d.sales; }
+                if (res.ok) { const d = await res.json(); dashboardTodayProfit = d.net_profit; dashboardSalesToday = d.sales;
+                    dashboardRefundsToday = Number(d.refund_total || 0); }
             } catch (_) { /* Business Insights just omits the line */ }
             renderBusinessInsights();
         }
@@ -26644,8 +26649,22 @@
                     ? `<span class="text-textSec">${summary.cogs_complete === false ? "Unknown" : "—"}</span>`
                     : `<span class="${summary.profit_margin_percent >= 0 ? 'text-success' : 'text-danger'}">${summary.profit_margin_percent}%</span>`;
 
+                // REFUND-001 (presentation only): refunds are their own line, never
+                // folded into sales as a negative. The posting date is unchanged — a
+                // refund still belongs to the day it was performed; this only stops
+                // that day reading as if goods were sold for a negative amount.
+                const refundAmount = Number(summary.refund_amount || 0);
+                const grossSales = summary.gross_sales === undefined || summary.gross_sales === null
+                    ? Number(summary.sales || 0) + refundAmount : Number(summary.gross_sales);
+                const prevRefund = previous ? Number(previous.refund_amount || 0) : null;
+                const prevGross = previous
+                    ? (previous.gross_sales === undefined || previous.gross_sales === null
+                        ? Number(previous.sales || 0) + prevRefund : Number(previous.gross_sales))
+                    : null;
                 const rows = [
-                    ["Sales", summary.sales, "text-textMain", previous?.sales],
+                    ["Gross sales", grossSales, "text-textMain", prevGross],
+                    ...(refundAmount || prevRefund ? [["Refunds", -refundAmount, "text-textSec", prevRefund ? -prevRefund : null]] : []),
+                    ["Net sales", summary.sales, "text-textMain", previous?.sales],
                     ["Cost of Goods", summary.cogs === null ? null : -summary.cogs, "text-textSec", previous && previous.cogs !== null ? -previous.cogs : null],
                     ["Gross Profit", summary.gross_profit, "text-textMain", previous?.gross_profit],
                     ["Expenses", -summary.expenses, "text-textSec", previous ? -previous.expenses : null],
@@ -26735,6 +26754,7 @@
                     </div>
                     ${[...groups.values()].map(group => {
                         const totalSales = group.rows.reduce((s, r) => s + (r.sales || 0), 0);
+                        const totalRefunds = group.rows.reduce((s, r) => s + Number(r.refund_amount || 0), 0);
                         const totalExpenses = group.rows.reduce((s, r) => s + (r.expenses || 0), 0);
                         const knownProfit = group.rows.every(r => r.net_profit !== null);
                         const totalNetProfit = knownProfit ? group.rows.reduce((s, r) => s + (r.net_profit || 0), 0) : null;
@@ -26745,14 +26765,14 @@
                                 ${group.rows.map(r => `
                                     <div class="flex items-center justify-between py-1 border-b border-borderCol/40 last:border-0">
                                         <span class="text-textMain font-medium">${escapeHtml(r.location_name)}</span>
-                                        <span class="font-mono text-[11px] text-textSec">Sales ${formatCurrencyAs(r.sales, group.currency)} · Net ${r.net_profit === null ? 'Unknown' : formatCurrencyAs(r.net_profit, group.currency)}</span>
+                                        <span class="font-mono text-[11px] text-textSec">Net sales ${formatCurrencyAs(r.sales, group.currency)}${Number(r.refund_amount || 0) ? ` · Refunds ${formatCurrencyAs(-Number(r.refund_amount), group.currency)}` : ""} · Net profit ${r.net_profit === null ? 'Unknown' : formatCurrencyAs(r.net_profit, group.currency)}</span>
                                     </div>`).join("")}
                                 <div class="flex items-center justify-between pt-2 mt-1 border-t border-borderCol">
                                     <span class="font-bold text-textMain">Subtotal (${deriveCurrencyDisplay(group.currency).code})</span>
                                     <span class="font-mono font-bold ${totalNetProfit !== null && totalNetProfit >= 0 ? 'text-success' : 'text-danger'}">${totalNetProfit === null ? 'Unknown' : formatCurrencyAs(totalNetProfit, group.currency)} <span class="text-textSec font-normal text-[10px]">net</span></span>
                                 </div>
                                 <div class="flex items-center justify-between text-[10px] text-textSec">
-                                    <span>Sales ${formatCurrencyAs(totalSales, group.currency)}</span>
+                                    <span>Net sales ${formatCurrencyAs(totalSales, group.currency)}${totalRefunds ? ` · Refunds ${formatCurrencyAs(-totalRefunds, group.currency)}` : ""}</span>
                                     <span>Expenses ${formatCurrencyAs(totalExpenses, group.currency)}</span>
                                 </div>
                             </div>
@@ -26786,7 +26806,11 @@
                         name: "Summary",
                         columns: [{ key: "label", label: "Metric", type: "text" }, { key: "amount", label: "Amount", type: "currency" }],
                         rows: [
-                            { label: "Sales", amount: summary.sales },
+                            // REFUND-001: the export reads like the screen — refunds on their own line.
+                            { label: "Gross sales", amount: summary.gross_sales === undefined || summary.gross_sales === null
+                                ? Number(summary.sales || 0) + Number(summary.refund_amount || 0) : summary.gross_sales },
+                            { label: "Refunds", amount: -Number(summary.refund_amount || 0) },
+                            { label: "Net sales", amount: summary.sales },
                             { label: "Cost of Goods", amount: summary.cogs },
                             { label: "Gross Profit", amount: summary.gross_profit },
                             { label: "Expenses", amount: summary.expenses },
@@ -26950,6 +26974,13 @@
                 // runs independently on every dashboard poll.
                 salesRow.classList.toggle('hidden', dashboardSalesToday === null || !hasFeaturePermission('daily sales'));
                 salesAmount.textContent = dashboardSalesToday === null ? '' : formatCurrency(dashboardSalesToday);
+                // REFUND-001: with refunds in the session this figure is net of them —
+                // say so, instead of letting it read as if goods sold for a negative amount.
+                const salesLabel = salesRow.querySelector('.bd-metric-label');
+                if (salesLabel) salesLabel.textContent = dashboardRefundsToday ? 'Net sales today' : 'Sales Today';
+                salesRow.title = dashboardRefundsToday
+                    ? `Gross sales ${formatCurrency(Number(dashboardSalesToday || 0) + dashboardRefundsToday)} less refunds ${formatCurrency(dashboardRefundsToday)}`
+                    : '';
             }
             renderDashboardNetProfit();
             // Sales Today / Net Profit now live in the Business Day bar. Hide the
