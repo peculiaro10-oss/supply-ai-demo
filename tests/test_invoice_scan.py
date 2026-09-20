@@ -152,6 +152,18 @@ class OperatorDiagnosticsTests(unittest.TestCase):
         self.assertNotIn('SECRETIMAGEBYTES', logged)
         self.assertNotIn('extract this invoice', logged)
 
+    def test_a_credential_shape_in_the_provider_message_is_redacted(self):
+        for secret in ('sk-live-ABCDEFGH12345678', 'AIzaSyD-ABCDEFGH12345678', 'key=ABCDEFGH12345678'):
+            logged = self._log_of(ValueError(f'request failed for {secret} at the provider'))
+            self.assertNotIn(secret, logged, secret)
+            self.assertIn('<redacted>', logged)
+            self.assertIn('request failed for', logged)
+
+    def test_redaction_does_not_eat_an_ordinary_reason(self):
+        logged = self._log_of(ValueError('You have no credits remaining. Add credits to continue.'))
+        self.assertIn('no credits remaining', logged)
+        self.assertNotIn('<redacted>', logged)
+
     def test_a_long_provider_message_is_truncated(self):
         logged = self._log_of(ValueError('x' * 5000))
         self.assertLess(len(logged), 500)

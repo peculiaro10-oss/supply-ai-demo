@@ -5646,6 +5646,12 @@ async def notification_sweep_loop():
 async def _start_notification_sweep():
     asyncio.create_task(notification_sweep_loop())
 
+# The logged reason is the provider's own text, so the promise that a key never
+# reaches the log cannot rest on the vendor's discretion: a credential shape in
+# that text is removed before it is written. Covers OpenAI (`sk-…`), Google
+# (`AIza…`) and any `key=` query parameter an SDK might quote back.
+PROVIDER_SECRET_SHAPE = re.compile(r"sk-[A-Za-z0-9_\-]{8,}|AIza[A-Za-z0-9_\-]{8,}|[Kk][Ee][Yy]=[A-Za-z0-9_\-]{8,}")
+
 def log_ai_provider_failure(provider: str, call: str, exc: Exception) -> None:
     """Record WHY an AI provider refused, for the operator only.
 
@@ -5655,7 +5661,7 @@ def log_ai_provider_failure(provider: str, call: str, exc: Exception) -> None:
     message go to the service log; the prompt, the uploaded image and the API
     key never do.
     """
-    reason = " ".join(str(exc).split())[:300]
+    reason = PROVIDER_SECRET_SHAPE.sub("<redacted>", " ".join(str(exc).split()))[:300]
     print(f"[ai-provider] {provider} {call} failed: {type(exc).__name__}: {reason}")
 
 def gemini_text_response(system_prompt: str, user_prompt: str, usage_out: Optional[dict] = None) -> str:
