@@ -10,10 +10,18 @@ os.environ['PYTHON_DOTENV_DISABLED'] = '1'
 os.environ['SUPPLY_AI_SKIP_DB_STARTUP_CHECK'] = 'true'
 os.environ['DATABASE_URL'] = 'postgresql+psycopg://test:test@127.0.0.1:65432/cauldra_test'
 os.environ['SUPPLY_AI_SECRET_KEY'] = 'isolated-test-secret-012345678901234567890123456789'
+import tempfile as _tempfile
+os.environ.setdefault('SUPPLY_AI_UPLOAD_DIR', _tempfile.mkdtemp(prefix='cauldra-invoice-'))
 import contextlib
 import io as _io
 import json
+import tempfile
 import unittest
+from datetime import datetime, timedelta
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from fastapi.testclient import TestClient
 from fastapi import HTTPException
 import main
 
@@ -197,6 +205,78 @@ class BilledUsageTests(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 502)
         self.assertIn(False, recorded)
         self.assertNotIn(True, recorded)
+
+
+class ActivityTrailTests(unittest.TestCase):
+    """The audit filed this inside OCR-001: five failed scans appeared in
+    Activity History as five successful uploads, with no sign of failure."""
+
+    def setUp(self):
+        self.engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+        main.Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+
+        def db_dep():
+            with self.Session() as session:
+                yield session
+        main.app.dependency_overrides[main.get_db] = db_dep
+        self.db = self.Session()
+        self.business = main.BusinessProfile(business_code='OC-1', company_name='Scanner Ltd', currency='NGN (₦)',
+                                             subscription_plan='business')
+        self.db.add(self.business); self.db.commit()
+        now = datetime.utcnow()
+        self.db.add(main.BusinessSubscription(business_id=self.business.id, plan='business', billing_interval='monthly',
+                                              status='active', current_period_start=now,
+                                              current_period_end=now + timedelta(days=30), card_verified=True))
+        self.db.commit()
+        self.admin = main.User(username='owner', email='owner@example.com', password='x', phone='+2348030000001',
+                               role='admin', business_id=self.business.id)
+        self.db.add(self.admin); self.db.commit(); self.db.refresh(self.admin)
+        self.client = TestClient(main.app)
+        self.original = main.openai_client
+        self.addCleanup(setattr, main, 'openai_client', self.original)
+
+    def tearDown(self):
+        self.client.close(); main.app.dependency_overrides.clear()
+        self.db.close(); self.engine.dispose()
+
+    PNG = ('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8'
+           'z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')
+
+    def scan(self):
+        return self.client.post('/ai/scan-invoice', json={'image_data': self.PNG, 'file_name': 'invoice.png'},
+                                headers={'Authorization': f'Bearer {main.issue_token(self.admin, self.db)}'})
+
+    def actions(self):
+        return [a.action for a in self.db.query(main.AuditLog).order_by(main.AuditLog.id).all()]
+
+    def test_a_failed_scan_is_not_recorded_as_a_plain_upload(self):
+        class RateLimitError(Exception):
+            pass
+        main.openai_client = _Client(RateLimitError('429 insufficient_quota'))
+        with contextlib.redirect_stdout(_io.StringIO()):
+            r = self.scan()
+        self.assertEqual(r.status_code, 502, r.text)
+        self.assertIn('INVOICE_UPLOADED', self.actions())
+        self.assertIn('INVOICE_SCAN_FAILED', self.actions(),
+                      'Activity History must show that the scan failed, not just that a file arrived')
+
+    def test_a_successful_scan_records_no_failure(self):
+        payload = {'supplier_name': 'Kano Traders', 'invoice_number': 'INV-9', 'invoice_date': '2026-09-20',
+                   'items': [], 'subtotal': 0, 'total': 0}
+        main.openai_client = _Client(_Resp(json.dumps(payload)))
+        r = self.scan()
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn('INVOICE_UPLOADED', self.actions())
+        self.assertNotIn('INVOICE_SCAN_FAILED', self.actions())
+
+    def test_the_failure_entry_names_the_file_and_no_provider_detail(self):
+        main.openai_client = _Client(ConnectionError('openai host unreachable: sk-should-never-appear'))
+        with contextlib.redirect_stdout(_io.StringIO()):
+            self.scan()
+        entry = self.db.query(main.AuditLog).filter_by(action='INVOICE_SCAN_FAILED').one()
+        self.assertIn('invoice.png', entry.description)
+        self.assertNotIn('sk-should-never-appear', entry.description)
 
 
 if __name__ == '__main__':

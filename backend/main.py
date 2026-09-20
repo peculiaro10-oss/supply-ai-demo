@@ -15756,8 +15756,18 @@ def scan_invoice(req: InvoiceScanRequest, user: User = Depends(require_ai_access
     upload = persist_upload(db, user, "invoice", req.file_name or "invoice-scan", content_type, raw_bytes)
     add_audit(db, user, "INVOICE_UPLOADED", f"Uploaded invoice image {upload.original_name} for review.")
     db.commit()
-    data, credits = run_billable_ai(db, user, "invoice_ocr", "openai", OPENAI_MODEL, lambda u: openai_json_response(
-        "Extract this invoice or receipt into the exact schema. Do not invent values. If uncertain, use empty strings or zero. This endpoint is for review; do not make database mutations yourself.", req.image_data, usage_out=u))
+    # OCR-001: the upload is recorded before the scan, because the file really
+    # is retained. When the scan then fails, Activity History used to show only
+    # "Uploaded invoice image … for review" — five failures reading as five
+    # successes on the product's accountability surface. The failure is now
+    # recorded against the same file instead of being silently dropped.
+    try:
+        data, credits = run_billable_ai(db, user, "invoice_ocr", "openai", OPENAI_MODEL, lambda u: openai_json_response(
+            "Extract this invoice or receipt into the exact schema. Do not invent values. If uncertain, use empty strings or zero. This endpoint is for review; do not make database mutations yourself.", req.image_data, usage_out=u))
+    except HTTPException:
+        add_audit(db, user, "INVOICE_SCAN_FAILED", f"Invoice image {upload.original_name} could not be read for review.")
+        db.commit()
+        raise
     return {"upload_id": upload.id, "supplier_name": data.get("supplier_name") or "", "invoice_number": data.get("invoice_number") or "", "invoice_date": data.get("invoice_date") or "", "items_count": len(data.get("items") or []), "items": data.get("items") or [], "subtotal": data.get("subtotal") or 0, "total": data.get("total") or 0, "requires_confirmation": True, "credits_consumed": credits}
 
 @app.get("/uploads")
