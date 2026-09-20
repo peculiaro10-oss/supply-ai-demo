@@ -13209,8 +13209,25 @@ def catalog_barcode_lookup(req: CatalogBarcodeLookupRequest, user: User = Depend
             "manual_entry": True,
         }
 
+    # 3b. Provider cooldown. The free plan is metered per source IP, and every
+    # request sent while the limit is in force pushes the provider's own reset
+    # further out — so once it has said 429, calling again before it is willing
+    # is worse than useless. The provider module remembers that window in this
+    # process (not per tenant, not persisted, never a product cache) and the
+    # answer here is the SAME manual-entry response an outage produces.
+    from upcitemdb_provider import cooldown_remaining, lookup_upcitemdb_detailed
+    cooling = cooldown_remaining()
+    if cooling > 0:
+        print(f"[barcode-flow] provider cooldown active ({cooling}s remaining) — not calling UPCitemdb")
+        print("[barcode-flow] final response source: upcitemdb_unavailable (cooldown)")
+        return {
+            "found": False, "source": "upcitemdb_unavailable", "barcode": barcode,
+            "upcitemdb_outcome": "cooldown",
+            "upcitemdb_detail": f"provider rate limit cooldown, {cooling}s remaining",
+            "manual_entry": True,
+        }
+
     print("[barcode-flow] ENTERING UPCITEMDB FALLBACK")
-    from upcitemdb_provider import lookup_upcitemdb_detailed
     print("[barcode-flow] UPCitemdb request started")
     upc = lookup_upcitemdb_detailed(barcode)
     print(f"[barcode-flow] UPCitemdb raw outcome: {upc['outcome'].upper()} "

@@ -38,6 +38,8 @@ barcode".
 from __future__ import annotations
 
 import os
+import time
+from email.utils import parsedate_to_datetime
 from typing import Optional, TypedDict
 from urllib.parse import quote
 
@@ -59,6 +61,95 @@ _REQUEST_TIMEOUT_SECONDS = 6
 # Authorization, tokens, or cookies.
 _UPC_VERBOSE = os.getenv("UPCITEMDB_DEBUG", "1").strip().lower() not in ("0", "false", "no", "off")
 _BODY_PREVIEW_CHARS = 300
+
+# ---------------------------------------------------------------------------
+# 429 COOLDOWN (in-process, provider-global)
+#
+# The free plan is metered PER SOURCE IP, so on shared hosting the quota can be
+# spent by traffic that is not Cauldra's at all — and every further request made
+# while the limit is in force pushes the reset further out (observed live: a
+# reset moving from 19:24Z to 21:17Z while probing). Retrying during a lockout is
+# therefore actively harmful: it cannot succeed and it lengthens the outage.
+#
+# After a 429 this module remembers when the provider said it would be willing
+# again, and callers that ask are told to skip the request entirely. Deliberate
+# limits of this design, all accepted for now:
+#   * it lives in THIS process's memory, so it does not survive a redeploy or
+#     apply across replicas;
+#   * it is provider-global, not per business, because the limit itself is;
+#   * it is NOT a product cache — no barcode, identity, 404 or error is stored,
+#     and it never answers "what is this barcode";
+#   * it is NOT an entitlement: no plan or role changes it.
+# ---------------------------------------------------------------------------
+_COOLDOWN_FALLBACK_SECONDS = int(os.getenv("UPCITEMDB_COOLDOWN_FALLBACK_SECONDS", "900"))
+_COOLDOWN_MIN_SECONDS = 30
+_COOLDOWN_MAX_SECONDS = 24 * 60 * 60
+_rate_limited_until = 0.0
+
+
+def cooldown_remaining(now: Optional[float] = None) -> int:
+    """Whole seconds until the provider is worth calling again; 0 when it is.
+
+    Callers check this BEFORE spending a request (see main.py's
+    catalog_barcode_lookup). Never raises.
+    """
+    remaining = _rate_limited_until - (now if now is not None else time.time())
+    return int(remaining) + 1 if remaining > 0 else 0
+
+
+def clear_cooldown() -> None:
+    """Forget any recorded cooldown. Used by tests; harmless in production."""
+    global _rate_limited_until
+    _rate_limited_until = 0.0
+
+
+def _seconds_from_retry_after(value: str) -> Optional[float]:
+    """Retry-After is either a number of seconds or an HTTP date. UPCitemdb has
+    been seen sending a fractional number of seconds, which int() would reject."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        from datetime import timezone as _tz
+        when = when.replace(tzinfo=_tz.utc)
+    return when.timestamp() - time.time()
+
+
+def _record_rate_limit(headers) -> int:
+    """Remember the provider's own cooldown after a 429, and report the seconds.
+
+    Prefers Retry-After, then X-RateLimit-Reset (an absolute epoch), then a
+    conservative default. The result is clamped so neither a missing header nor a
+    nonsensical one can disable lookups for longer than a day.
+    """
+    global _rate_limited_until
+    seconds = _seconds_from_retry_after(headers.get("Retry-After") or "")
+    source = "Retry-After"
+    if seconds is None or seconds <= 0:
+        reset = (headers.get("X-RateLimit-Reset") or "").strip()
+        try:
+            seconds = float(reset) - time.time()
+            source = "X-RateLimit-Reset"
+        except ValueError:
+            seconds = None
+    if seconds is None or seconds <= 0:
+        seconds, source = float(_COOLDOWN_FALLBACK_SECONDS), "default"
+    seconds = max(_COOLDOWN_MIN_SECONDS, min(float(seconds), _COOLDOWN_MAX_SECONDS))
+    candidate = time.time() + seconds
+    if candidate > _rate_limited_until:
+        _rate_limited_until = candidate
+    _upc_log(f"[upcitemdb] cooldown recorded from {source}: {int(seconds)}s — no request will be sent until it expires")
+    return int(seconds)
 
 
 def _upc_log(msg: str) -> None:
@@ -199,8 +290,9 @@ def lookup_upcitemdb_detailed(barcode: str) -> UpcLookupResult:
               f"(mode={UPCITEMDB_PLAN}; check UPCITEMDB_PLAN / UPCITEMDB_API_KEY)")
         return _r("config_error", None, f"HTTP {status} (authentication rejected)", status)
     if status == 429:
+        cooldown = _record_rate_limit(resp.headers)
         _upc_log("[upcitemdb] parse result: TEMPORARY_ERROR (HTTP 429 rate limit)")
-        return _r("temporary_error", None, "HTTP 429 (rate limited)", status)
+        return _r("temporary_error", None, f"HTTP 429 (rate limited, cooling down {cooldown}s)", status)
     if status == 404:
         _upc_log("[upcitemdb] parse result: MISS (HTTP 404)")
         return _r("miss", None, "HTTP 404", status)
