@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, date, time as dtime, timezone, tzinfo
 from zoneinfo import ZoneInfo
 from typing import Optional, List, Dict, Any, Tuple, Literal
 
-from fastapi import FastAPI, Depends, HTTPException, status, Query, Request, Response, Cookie
+from fastapi import FastAPI, Depends, HTTPException, status, Query, Request, Response, Cookie, BackgroundTasks
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -3251,22 +3251,13 @@ def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 def verify_password(password: str, hashed: str) -> bool:
-    # --- TEMPORARY DEV DIAGNOSTIC (auth investigation) -----------------------
-    # Distinguishes "pwd_context.verify() returned False" from "pwd_context.verify()
-    # raised an exception that got silently swallowed" — the two look identical
-    # to the caller today. Logs no password, no hash, no token. Safe to remove
-    # once the real-browser login failure is diagnosed.
+    # A malformed/unknown stored hash must fail closed, never 500. Only the
+    # exception type is logged — no password, hash, username or ids.
     try:
         return pwd_context.verify(password, hashed)
     except Exception as exc:
-        print(
-            f"[auth-diag] AUTH PASSWORD VERIFICATION EXCEPTION "
-            f"exception_type={type(exc).__name__} exception_message={exc!r} "
-            f"hash_present={bool(hashed)} hash_prefix={(hashed or '')[:4]!r} "
-            f"pid={os.getpid()}"
-        )
+        print(f"[auth] password verification error: {type(exc).__name__}")
         return False
-    # --- END TEMPORARY DEV DIAGNOSTIC ----------------------------------------
 
 def validate_password_strength(password: str):
     if len(password) > 72:
@@ -6417,49 +6408,44 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
 def verify_business(data: BusinessVerifyRequest, request: Request, db: Session = Depends(get_db)):
     key = re.sub(r"\W", "", data.business_id or "").casefold()
     client_ip = request.client.host if request.client else "unknown"
+    check_business_lookup_limit(db, client_ip)
     check_rate_limit(db, "business-verify-ip", client_ip)
     check_rate_limit(db, "business-verify-code", key or "blank")
     biz = get_business_by_code(db, data.business_id)
     if not biz:
+        record_unknown_business(db, client_ip)
         record_failure(db, "business-verify-ip", client_ip)
         record_failure(db, "business-verify-code", key or "blank")
         raise HTTPException(status_code=404, detail="Business not found. Please check the Business ID and try again.")
     clear_failures(db, "business-verify-ip", client_ip)
     return serialize_business(biz)
 
+def check_business_lookup_limit(db: Session, client_ip: Optional[str]) -> None:
+    """SEC-001: every public path that resolves a Business ID from an
+    unauthenticated caller (the three login routes, /auth/verify-business and
+    /auth/forgot-password) shares ONE per-IP budget for unknown Business IDs,
+    checked BEFORE the lookup — so an unknown code can no longer be tried at an
+    unlimited rate, and rotating between those routes gains nothing."""
+    check_rate_limit(db, BUSINESS_LOOKUP_SCOPE, client_ip or "unknown")
+
+def record_unknown_business(db: Session, client_ip: Optional[str]) -> None:
+    record_failure(db, BUSINESS_LOOKUP_SCOPE, client_ip or "unknown")
+
+BUSINESS_LOOKUP_SCOPE = "business-lookup-ip"
+
 def authenticate_user_for_business(db: Session, business_code: str, username: str, password: str, role: Optional[str] = None, scope: str = "login", client_ip: Optional[str] = None) -> User:
-    # --- TEMPORARY DEV DIAGNOSTIC (auth investigation) -----------------------
-    diag_id = secrets.token_hex(4)
-    username_fingerprint = hashlib.sha256(normalize_username(username).encode()).hexdigest()[:12]
-    print(f"[auth-diag {diag_id}] LOGIN ATTEMPT scope={scope} pid={os.getpid()} db_target={engine.url.render_as_string(hide_password=True)} "
-          f"business_code_received={business_code!r} username_fingerprint={username_fingerprint}")
-    # --- END TEMPORARY DEV DIAGNOSTIC (continues below) ----------------------
-
+    check_business_lookup_limit(db, client_ip)
+    if client_ip:
+        check_rate_limit(db, scope + "-ip", client_ip)
     biz = get_business_by_code(db, business_code)
-
-    print(f"[auth-diag {diag_id}] BUSINESS LOOKUP found={bool(biz)} business_db_id={getattr(biz, 'id', None)}")
-
     if not biz:
-        print(f"[auth-diag {diag_id}] RESULT status=404 reason=business_not_found")
+        record_unknown_business(db, client_ip)
         raise HTTPException(status_code=404, detail="Business not found. Please check the Business ID and try again.")
     key = f"{biz.id}:{normalize_username(username)}"
-    try:
-        check_rate_limit(db, scope, key)
-        if client_ip:
-            check_rate_limit(db, scope + "-ip", client_ip)
-    except HTTPException as rl_exc:
-        print(f"[auth-diag {diag_id}] RATE LIMIT blocked=True status={rl_exc.status_code}")
-        raise
-    print(f"[auth-diag {diag_id}] RATE LIMIT blocked=False")
+    check_rate_limit(db, scope, key)
 
     user = next((u for u in db.query(User).filter(User.business_id == biz.id).all() if normalize_username(u.username) == normalize_username(username)), None)
-
-    print(f"[auth-diag {diag_id}] USER LOOKUP found={bool(user)} user_db_id={getattr(user, 'id', None)} "
-          f"user_business_id={getattr(user, 'business_id', None)} user_role={getattr(user, 'role', None)} "
-          f"user_disabled={getattr(user, 'disabled', None)} password_hash_present={bool(getattr(user, 'password', None))}")
-
     password_ok = verify_password(password, user.password) if user else False
-    print(f"[auth-diag {diag_id}] PASSWORD VERIFICATION result={password_ok}")
 
     if not user or not password_ok:
         record_failure(db, scope, key)
@@ -6472,8 +6458,6 @@ def authenticate_user_for_business(db: Session, business_code: str, username: st
             # dedup/threshold check) — never on every subsequent locked-out
             # attempt.
             check_login_lockout_notification(db, user, scope, key)
-        reason = "user_not_found" if not user else "password_mismatch"
-        print(f"[auth-diag {diag_id}] RESULT status=401 reason={reason}")
         raise HTTPException(status_code=401, detail="Incorrect username or password.")
     if user.disabled:
         # The password was just proven CORRECT above — only now is it safe
@@ -6483,7 +6467,6 @@ def authenticate_user_for_business(db: Session, business_code: str, username: st
         # record_failure(), no lockout accounting, no token/session of any
         # kind is issued — the caller below never gets far enough to do
         # either since this raises first.
-        print(f"[auth-diag {diag_id}] RESULT status=403 reason=user_disabled_correct_password")
         raise HTTPException(status_code=403, detail="This account is currently disabled. Contact your administrator.")
     clear_failures(db, scope, key)
     if client_ip: clear_failures(db, scope + "-ip", client_ip)
@@ -6492,14 +6475,11 @@ def authenticate_user_for_business(db: Session, business_code: str, username: st
     # the primary signal; this just covers the moment before the first one.
     user.last_active_at = datetime.utcnow()
     if role and user.role != role:
-        print(f"[auth-diag {diag_id}] RESULT status=403 reason=role_mismatch expected={role} actual={user.role}")
         raise HTTPException(status_code=403, detail="This account does not have the selected role.")
-    print(f"[auth-diag {diag_id}] RESULT status=200 reason=success")
     return user
 
 @app.post("/auth/admin-login")
 def admin_login(data: AdminLoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
-    print(f"[auth-diag] /auth/admin-login REQUEST RECEIVED pid={os.getpid()} port={request.url.port} db_target={engine.url.render_as_string(hide_password=True)}")  # TEMPORARY DEV DIAGNOSTIC
     user = authenticate_user_for_business(db, data.business_id, data.username, data.password, role="admin", scope="admin-login", client_ip=request.client.host if request.client else "unknown")
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     access = issue_token(user, db)
@@ -6566,39 +6546,25 @@ def _issue_refresh_success(db: Session, user: User) -> dict:
 
 @app.post("/auth/refresh")
 def auth_refresh(response: Response, refresh_token: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME), db: Session = Depends(get_db)):
-    # --- TEMPORARY DEV DIAGNOSTIC (auth investigation) -----------------------
-    # Never logs the raw cookie/token value, its hash, or any other secret —
-    # only which branch of this function executed and the non-sensitive facts
-    # that decided it. Remove once the reload-logout investigation is closed.
-    diag_id = secrets.token_hex(4)
-    print(f"[auth-diag {diag_id}] /auth/refresh REQUEST RECEIVED pid={os.getpid()} cookie_present={bool(refresh_token)}")
-    # --- END TEMPORARY DEV DIAGNOSTIC (continues below) ----------------------
-
     # A page can load without a session (new visitor, signed-out user, or an
     # expired browser cookie). That is a normal state, not an authentication
     # error, so return an explicit empty success response without a console 401.
     if not refresh_token:
-        print(f"[auth-diag {diag_id}] RESULT status=204 branch=no_cookie_presented")
         return _reject_refresh(response)
     now = datetime.utcnow()
     presented_hash = hash_text(refresh_token)
     row = db.query(RefreshSession).filter(RefreshSession.token_hash == presented_hash).first()
-    print(f"[auth-diag {diag_id}] SESSION ROW LOOKUP found={bool(row)}"
-          + (f" revoked={bool(row.revoked_at)} has_replacement={bool(row.replaced_by_hash)} expired={row.expires_at <= now} row_id={row.id}" if row else ""))
     if not row:
-        print(f"[auth-diag {diag_id}] RESULT status=204 branch=no_matching_session_row")
         return _reject_refresh(response)
 
     # Checked before attempting rotation, same as the prior implementation —
     # a disabled/deleted user's session must never be rotated *or* recovered
     # via the grace path below, so this short-circuits before either.
     user = db.query(User).filter(User.id == row.user_id, User.business_id == row.business_id).first()
-    print(f"[auth-diag {diag_id}] USER LOOKUP found={bool(user)} disabled={getattr(user, 'disabled', None)}")
     if not user or user.disabled:
         db.query(RefreshSession).filter(RefreshSession.id == row.id, RefreshSession.revoked_at.is_(None)) \
             .update({RefreshSession.revoked_at: now}, synchronize_session=False)
         db.commit()
-        print(f"[auth-diag {diag_id}] RESULT status=204 branch=user_missing_or_disabled")
         return _reject_refresh(response)
 
     # Atomic compare-and-swap: this UPDATE's WHERE clause is re-evaluated by
@@ -6625,13 +6591,11 @@ def auth_refresh(response: Response, refresh_token: Optional[str] = Cookie(defau
         RefreshSession.revoked_at.is_(None),
         RefreshSession.expires_at > now,
     ).update({RefreshSession.revoked_at: now, RefreshSession.replaced_by_hash: new_hash}, synchronize_session=False)
-    print(f"[auth-diag {diag_id}] ATOMIC ROTATION UPDATE affected_rows={affected}")
 
     if affected == 1:
         db.add(RefreshSession(token_hash=new_hash, user_id=user.id, business_id=user.business_id, expires_at=now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)))
         db.commit()  # old-row revoke + replaced_by_hash + new row, all at once
         set_refresh_cookie(response, new_raw)
-        print(f"[auth-diag {diag_id}] RESULT status=200 branch=normal_rotation sets_new_cookie=True")
         return _issue_refresh_success(db, user)
 
     # We lost the race, or this token was already invalid for some other
@@ -6641,18 +6605,14 @@ def auth_refresh(response: Response, refresh_token: Optional[str] = Cookie(defau
     # rotated this exact token moments ago" case.
     db.rollback()
     db.refresh(row)
-    print(f"[auth-diag {diag_id}] ENTERED GRACE-CHECK BRANCH revoked={bool(row.revoked_at)} has_replacement={bool(row.replaced_by_hash)}")
     recovered_user = None
     if row.revoked_at and row.replaced_by_hash:
         elapsed_seconds = (now - row.revoked_at).total_seconds()
-        print(f"[auth-diag {diag_id}] GRACE WINDOW elapsed_seconds={elapsed_seconds:.3f} limit={REFRESH_ROTATION_GRACE_SECONDS} within_window={elapsed_seconds <= REFRESH_ROTATION_GRACE_SECONDS}")
         if elapsed_seconds <= REFRESH_ROTATION_GRACE_SECONDS:
             # Exactly one hop: the immediate successor this row's own rotation
             # produced — never followed further, so a token from two or more
             # generations back can never recover through a longer chain.
             replacement = db.query(RefreshSession).filter(RefreshSession.token_hash == row.replaced_by_hash).first()
-            print(f"[auth-diag {diag_id}] REPLACEMENT LOOKUP found={bool(replacement)}"
-                  + (f" revoked={bool(replacement.revoked_at)} expired={replacement.expires_at <= now} same_user={replacement.user_id == row.user_id and replacement.business_id == row.business_id}" if replacement else ""))
             if (replacement and replacement.user_id == row.user_id and replacement.business_id == row.business_id
                     and not replacement.revoked_at and replacement.expires_at > now):
                 candidate = db.query(User).filter(User.id == replacement.user_id, User.business_id == replacement.business_id).first()
@@ -6660,9 +6620,7 @@ def auth_refresh(response: Response, refresh_token: Optional[str] = Cookie(defau
                     recovered_user = candidate
 
     if not recovered_user:
-        print(f"[auth-diag {diag_id}] RESULT status=204 branch=grace_recovery_failed")
         return _reject_refresh(response)
-    print(f"[auth-diag {diag_id}] RESULT status=200 branch=grace_recovery_succeeded sets_new_cookie=False")
 
     # Grace recovery: hand this tab a fresh access token for the same user
     # and business, bound to the session the winning request already
@@ -6677,7 +6635,7 @@ def auth_refresh(response: Response, refresh_token: Optional[str] = Cookie(defau
     return _issue_refresh_success(db, recovered_user)
 
 @app.post("/auth/change-password")
-def change_password(data: PasswordChangeRequest, response: Response, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def change_password(data: PasswordChangeRequest, response: Response, background_tasks: BackgroundTasks, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
     validate_password_strength(data.new_password)
     if not verify_password(data.current_password, user.password):
         raise HTTPException(status_code=400, detail="Incorrect current or temporary password.")
@@ -6690,15 +6648,32 @@ def change_password(data: PasswordChangeRequest, response: Response, user: User 
     revoke_all_user_sessions(db, user)
     add_audit(db, user, "PASSWORD_CHANGED", "User changed their password.")
     db.commit()
+    queue_password_changed_notice(background_tasks, user, "changed")
     set_refresh_cookie(response, create_refresh_session(db, user))
     return {"message": "Password updated successfully.", "access_token": issue_token(user, db), "token_type": "bearer"}
 
+class SelfDisableRequest(BaseModel):
+    password: str = Field(default="", max_length=256)
+
 @app.delete("/auth/account")
-def delete_own_account(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def delete_own_account(data: Optional[SelfDisableRequest] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Disables (does not delete) the caller's own Manager/Staff account.
+    SEC-005: a bearer token alone is not enough — the current password is
+    required, and wrong passwords are rate-limited per account like sign-in."""
     if user.role == "admin":
         raise HTTPException(status_code=403, detail="Business owner accounts cannot self-delete. Use the business recovery/closure process.")
-    add_audit(db, user, "ACCOUNT_DELETED", "User deleted their own account.", user)
+    password = (data.password if data else "") or ""
+    if not password:
+        raise HTTPException(status_code=400, detail="Enter your current password to disable your account.")
+    key = f"{user.business_id}:{user.id}"
+    check_rate_limit(db, "self-disable", key)
+    if not verify_password(password, user.password):
+        record_failure(db, "self-disable", key)
+        raise HTTPException(status_code=400, detail="Incorrect password.")
+    clear_failures(db, "self-disable", key)
+    add_audit(db, user, "ACCOUNT_DELETED", "User disabled their own account.", user)
     user.disabled = True
+    revoke_all_user_sessions(db, user)
     db.commit()
     return {"message": "Account disabled successfully."}
 
@@ -6829,8 +6804,107 @@ def send_recovery_sms(phone: str, code: str):
             pass
     raise HTTPException(status_code=503, detail="SMS recovery is not configured or the SMS provider could not deliver the code.")
 
+def _mask_email(address: Optional[str]) -> str:
+    local, _, domain = str(address or "").partition("@")
+    return f"{local[:1]}***@{domain}" if local and domain else "***"
+
+def queue_security_notice(background_tasks: BackgroundTasks, *, purpose: str, to_email: Optional[str],
+                          subject: str, lines: List[str]) -> None:
+    """SEC-NOTIFY-001/002: informational security email through the existing
+    Resend path, sent after the response so a slow or failing provider never
+    delays or fails the account change itself. Never carries a password, code,
+    token or link; delivery failures are logged by send_resend_email() with the
+    AUTH-RECOVERY-001 classification (no recipient, no body)."""
+    if not to_email:
+        return
+    from html import escape
+    body = "".join(f"<p>{escape(line)}</p>" for line in lines)
+    def deliver():
+        try:
+            send_resend_email(purpose=purpose, to_email=to_email, subject=subject, html=body)
+        except EmailDeliveryError:
+            pass
+        except Exception as exc:
+            log_email_delivery_failure(purpose, "other_delivery_failure", exception_type=type(exc).__name__)
+    background_tasks.add_task(deliver)
+
+def _security_notice_time() -> str:
+    return datetime.utcnow().strftime("%d %b %Y at %H:%M UTC")
+
+def queue_password_changed_notice(background_tasks: BackgroundTasks, user: "User", how: str) -> None:
+    what = {
+        "changed": "was changed from your account settings",
+        "recovered": "was reset using a password recovery code",
+        "reset_by_admin": "was reset by an administrator of your business. You will be asked to choose a new password when you next sign in",
+    }[how]
+    queue_security_notice(
+        background_tasks, purpose="security_password_changed", to_email=user.email,
+        subject=f"Your {APP_NAME} password was changed",
+        lines=[f"Hello {user.username},",
+               f"The password for your {APP_NAME} account {what} on {_security_notice_time()}.",
+               "If you made this change, no action is needed.",
+               "If you did not, reset your password now with Forgot Password on the sign-in screen, and tell your business Admin."],
+    )
+
+def queue_email_changed_notices(background_tasks: BackgroundTasks, user: "User", old_email: Optional[str], new_email: str) -> None:
+    when = _security_notice_time()
+    queue_security_notice(
+        background_tasks, purpose="security_email_changed_old", to_email=old_email,
+        subject=f"The email address on your {APP_NAME} account was changed",
+        lines=[f"Hello {user.username},",
+               f"The email address on your {APP_NAME} account was changed from this address to {_mask_email(new_email)} on {when}.",
+               "If you made this change, no action is needed.",
+               "If you did not, contact your business Admin immediately: this address can no longer be used to recover the account."],
+    )
+    queue_security_notice(
+        background_tasks, purpose="security_email_changed_new", to_email=new_email,
+        subject=f"This is now the email address for your {APP_NAME} account",
+        lines=[f"Hello {user.username},",
+               f"This address became the email for your {APP_NAME} account on {when}. The previous address was {_mask_email(old_email)}.",
+               "If you did not make this change, contact your business Admin immediately."],
+    )
+
+def _sms_recovery_configured() -> bool:
+    return bool(os.getenv("TERMII_API_KEY", "").strip()) or all(
+        os.getenv(k, "").strip() for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM"))
+
+# Background work runs after the request's own session is closed, so it opens
+# its own. A module-level hook so tests can bind it to their database.
+background_session_factory = lambda: SessionLocal()
+
+def _deliver_recovery_code(recovery_row_id: int, channel: str, destination: str, username: str, code: str) -> None:
+    """Sends the recovery code after the response. On failure the code is
+    retired, so the account holder can ask again immediately instead of
+    waiting out a cooldown for a message that never arrived; the failure is
+    logged with its classification (never the recipient or the code)."""
+    try:
+        if channel == "email":
+            send_recovery_email(destination, username, code)  # failures already logged + classified
+        else:
+            send_recovery_sms(destination, code)
+        return
+    except HTTPException:
+        if channel != "email":
+            print("[sms-delivery] " + json.dumps({"event": "sms_delivery_failed", "purpose": "password_recovery"}))
+    except Exception as exc:
+        print("[recovery-delivery] " + json.dumps({"event": "delivery_error", "channel": channel, "exception_type": type(exc).__name__}))
+    db = background_session_factory()
+    try:
+        db.query(PasswordRecovery).filter(PasswordRecovery.id == recovery_row_id).update({PasswordRecovery.used: True}, synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+
 @app.post("/auth/forgot-password")
-def forgot_password(payload: ForgotPasswordRequest, request: Request, db: Session = Depends(get_db)):
+def forgot_password(payload: ForgotPasswordRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """SEC-003 / AUTH-OBS-1: the public answer never reveals whether the
+    Business ID, username or email/phone matched. Every well-formed request
+    gets the same 200 shape (the frontend already says "If the details match an
+    account, a recovery code has been sent"); a non-matching request receives a
+    random recovery_id that no code will ever satisfy. Rate limits count EVERY
+    request, not only mismatches, so lockout timing is no oracle either. Only
+    input-shape errors and a globally unconfigured provider (the same for
+    every caller) are reported, and they are decided before any lookup."""
     business_id = payload.business_id.strip()
     username = payload.username.strip()
     channel = payload.channel.strip().lower()
@@ -6840,26 +6914,38 @@ def forgot_password(payload: ForgotPasswordRequest, request: Request, db: Sessio
         if not payload.email:
             raise HTTPException(status_code=400, detail="Please provide your account email.")
         email = str(payload.email).strip()
+        if not os.getenv("RESEND_API_KEY", "").strip():
+            raise HTTPException(status_code=503, detail="Email recovery is not configured. Add RESEND_API_KEY to the server environment.")
+        if not RESEND_FROM:
+            raise HTTPException(status_code=503, detail="Email recovery is not configured. Set RESEND_FROM on the server.")
     else:
         if not payload.phone or not normalize_phone(payload.phone):
             raise HTTPException(status_code=400, detail="Please provide your phone number.")
+        if not _sms_recovery_configured():
+            raise HTTPException(status_code=503, detail="SMS recovery is not configured or the SMS provider could not deliver the code.")
+    client_ip = request.client.host if request.client else "unknown"
+    check_business_lookup_limit(db, client_ip)
+    check_rate_limit(db, "forgot-password-ip", client_ip)
     # Business must be resolved before the SMS phone can be validated — the
     # region for to_e164() below is THIS business's country, never the
     # signed-out caller's own device/browser locale (password recovery can
     # happen while signed out of every account).
     biz = get_business_by_code(db, business_id)
-    if not biz:
-        raise HTTPException(status_code=404, detail="Business not found. Please check the Business ID and try again.")
-    key = f"{biz.id}:{normalize_username(username)}:{channel}"
-    client_ip = request.client.host if request.client else "unknown"
+    business_key = str(biz.id) if biz else "unknown:" + re.sub(r"\W", "", business_id).casefold()
+    key = f"{business_key}:{normalize_username(username)}:{channel}"
     check_rate_limit(db, "forgot-password", key)
-    check_rate_limit(db, "forgot-password-ip", client_ip)
-    user = next((u for u in db.query(User).filter(User.business_id == biz.id).all() if normalize_username(u.username) == normalize_username(username)), None)
+    record_failure(db, "forgot-password", key)
+    record_failure(db, "forgot-password-ip", client_ip)
+    if not biz:
+        record_unknown_business(db, client_ip)
+    user = None
+    if biz:
+        user = next((u for u in db.query(User).filter(User.business_id == biz.id).all() if normalize_username(u.username) == normalize_username(username)), None)
     # Channel-specific identity verification only — email recovery never checks
     # phone, SMS recovery never checks email. The submitted value is used only
     # to verify the account; delivery always goes to the value already stored
-    # on the User record (see send_recovery_email/send_recovery_sms below),
-    # never to whatever the client supplied.
+    # on the User record (see _deliver_recovery_code), never to whatever the
+    # client supplied.
     identity_verified = False
     if user and not user.disabled:
         if channel == "email":
@@ -6883,55 +6969,64 @@ def forgot_password(payload: ForgotPasswordRequest, request: Request, db: Sessio
             # docstring). Comparing the properly-normalized E.164 value
             # first is what actually enforces country-aware validity here.
             identity_verified = bool(user.phone) and bool(submitted_phone_e164) and phones_match(submitted_phone_e164, user.phone)
-    if not identity_verified:
-        record_failure(db, "forgot-password", key)
-        record_failure(db, "forgot-password-ip", client_ip)
-        raise HTTPException(status_code=400, detail="We could not verify those recovery details.")
     now = datetime.utcnow()
-    active_recovery = (db.query(PasswordRecovery).filter(
-        PasswordRecovery.user_id == user.id, PasswordRecovery.used == False,
-        PasswordRecovery.expires_at > now
-    ).order_by(PasswordRecovery.created_at.desc()).first())
-    if active_recovery and active_recovery.resend_after > now:
-        seconds = max(1, int((active_recovery.resend_after - now).total_seconds()))
-        raise HTTPException(status_code=429, detail=f"Please wait {seconds} seconds before requesting another recovery code.")
-    # A replacement code invalidates every existing usable recovery code.
-    db.query(PasswordRecovery).filter(
-        PasswordRecovery.user_id == user.id, PasswordRecovery.used == False,
-        PasswordRecovery.expires_at > now,
-    ).update({PasswordRecovery.used: True}, synchronize_session=False)
-    code = f"{secrets.randbelow(1000000):06d}"
     recovery_id = secrets.token_urlsafe(18)
-    row = PasswordRecovery(
-        recovery_id=recovery_id, user_id=user.id, channel=channel,
-        code_hash=hash_text(code), expires_at=now + timedelta(seconds=FORGOT_CODE_TTL_SECONDS),
-        resend_after=now + timedelta(seconds=FORGOT_RESEND_SECONDS)
-    )
-    # Persist the recovery record only after delivery is accepted by the provider.
-    if channel == "email":
-        send_recovery_email(user.email, user.username, code)
-    else:
-        send_recovery_sms(normalize_phone(user.phone), code)
-    db.add(row); db.commit()
-    clear_failures(db, "forgot-password", key)
-    clear_failures(db, "forgot-password-ip", client_ip)
+    if identity_verified:
+        active_recovery = (db.query(PasswordRecovery).filter(
+            PasswordRecovery.user_id == user.id, PasswordRecovery.used == False,
+            PasswordRecovery.expires_at > now
+        ).order_by(PasswordRecovery.created_at.desc()).first())
+        if active_recovery and active_recovery.resend_after > now:
+            # Inside the resend cooldown: no second message, and no distinct
+            # answer either. The caller gets a fresh handle to the SAME code
+            # (same hash, expiry and attempt count); the previous handle is
+            # retired, so this never adds guesses or lifetime to the code.
+            db.add(PasswordRecovery(
+                recovery_id=recovery_id, user_id=user.id, channel=active_recovery.channel,
+                code_hash=active_recovery.code_hash, expires_at=active_recovery.expires_at,
+                resend_after=active_recovery.resend_after, attempts=active_recovery.attempts,
+            ))
+            active_recovery.used = True
+            db.commit()
+        else:
+            # A replacement code invalidates every existing usable recovery code.
+            db.query(PasswordRecovery).filter(
+                PasswordRecovery.user_id == user.id, PasswordRecovery.used == False,
+                PasswordRecovery.expires_at > now,
+            ).update({PasswordRecovery.used: True}, synchronize_session=False)
+            code = f"{secrets.randbelow(1000000):06d}"
+            row = PasswordRecovery(
+                recovery_id=recovery_id, user_id=user.id, channel=channel,
+                code_hash=hash_text(code), expires_at=now + timedelta(seconds=FORGOT_CODE_TTL_SECONDS),
+                resend_after=now + timedelta(seconds=FORGOT_RESEND_SECONDS)
+            )
+            db.add(row); db.commit()
+            destination = user.email if channel == "email" else normalize_phone(user.phone)
+            background_tasks.add_task(_deliver_recovery_code, row.id, channel, destination, user.username, code)
+    print("[auth] " + json.dumps({"event": "password_recovery_requested", "channel": channel,
+                                  "matched": bool(identity_verified)}, sort_keys=True))
     return {"recovery_id": recovery_id, "channel": channel, "expires_in_seconds": FORGOT_CODE_TTL_SECONDS, "resend_after_seconds": FORGOT_RESEND_SECONDS}
 
 @app.post("/auth/reset-password")
-def reset_password(payload: PasswordResetRequest, db: Session = Depends(get_db)):
+def reset_password(payload: PasswordResetRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     recovery_id = payload.recovery_id
     code = payload.code
     new_password = payload.new_password
     validate_password_strength(new_password)
+    # SEC-003: an unknown handle (including the decoy a non-matching
+    # forgot-password request receives), an expired code, too many attempts
+    # and a wrong code all get the SAME answer, so the handle itself cannot
+    # be used to learn whether the original request matched an account.
+    invalid = HTTPException(status_code=400, detail="This recovery code is incorrect or has expired. Check the code, or request a new one.")
     row = db.query(PasswordRecovery).filter(PasswordRecovery.recovery_id == recovery_id, PasswordRecovery.used == False).first()
     if not row or row.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="This recovery code has expired. Please request a new code.")
+        raise invalid
     row.attempts += 1
     if row.attempts > 5:
         row.used = True; db.commit()
-        raise HTTPException(status_code=400, detail="Too many recovery attempts. Please request a new code.")
-    if hash_text(code) != row.code_hash:
-        db.commit(); raise HTTPException(status_code=400, detail="The recovery code is incorrect.")
+        raise invalid
+    if not hmac.compare_digest(hash_text(code), row.code_hash):
+        db.commit(); raise invalid
     user = db.query(User).filter(User.id == row.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="The account could not be recovered.")
@@ -6946,6 +7041,7 @@ def reset_password(payload: PasswordResetRequest, db: Session = Depends(get_db))
     row.used = True
     add_audit(db, user, "PASSWORD_RECOVERED", "Password recovered through the account recovery flow.")
     db.commit()
+    queue_password_changed_notice(background_tasks, user, "recovered")
     return {"message": "Password reset successfully. You can now sign in with your new password."}
 
 # -----------------------------------------------------------------------------
@@ -7267,7 +7363,7 @@ def start_my_email_change(payload: UserEmailChangeRequest, request: Request, use
 
 
 @app.post("/users/me/email-change/confirm")
-def confirm_my_email_change(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def confirm_my_email_change(background_tasks: BackgroundTasks, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
     """Swap in the pending address ONLY after Supabase itself reports it
     confirmed. The browser can never assert verification - this endpoint takes
     no body at all and re-checks with Supabase every time."""
@@ -7279,11 +7375,13 @@ def confirm_my_email_change(user: User = Depends(get_authenticated_user), db: Se
         raise HTTPException(status_code=409, detail="That email address has not been verified yet. Open the link we emailed you, then try again.")
     if db.query(User).filter(func.lower(User.email) == pending, User.id != user.id).first():
         raise HTTPException(status_code=409, detail="That email address is already in use.")
+    old_email = user.email
     user.email = pending
     user.pending_email = None
     user.email_verified_at = datetime.utcnow()
     add_audit(db, user, "USER_EMAIL_CHANGED", "Email address changed and verified.")
     db.commit()
+    queue_email_changed_notices(background_tasks, user, old_email, pending)
     db.refresh(user)
     return _user_profile_payload(db, user)
 
@@ -7440,7 +7538,7 @@ def change_user_role(user_id: int, data: UserRoleUpdate, actor: User = Depends(g
     return serialize_user(target)
 
 @app.patch("/users/{user_id}/reset-password")
-def reset_user_password(user_id: int, data: AdminPasswordResetRequest, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def reset_user_password(user_id: int, data: AdminPasswordResetRequest, background_tasks: BackgroundTasks, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(actor, "team.reset_staff_password")
     target = db.query(User).filter(User.id == user_id, User.business_id == actor.business_id).first()
     if not target: raise HTTPException(status_code=404, detail="Account is unavailable.")
@@ -7462,6 +7560,7 @@ def reset_user_password(user_id: int, data: AdminPasswordResetRequest, actor: Us
     target.disabled = False
     add_audit(db, actor, "PASSWORD_RESET", "Temporary password reset by authorized staff.", target, action_category="TEAM", resource_type="user", resource_id=target.id)
     db.commit()
+    queue_password_changed_notice(background_tasks, target, "reset_by_admin")
     return {"message": "Temporary password reset. The employee must change it at next sign-in."}
 
 @app.delete("/users/{user_id}")
@@ -8270,8 +8369,21 @@ def generate_unique_sku(db: Session, business_id: int) -> str:
             return sku
     raise HTTPException(status_code=500, detail="We could not generate a unique SKU. Please try again.")
 
+def can_read_product_catalog(user: "User") -> bool:
+    """X2: the product list is the inventory view AND the catalogue the till
+    sells from, so it follows the same rule PERM-001 already applies to
+    /warehouses/operational and the offline snapshot: inventory.view OR
+    sales.create. Pure stock views (summary, per-warehouse stock) need
+    inventory.view itself."""
+    return has_permission(user, "inventory.view") or has_permission(user, "sales.create")
+
+def require_product_catalog_access(user: "User") -> None:
+    if not can_read_product_catalog(user):
+        raise HTTPException(status_code=403, detail="Your account does not have the 'View Inventory' or 'Make Sales' permission.")
+
 @app.get("/products/")
 def list_products(limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0), warehouse: Optional[str] = Query(None), stock_status: Optional[str] = Query(None, alias="status"), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_product_catalog_access(user)
     warehouse_name = None
     warehouse_id_filter = None
     if warehouse and warehouse.upper() != "ALL":
@@ -8328,6 +8440,7 @@ def list_products(limit: int = Query(200, ge=1, le=500), offset: int = Query(0, 
 
 @app.get("/products/inventory-summary")
 def inventory_summary(warehouse: Optional[str] = Query(None), location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_permission(user, "inventory.view")
     warehouse_name = None
     warehouse_id_filter = None
     if warehouse and warehouse.upper() != "ALL":
@@ -9004,6 +9117,7 @@ def transfer_stock(product_id: int, data: StockTransfer, user: User = Depends(ge
 
 @app.get("/products/{product_id}/warehouse-stocks")
 def product_warehouse_stocks(product_id:int,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    require_permission(user, "inventory.view")
     p=db.query(Product).filter(Product.id==product_id,Product.business_id==user.business_id).first()
     if not p: raise HTTPException(status_code=404, detail="The selected product is unavailable.")
     rows=db.query(WarehouseStock).filter(WarehouseStock.product_id==p.id,WarehouseStock.business_id==user.business_id).order_by(WarehouseStock.warehouse.asc()).all()
@@ -12828,9 +12942,17 @@ def team_presence(user: User = Depends(get_current_user), db: Session = Depends(
     result = []
     for emp in employees:
         presence = compute_presence_status(sessions_by_user.get(emp.id, []), now)
-        result.append({**serialize_user(emp), **presence,
+        result.append({**serialize_presence_identity(emp), **presence,
                         "online": presence["status"] == "online"})  # back-compat boolean for any caller not yet reading `status`
     return {"employees": result}
+
+def serialize_presence_identity(u: "User") -> dict:
+    """OBS-13: who the person is — the fields the Team Presence screen shows —
+    and nothing else. Security/account state (must_change_password,
+    auth_version, disabled, email verification, pending email) and the phone
+    number are not presence information and are not sent."""
+    return {"id": u.id, "username": u.username, "firstname": u.firstname, "lastname": u.lastname,
+            "role": u.role, "position": u.position, "email": u.email}
 
 # -----------------------------------------------------------------------------
 # NOTIFICATIONS (notification center — see NOTIFICATION ENGINE above for the
@@ -13316,6 +13438,21 @@ def search_general_catalog(barcode: str, user: User = Depends(get_current_user),
 # -----------------------------------------------------------------------------
 # AI
 # -----------------------------------------------------------------------------
+# Payment-method detail (X1): only the role that administers billing — the
+# Admin, the only role that may change the plan, cancel or replace the card —
+# receives it. Managers and Staff keep plan, status, dates, limits and AI usage
+# (the screens they legitimately use) and learn only whether a card is on file.
+BILLING_ADMIN_ONLY_FIELDS = ("card_last4", "card_type", "card_exp_month", "card_exp_year")
+
+def redact_billing_for_role(user: "User", summary: dict) -> dict:
+    if user.role != "admin":
+        for field in BILLING_ADMIN_ONLY_FIELDS:
+            summary[field] = None
+        summary["payment_details_visible"] = False
+    else:
+        summary["payment_details_visible"] = True
+    return summary
+
 @app.get("/subscription/usage")
 def subscription_usage(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
     # Read-only status/usage view. Deliberately NOT gated by require_subscription_access:
@@ -13383,7 +13520,7 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
         {"operation": op, "label": AI_FEATURE_LABELS.get(op, op.replace("_", " ").title()), "credits_consumed": int(credits), "calls": int(calls), "credit_cost_per_call": AI_CREDIT_WEIGHTS.get(op)}
         for op, credits, calls in feature_rows
     ]
-    return summary
+    return redact_billing_for_role(user, summary)
 
 class ChangePlanRequest(BaseModel):
     plan: str
@@ -15019,8 +15156,11 @@ def subscription_cancel(request: Request, user: User = Depends(get_current_user)
 
 @app.get("/subscription/payments")
 def subscription_payments(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
-    """Non-sensitive payment history for the authenticated user's own business
-    only — business_id is always taken from the session, never from the client."""
+    """Payment history for the authenticated user's own business only —
+    business_id is always taken from the session, never from the client. X1:
+    Admin only, like every other billing-administration surface."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only an Admin can view the business's payment history.")
     rows = (db.query(PaymentRecord)
             .filter(PaymentRecord.business_id == user.business_id, PaymentRecord.purpose != "card_verification")
             .order_by(PaymentRecord.created_at.desc()).offset(offset).limit(limit).all())
@@ -15874,9 +16014,27 @@ def scan_invoice(req: InvoiceScanRequest, user: User = Depends(require_ai_access
         raise
     return {"upload_id": upload.id, "supplier_name": data.get("supplier_name") or "", "invoice_number": data.get("invoice_number") or "", "invoice_date": data.get("invoice_date") or "", "items_count": len(data.get("items") or []), "items": data.get("items") or [], "subtotal": data.get("subtotal") or 0, "total": data.get("total") or 0, "requires_confirmation": True, "credits_consumed": credits}
 
+# X3: which retained files a signed-in user may list or download. Tenant
+# isolation (business_id) is applied first and always; within the business an
+# Admin sees every file, anyone sees files they uploaded themselves, and other
+# people's files are visible only through the existing permission that governs
+# that kind of document. Profile photos are never listed to other users (they
+# have their own endpoint).
+UPLOAD_KIND_VIEW_PERMISSION = {"invoice": "po.view", "price_list": "procurement.price_monitor"}
+
+def upload_visibility_filter(user: "User"):
+    if user.role == "admin":
+        return None
+    visible_kinds = [kind for kind, code in UPLOAD_KIND_VIEW_PERMISSION.items() if has_permission(user, code)]
+    own = StoredUpload.uploaded_by_id == user.id
+    return or_(own, StoredUpload.kind.in_(visible_kinds)) if visible_kinds else own
+
 @app.get("/uploads")
 def list_uploads(kind: Optional[str] = Query(None), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(StoredUpload).filter(StoredUpload.business_id == user.business_id)
+    visibility = upload_visibility_filter(user)
+    if visibility is not None:
+        q = q.filter(visibility)
     if kind:
         q = q.filter(StoredUpload.kind == kind.strip().lower())
     rows = q.order_by(StoredUpload.created_at.desc()).offset(offset).limit(limit).all()
@@ -15884,8 +16042,14 @@ def list_uploads(kind: Optional[str] = Query(None), limit: int = Query(50, ge=1,
 
 @app.get("/uploads/{upload_id}/download")
 def download_upload(upload_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    row = db.query(StoredUpload).filter(StoredUpload.id == upload_id, StoredUpload.business_id == user.business_id).first()
+    q = db.query(StoredUpload).filter(StoredUpload.id == upload_id, StoredUpload.business_id == user.business_id)
+    visibility = upload_visibility_filter(user)
+    if visibility is not None:
+        q = q.filter(visibility)
+    row = q.first()
     if not row:
+        # Same answer for "another business's file", "no such file" and "a
+        # file you may not see" — the id space is never an oracle.
         raise HTTPException(status_code=404, detail="Uploaded file is unavailable.")
     path = (UPLOAD_STORAGE_DIR / row.storage_key).resolve()
     if UPLOAD_STORAGE_DIR not in path.parents or not path.is_file():
@@ -15940,13 +16104,13 @@ def ai_chat(req: ChatRequest, user: User = Depends(require_ai_access), db: Sessi
 # file). MFA (TOTP) is mandatory: an account with no TOTP secret configured
 # cannot complete login at all (see platform_login()).
 #
-# The Control Panel UI is a separate static bundle under platform/ (its own
-# index.html + js/app.js - NOT frontend/js/app.js), served only from
-# PLATFORM_PANEL_PATH (an unlisted, non-guessable path, configurable via the
-# PLATFORM_PANEL_PATH env var) and never linked from the customer UI. Per the
-# spec, that path is UX obscurity only, never the security boundary - every
-# /api/platform/* endpoint independently re-verifies platform authorization
-# regardless of how the request found its way there.
+# The Control Panel UI is a separate static bundle under platform/ (NOT
+# frontend/js/app.js), served only from PLATFORM_PANEL_PATH (an unlisted path,
+# configurable via the PLATFORM_PANEL_PATH env var) and never linked from the
+# customer UI. That path is UX obscurity only, never the security boundary:
+# every /api/platform/* endpoint independently re-verifies platform
+# authorization, and (OBS-7) only the sign-in page is served without a
+# platform-owner session — the console's markup and code require one.
 # =============================================================================
 
 # --- TOTP (RFC 6238), Google-Authenticator-compatible - stdlib only, no new
@@ -16365,6 +16529,14 @@ def get_platform_owner(token: str = Depends(oauth2_scheme), db: Session = Depend
     scope=="platform_owner" - a customer access token (signed with a different
     key, and never carrying this claim) is rejected outright, regardless of
     that user's role. See the module docstring above for the full argument."""
+    return platform_owner_from_token(token, db)
+
+# OBS-7: the console's markup and code are served only with this cookie — the
+# same platform token the MFA step returns, httpOnly, SameSite=Strict, scoped
+# to the panel path and verified exactly like the bearer token above.
+PLATFORM_PANEL_COOKIE = "cauldra_platform_panel"
+
+def platform_owner_from_token(token: str, db: Session) -> "PlatformOwner":
     try:
         payload = jwt.decode(token, PLATFORM_SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
@@ -16503,7 +16675,7 @@ def platform_login(data: PlatformLoginRequest, request: Request, db: Session = D
     return {"mfa_required": True, "mfa_token": issue_platform_mfa_token(owner)}
 
 @app.post("/api/platform/auth/verify-mfa")
-def platform_verify_mfa(data: PlatformMfaVerifyRequest, request: Request, db: Session = Depends(get_db)):
+def platform_verify_mfa(data: PlatformMfaVerifyRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     client_ip = request.client.host if request and request.client else "unknown"
     check_rate_limit(db, "platform-owner-mfa-ip", client_ip)
     try:
@@ -16527,12 +16699,17 @@ def platform_verify_mfa(data: PlatformMfaVerifyRequest, request: Request, db: Se
     owner.last_login_at = datetime.utcnow()
     add_platform_audit(db, owner, "PLATFORM_LOGIN", "Signed in to the Platform Owner Control Panel.")
     db.commit()
-    return {"access_token": issue_platform_token(owner), "token_type": "bearer",
+    access_token = issue_platform_token(owner)
+    forwarded_https = request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
+    response.set_cookie(key=PLATFORM_PANEL_COOKIE, value=access_token, httponly=True,
+                        secure=IS_PRODUCTION or forwarded_https or request.url.scheme == "https",
+                        samesite="strict", path=PLATFORM_PANEL_PATH)
+    return {"access_token": access_token, "token_type": "bearer",
             "expires_in_minutes": PLATFORM_ACCESS_TOKEN_MINUTES,
             "owner": {"id": owner.id, "email": owner.email}}
 
 @app.post("/api/platform/auth/logout")
-def platform_logout(token: str = Depends(oauth2_scheme), owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+def platform_logout(response: Response, token: str = Depends(oauth2_scheme), owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
     try:
         payload = jwt.decode(token, PLATFORM_SECRET_KEY, algorithms=[ALGORITHM])
         jti = payload.get("jti")
@@ -16544,6 +16721,7 @@ def platform_logout(token: str = Depends(oauth2_scheme), owner: PlatformOwner = 
         pass
     add_platform_audit(db, owner, "PLATFORM_LOGOUT", "Signed out of the Platform Owner Control Panel.")
     db.commit()
+    response.delete_cookie(PLATFORM_PANEL_COOKIE, path=PLATFORM_PANEL_PATH)
     return {"message": "Signed out."}
 
 @app.get("/api/platform/overview")
@@ -17013,37 +17191,73 @@ def platform_infrastructure(owner: PlatformOwner = Depends(get_platform_owner), 
     invent numbers for anything this backend cannot verify itself (spec)."""
     storage_bytes = db.query(func.coalesce(func.sum(StoredUpload.size_bytes), 0)).scalar() or 0
     upload_count = db.query(func.count(StoredUpload.id)).scalar() or 0
+    # The connection detail /health/database used to publish anonymously
+    # (SEC-004) now lives here, behind the platform-owner session.
+    database_detail = {"port": engine.url.port, "database_name": engine.url.database}
+    try:
+        with engine.connect() as conn:
+            database_detail["schema"] = conn.execute(sql_text("SELECT current_schema()")).scalar()
+            database_detail["postgres_version"] = conn.execute(sql_text("SHOW server_version")).scalar()
+    except Exception as exc:
+        database_detail["error"] = _classify_database_connection_error(exc)
     return {
         "note": ("Only metrics Cauldra can reliably compute from its own database are shown here. "
                  "Railway/Supabase/provider dashboard-only metrics (compute usage, bandwidth, disk size) "
                  "are not scraped and are not shown."),
-        "database": {"backend": "postgresql", "host": engine.url.host},
+        "database": {"backend": "postgresql", "host": engine.url.host, **database_detail},
         "storage": {"total_bytes_used": int(storage_bytes), "total_files": upload_count},
         "ai_providers_configured": {"gemini": bool(gemini_client), "openai": bool(openai_client)},
     }
 
 # --- Hidden Platform Owner Control Panel UI. NOT under /frontend, /assets,
 # /css or /js, NOT linked from index.html, and served only from
-# PLATFORM_PANEL_PATH. See platform/index.html + platform/js/app.js. ---
-@app.get(PLATFORM_PANEL_PATH)
+# PLATFORM_PANEL_PATH. See platform/index.html + platform/js/login.js (public
+# sign-in) and platform/console.html + platform/js/console.js (session-gated). ---
+@app.get(PLATFORM_PANEL_PATH, include_in_schema=False)
 def serve_platform_panel_redirect():
-    # The page's relative <script src="app.js"> only resolves correctly under
+    # The page's relative <script src="login.js"> only resolves correctly under
     # a trailing-slash URL - redirect once, serve the real page from there.
     return RedirectResponse(url=PLATFORM_PANEL_PATH + "/")
 
-@app.get(PLATFORM_PANEL_PATH + "/")
-def serve_platform_panel():
-    path = PLATFORM_DIR / "index.html"
+def _platform_panel_file(relative: str, media_type: Optional[str] = None) -> FileResponse:
+    path = PLATFORM_DIR / relative
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found.")
-    return FileResponse(str(path))
+    return FileResponse(str(path), media_type=media_type, headers={"Cache-Control": "no-store"})
 
-@app.get(PLATFORM_PANEL_PATH + "/app.js")
-def serve_platform_panel_js():
-    path = PLATFORM_DIR / "js" / "app.js"
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Not found.")
-    return FileResponse(str(path), media_type="application/javascript")
+@app.get(PLATFORM_PANEL_PATH + "/", include_in_schema=False)
+def serve_platform_panel():
+    """Sign-in page only (OBS-7) — no console markup."""
+    return _platform_panel_file("index.html")
+
+@app.get(PLATFORM_PANEL_PATH + "/login.js", include_in_schema=False)
+def serve_platform_panel_login_js():
+    return _platform_panel_file("js/login.js", "application/javascript")
+
+def _require_platform_panel_session(request: Request, db: Session) -> None:
+    """The console's own markup and code reveal the whole privileged surface,
+    so they need a signed-in platform owner, not just knowledge of the path.
+    Anything else gets the same 404 as a path that does not exist."""
+    try:
+        platform_owner_from_token(request.cookies.get(PLATFORM_PANEL_COOKIE) or "", db)
+    except HTTPException:
+        raise HTTPException(status_code=404, detail="Not found.") from None
+
+@app.get(PLATFORM_PANEL_PATH + "/console.html", include_in_schema=False)
+def serve_platform_panel_console_html(request: Request, db: Session = Depends(get_db)):
+    _require_platform_panel_session(request, db)
+    return _platform_panel_file("console.html", "text/html")
+
+@app.get(PLATFORM_PANEL_PATH + "/console.js", include_in_schema=False)
+def serve_platform_panel_console_js(request: Request, db: Session = Depends(get_db)):
+    _require_platform_panel_session(request, db)
+    return _platform_panel_file("js/console.js", "application/javascript")
+
+# OBS-7: the platform-owner API is not advertised in the public OpenAPI
+# document of any environment (production already publishes none).
+for _route in app.routes:
+    if getattr(_route, "path", "").startswith("/api/platform/"):
+        _route.include_in_schema = False
 
 # -----------------------------------------------------------------------------
 # OFFLINE DEVICE AUTHORIZATION + CONFLICT-SAFE REPLAY
@@ -17082,37 +17296,18 @@ def health():
             content={"status": "degraded", "database": "unavailable", "version": app.version, "refresh_enabled": True},
         )
 
-@app.get("/health/database")
+@app.get("/health/database", include_in_schema=False)
 def health_database():
-    """Manual diagnostic view — safe to hit from a browser or Railway's logs
-    to confirm exactly which PostgreSQL database this running deployment is
-    connected to (e.g. after a deploy, or when investigating "why does this
-    look like the wrong environment"). Complements the lightweight /health
-    above (which stays a fast, minimal check for load balancers/uptime
-    monitors) rather than replacing it.
-
-    Every value here comes from SQLAlchemy's already-parsed engine.url
-    (host/port/database name) or a live read-only query (schema, server
-    version) — never the raw DATABASE_URL string, and never a username or
-    password. A Supabase hostname naturally contains the project reference
-    (e.g. db.<ref>.supabase.co) — that's expected and not a secret on its
-    own; nothing else about the connection is ever included."""
-    url = engine.url
+    """Public liveness of the database connection only. SEC-004: the host,
+    port, database name, schema and server version are no longer published to
+    unauthenticated callers; the Platform Owner console's Infrastructure view
+    (authenticated, MFA) carries them for operators."""
     try:
-        with engine.connect() as conn:
-            version = conn.execute(sql_text("SHOW server_version")).scalar()
-            schema = conn.execute(sql_text("SELECT current_schema()")).scalar()
-        return {
-            "status": "ok", "database": "postgresql", "connected": True,
-            "host": url.host, "port": url.port, "database_name": url.database,
-            "schema": schema, "postgres_version": version,
-        }
+        _ping_database()
+        return {"status": "ok", "connected": True}
     except Exception as exc:
         print(f"[health/database] database check failed: {_classify_database_connection_error(exc)}")
-        return JSONResponse(
-            status_code=503,
-            content={"status": "degraded", "database": "postgresql", "connected": False},
-        )
+        return JSONResponse(status_code=503, content={"status": "degraded", "connected": False})
 
 SENTRY_FRONTEND_DSN = os.getenv("SENTRY_FRONTEND_DSN", "").strip()
 

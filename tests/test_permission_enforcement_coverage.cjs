@@ -18,11 +18,10 @@
 // exactly the code PERM-001 had to fix.
 //
 // Honest limitation: this proves a code is CHECKED SOMEWHERE, not that every
-// route which exposes that data is gated (see finding X2 — `inventory.view`
-// is referenced by GET /warehouses/operational, yet the product/inventory
-// listings still do not check it; that remains a separate, tracked finding).
-// The behavioural matrix in tests/test_perm001_staff_enforcement.py is what
-// proves per-endpoint enforcement.
+// route which exposes that data is gated (finding X2 was exactly that gap for
+// `inventory.view`; Batch B closed it on the product/inventory reads). The
+// behavioural matrices in tests/test_perm001_staff_enforcement.py and
+// tests/test_batch_b_security.py are what prove per-endpoint enforcement.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

@@ -163,9 +163,13 @@ def install(g):
         count = db.query(g["Product"]).filter_by(business_id=user.business_id).count()
         if count > 20000:
             failure("CATALOG_TOO_LARGE", "This catalog exceeds this device snapshot limit.", 413)
+        # X2 — same rule as GET /products/ (inventory.view OR sales.create);
+        # without either, the catalog and its stock are simply not provisioned.
+        catalog_permitted = g["can_read_product_catalog"](user)
         products = []
-        for offset in range(0, count, 500):
-            products.extend(g["list_products"](500, offset, None, None, user, db))
+        if catalog_permitted:
+            for offset in range(0, count, 500):
+                products.extend(g["list_products"](500, offset, None, None, user, db))
         # PERM-001 O1 — the snapshot is a SECOND read path to the same data as
         # GET /suppliers/, so it enforces the same permission. It must not
         # simply call through and let the 403 escape: these calls are outside
@@ -186,13 +190,15 @@ def install(g):
                 if offset >= 20000:
                     failure("CATALOG_TOO_LARGE", "Supplier snapshot limit exceeded.", 413)
         stocks = [{"product_id": r.product_id, "warehouse_id": r.warehouse_id,
-                   "quantity": r.quantity} for r in db.query(g["WarehouseStock"]).filter_by(business_id=user.business_id).all()]
+                   "quantity": r.quantity} for r in db.query(g["WarehouseStock"]).filter_by(business_id=user.business_id).all()] if catalog_permitted else []
         locations = [g["serialize_location"](r, db) for r in db.query(g["Location"]).filter_by(business_id=user.business_id, is_active=True).all()]
         days = [{"id": d.id, "location_id": d.location_id, "is_open": d.is_open}
                 for d in db.query(g["BusinessDay"]).filter_by(business_id=user.business_id, is_open=True).all()]
         cache, freshness = {}, {}
         if not suppliers_permitted:
             freshness["/suppliers/"] = "permission unavailable"
+        if not catalog_permitted:
+            freshness["/products/"] = "permission unavailable"
         # PERM-001 O2 — warehouses follow the same rule as their endpoints:
         # the full management listing only with warehouse.view, otherwise the
         # minimal operational projection (id/name/location_id) that offline

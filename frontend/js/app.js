@@ -20304,12 +20304,14 @@
             try {
                 const [usageRes, paymentsRes] = await Promise.all([
                     fetch(`${API_URL}/subscription/usage`, { headers: { "Authorization": `Bearer ${authToken}` } }),
-                    fetch(`${API_URL}/subscription/payments`, { headers: { "Authorization": `Bearer ${authToken}` } })
+                    getCurrentRole() === 'admin'
+                        ? fetch(`${API_URL}/subscription/payments`, { headers: { "Authorization": `Bearer ${authToken}` } })
+                        : Promise.resolve(null)
                 ]);
                 if (!usageRes.ok) throw new Error('usage_failed');
                 billingUsageCache = await usageRes.json();
                 billingIntervalChoice = billingUsageCache.billing_interval === 'annual' ? 'annual' : 'monthly';
-                const payments = paymentsRes.ok ? await paymentsRes.json() : [];
+                const payments = paymentsRes?.ok ? await paymentsRes.json() : [];
                 document.getElementById("billing-panel-loading")?.classList.add("hidden");
                 document.getElementById("billing-panel-content")?.classList.remove("hidden");
                 renderBillingStatus(billingUsageCache);
@@ -20353,8 +20355,14 @@
                 nextBillingBox.classList.add("hidden");
             }
 
+            // X1: payment-method detail and payment history are sent to the
+            // Admin only (the server redacts them for everyone else), so the
+            // card box and history are shown only when the server says so —
+            // never a misleading "No saved payment method" for a Manager.
+            const paymentDetailsVisible = usage.payment_details_visible !== false;
+            document.getElementById('billing-payment-history-section')?.classList.toggle('hidden', !paymentDetailsVisible);
             const cardBox = document.getElementById('billing-card-box');
-            cardBox.classList.remove('hidden');
+            cardBox.classList.toggle('hidden', !paymentDetailsVisible);
             const value = document.getElementById('billing-card-value');
             value.textContent = usage.card_verified && usage.card_last4
                 ? `${usage.card_type || 'Card'} •••• ${usage.card_last4}` : 'No saved payment method';
