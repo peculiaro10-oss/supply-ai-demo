@@ -31,9 +31,18 @@ async function main() {
     }
     assert(recovery.includes('Email verification return:'), 'recognized return error must be contextual');
 
+    // Batch A: the packaged Android app has no @capacitor/core bundle, so its
+    // bridge offers Capacitor.Plugins.App (addListener returns a plain handle)
+    // and no registerPlugin. Both shapes must wire the same listeners.
+    const pluginHelper = app.match(/function nativeAppPlugin\(\) \{[\s\S]+?\n        \}/)?.[0] || '';
+    assert(pluginHelper.includes('capacitor.Plugins?.App'), 'native App plugin must fall back to the bridge plugin');
     const viewports = [[375, 812], [768, 1024], [1024, 768], [1366, 768]];
+    for (const bridge of ['registerPlugin', 'nativeBridge'])
     for (const [width, height] of viewports) {
         const listeners = {}, resumeCalls = [], verificationChecks = [], recoveryCalls = [];
+        const appPlugin = bridge === 'registerPlugin'
+            ? {addListener: async (name, handler) => { listeners[name] = handler; }, getLaunchUrl: async () => null}
+            : {addListener: (name, handler) => { listeners[name] = handler; return {remove: async () => {}}; }, getLaunchUrl: async () => null};
         const context = {
             URL,
             evChallengeId: null,
@@ -46,13 +55,10 @@ async function main() {
             window: {innerWidth: width, innerHeight: height, Capacitor: {
                 isNativePlatform: () => true,
                 isPluginAvailable: name => name === 'App',
-                registerPlugin: () => ({
-                    addListener: async (name, handler) => { listeners[name] = handler; },
-                    getLaunchUrl: async () => null,
-                }),
+                ...(bridge === 'registerPlugin' ? {registerPlugin: () => appPlugin} : {Plugins: {App: appPlugin}}),
             }},
         };
-        vm.runInNewContext(`${nativeInitializer}; ${recovery}; this.initialize = evInitializeNativeReturn; this.recover = evShowReturnRecovery;`, context);
+        vm.runInNewContext(`${pluginHelper}; ${nativeInitializer}; ${recovery}; this.initialize = evInitializeNativeReturn; this.recover = evShowReturnRecovery;`, context);
         await context.initialize();
         await listeners.appStateChange({isActive: true});
         assert.equal(verificationChecks.length, 0, `${width}x${height}: ordinary resume must remain silent`);
@@ -69,7 +75,7 @@ async function main() {
         assert.equal(recoveryCalls[3], 'state:4');
     }
 
-    console.log('PASS: ordinary startup is silent and callback/recovery paths execute at 375x812, 768x1024, 1024x768, and 1366x768.');
+    console.log('PASS: ordinary startup is silent and callback/recovery paths execute (registerPlugin and native-bridge plugin shapes) at 375x812, 768x1024, 1024x768, and 1366x768.');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

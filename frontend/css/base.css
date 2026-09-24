@@ -1,3 +1,9 @@
+        /* NAT-001: some Android WebViews map the monospace stack to a font whose
+           Naira sign (U+20A6) draws as an empty box. This face lends only that one
+           character from the device's own sans font; nothing is downloaded. It
+           sits after the desktop monospace fonts in every mono stack, so Web keeps
+           its current glyph. */
+        @font-face { font-family: "Cauldra Currency"; src: local("Roboto"), local("Roboto-Regular"), local("Roboto Regular"), local("Noto Sans"), local("NotoSans-Regular"); unicode-range: U+20A6; }
         ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-track { background: #070B14; }
         ::-webkit-scrollbar-thumb { background: #172033; border-radius: 4px; }
@@ -97,7 +103,7 @@
         .business-brief-header-actions{display:flex;align-items:center;justify-content:flex-end;gap:.5rem;flex-wrap:wrap;}
         .business-brief-context-chip,.business-brief-open-btn{min-height:44px;border-radius:.7rem;border:1px solid #172033;padding:.45rem .7rem;font-size:11px;cursor:pointer;transition:border-color .15s ease,background-color .15s ease;}
         .business-brief-context-chip{display:inline-flex;align-items:center;gap:.45rem;background:#070B14;color:#7C8BA1;}
-        .business-brief-context-chip strong{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#E2E8F0;}
+        .business-brief-context-chip strong{font-family:ui-monospace,SFMono-Regular,Menlo,"Cauldra Currency",monospace;color:#E2E8F0;}
         .business-brief-context-chip.hidden{display:none!important;}
         .business-brief-context-chip:hover,.business-brief-open-btn:hover{border-color:rgba(67,107,238,.55);}
         .business-brief-open-btn{background:rgba(67,107,238,.12);border-color:rgba(67,107,238,.28);color:#436BEE;font-weight:700;white-space:nowrap;}

@@ -216,17 +216,22 @@
         // navigator.onLine only reflects whether the OS thinks a network
         // interface is up — it is NOT proof the backend is reachable. Every
         // sync attempt confirms with an actual short-timeout request first.
-        async function isBackendReachable() {
-            if (!navigator.onLine) return false;
+        async function probeBackend(timeoutMs = 6000) {
+            if (!navigator.onLine) return { ok: false, reason: "offline" };
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
             try {
-                const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 6000);
                 const res = await fetch(`${API_URL}/health`, { cache: "no-store", signal: controller.signal });
-                clearTimeout(timer);
-                return res.ok;
+                return { ok: res.ok, reason: res.ok ? "ok" : "http" };
             } catch (_) {
-                return false;
+                return { ok: false, reason: controller.signal.aborted ? "timeout" : "network" };
+            } finally {
+                clearTimeout(timer);
             }
+        }
+
+        async function isBackendReachable(timeoutMs = 6000) {
+            return (await probeBackend(timeoutMs)).ok;
         }
 
         // A genuine network failure (server unreachable) throws a TypeError
@@ -19374,9 +19379,78 @@
             }
             if (purpose === 'onboarding') await evResumeChallenge(challenge);
         }
+        // AND-003: Android Back closes the topmost ordinary popup through that
+        // popup's own close/cancel control, so its normal clean-up runs. It
+        // never dismisses a mandatory gate (the offline cold-start/unlock
+        // gate, a forced password change, a one-time credential or Business
+        // ID display, a payment in progress): those only close through their
+        // own buttons. With no popup open, Back keeps its previous behaviour
+        // (WebView history back when there is history, otherwise nothing).
+        const BACK_PROTECTED_MODALS = new Set(["password-change-modal", "temporary-credential-modal", "business-id-success-modal"]);
+
+        function isShown(element) {
+            if (!element || element.classList.contains("hidden") || element.hidden) return false;
+            const style = getComputedStyle(element);
+            return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+        }
+
+        function topmostOpenModal() {
+            const open = [...document.querySelectorAll('.fixed[id$="-modal"]')].filter(isShown);
+            if (!open.length) return null;
+            const layer = (element) => Number.parseInt(getComputedStyle(element).zIndex, 10) || 0;
+            // Highest z-index wins; on a tie the later element paints on top.
+            return open.reduce((top, element) => (layer(element) >= layer(top) ? element : top));
+        }
+
+        function modalCloseControl(modal) {
+            const candidates = modal.querySelectorAll('button[aria-label="Close"], button[id$="-close"], button[id$="-cancel"], button[onclick^="close"]');
+            return [...candidates].find((button) => !button.disabled && isShown(button) && button.closest('.fixed[id$="-modal"]') === modal) || null;
+        }
+
+        function handleNativeBack(canGoBack) {
+            const payment = document.getElementById("payment-overlay");
+            if (payment && !payment.hidden) return "blocked";
+            const dialogs = [...document.querySelectorAll("dialog[open]")];
+            if (dialogs.length) {
+                const dialog = dialogs[dialogs.length - 1];
+                if (dialog.dataset.mandatory === "true") return "blocked";
+                const cancel = new Event("cancel", { cancelable: true });
+                if (dialog.dispatchEvent(cancel)) dialog.close();
+                return "dialog";
+            }
+            const modal = topmostOpenModal();
+            if (modal) {
+                if (BACK_PROTECTED_MODALS.has(modal.id)) return "blocked";
+                const control = modalCloseControl(modal);
+                if (!control) return "blocked";
+                control.click();
+                return "modal";
+            }
+            if (canGoBack) { window.history.back(); return "history"; }
+            return "none";
+        }
+        window.cauldraHandleNativeBack = handleNativeBack;
+
+        // The packaged app loads no @capacitor/core bundle, so the native
+        // bridge offers plugins only as Capacitor.Plugins.<Name> and
+        // Capacitor.registerPlugin is undefined there. Prefer registerPlugin
+        // when a bundle provides it; otherwise use the bridge's own plugin.
+        function nativeAppPlugin() {
+            const capacitor = window.Capacitor;
+            if (!capacitor?.isNativePlatform?.() || !capacitor.isPluginAvailable?.('App')) return null;
+            if (typeof capacitor.registerPlugin === 'function') return capacitor.registerPlugin('App');
+            return capacitor.Plugins?.App || null;
+        }
+
+        async function initializeNativeBackButton() {
+            const app = nativeAppPlugin();
+            if (!app) return;
+            await app.addListener('backButton', ({ canGoBack }) => { handleNativeBack(!!canGoBack); });
+        }
+
         async function evInitializeNativeReturn() {
-            if (!window.Capacitor?.isNativePlatform?.() || !window.Capacitor.isPluginAvailable('App')) return;
-            const app = window.Capacitor.registerPlugin('App');
+            const app = nativeAppPlugin();
+            if (!app) return;
             const receive = async ({url}) => {
                 try {
                     const link = new URL(url);
@@ -25758,7 +25832,40 @@
             offlineWorkspaceUnlocked = false;
             document.body.classList.remove("offline-mode");
         });
-        window.addEventListener("cauldra-retry-online", () => loadData({ forceShowLoadingBanner: true }));
+        // NAT-002: "Try again" on the cold-start gate re-checks the server
+        // itself. When it answers, the gate is dismissed and the normal
+        // online flow runs -- sign-in for a guest, the refresh-cookie session
+        // for a returning user -- without needing a profile, business, offline
+        // identity or session first. When it does not, the gate stays up and
+        // can be retried again.
+        let retryOnlineInFlight = false;
+        window.addEventListener("cauldra-retry-online", async () => {
+            if (retryOnlineInFlight || !window.CauldraOffline) return;
+            retryOnlineInFlight = true;
+            const offline = window.CauldraOffline;
+            offline.setRetryStatus("Checking the connection\u2026", true);
+            try {
+                const probe = await probeBackend(RETRY_REACHABILITY_TIMEOUT_MS);
+                if (!probe.ok) {
+                    offline.setRetryStatus(probe.reason === "http"
+                        ? "Cauldra\u2019s server isn\u2019t responding properly right now. Please try again shortly."
+                        : "Still can\u2019t reach Cauldra. Check your internet connection and try again.", false);
+                    return;
+                }
+                if (!offline.recoverOnline()) {
+                    offline.setRetryStatus("", false);
+                    await loadData({ forceShowLoadingBanner: true });
+                    return;
+                }
+                setSyncStatus("idle");
+                if (!onlineBootCompleted) await completeOnlineBoot();
+                else await loadData({ forceShowLoadingBanner: true });
+            } catch (_) {
+                offline.setRetryStatus("Something went wrong. Please try again.", false);
+            } finally {
+                retryOnlineInFlight = false;
+            }
+        });
 
         async function refreshAccessTokenAtStartup() {
             const RETRY_DELAYS_MS = [500, 1500]; // up to 3 total attempts
@@ -29780,8 +29887,20 @@
         // Initial Data Fetch on Page Load. Authentication restoration must
         // finish before deciding whether a direct Hub/onboarding URL may open.
         evInitializeNativeReturn().catch((error) => console.warn('[Cauldra email return] Native listener initialization unavailable.', error));
+        initializeNativeBackButton().catch((error) => console.warn('[Cauldra] Native Back handling unavailable.', error));
+        // A cold first connection (TLS set-up on a slow mobile network) can
+        // outlast the 6 s check even though the server is reachable. A check
+        // that timed out gets one longer second chance before the gate is
+        // shown; a check that failed outright (no network) does not, so a
+        // truly offline device still reaches its offline unlock promptly.
+        const BOOT_SLOW_RETRY_TIMEOUT_MS = 8000;
+        const RETRY_REACHABILITY_TIMEOUT_MS = 10000;
+        let onlineBootCompleted = false;
+
         async function bootstrapApplication() {
-            const reachable = await isBackendReachable();
+            let probe = await probeBackend();
+            if (!probe.ok && probe.reason === "timeout") probe = await probeBackend(BOOT_SLOW_RETRY_TIMEOUT_MS);
+            const reachable = probe.ok;
             if (!reachable) {
                 document.documentElement.classList.remove("cauldra-auth-booting");
                 document.getElementById("cauldra-auth-boot-screen")?.setAttribute("aria-hidden", "true");
@@ -29793,8 +29912,14 @@
             return "online";
         }
 
-        bootstrapApplication().catch(() => "server_unavailable").then(async (bootOutcome) => {
-            if (bootOutcome !== "online") return;
+        // The post-boot routing (email-verification return, Paystack return,
+        // saved onboarding challenge, Hub route) runs once, on whichever path
+        // first reaches the server: the boot itself, or "Try again" on the
+        // cold-start gate.
+        async function completeOnlineBoot(alreadyLoaded = false) {
+            if (onlineBootCompleted) return;
+            onlineBootCompleted = true;
+            if (!alreadyLoaded) await loadData();
             const params = new URLSearchParams(window.location.search);
             if (params.get('cauldra_email_verify') === '1') {
                 await handleEmailVerifyReturn();
@@ -29808,4 +29933,9 @@
             const savedChallenge = evReadRemembered();
             if (savedChallenge && !authToken) await evResumeChallenge(savedChallenge);
             else handleHubOnboardingRoute();
+        }
+
+        bootstrapApplication().catch(() => "server_unavailable").then(async (bootOutcome) => {
+            if (bootOutcome !== "online") return;
+            await completeOnlineBoot(true);
         });

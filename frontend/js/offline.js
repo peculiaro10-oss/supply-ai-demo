@@ -195,16 +195,25 @@
 
     function optInKey(scope) { return `offline_opt_in:${scope}`; }
 
+    // "Not Now" snoozes the offer on this device for about a day; it is a
+    // local preference only and never reaches the backend. A decline stored
+    // before the snooze existed carries no snooze_until and counts as expired.
+    const OPT_IN_SNOOZE_MS = 24 * 60 * 60 * 1000;
+
     async function getOptInState(scope) {
         if (!scope) return "never_prompted";
         const row = await transaction("meta", "readonly", ({ meta }) => requestToPromise(meta.get(optInKey(scope))));
-        if (row?.value === "declined" || row?.value === "enabled") return row.value;
+        if (row?.value === "enabled") return "enabled";
+        if (row?.value === "declined" && Number(row.snooze_until || 0) > Date.now()) return "declined";
         return "never_prompted";
     }
 
     async function setOptInState(scope, value) {
         if (!scope || !["declined", "enabled"].includes(value)) return;
-        await transaction("meta", "readwrite", ({ meta }) => requestToPromise(meta.put({ key: optInKey(scope), value, updated_at: Date.now() })));
+        const now = Date.now();
+        const row = { key: optInKey(scope), value, updated_at: now };
+        if (value === "declined") row.snooze_until = now + OPT_IN_SNOOZE_MS;
+        await transaction("meta", "readwrite", ({ meta }) => requestToPromise(meta.put(row)));
     }
 
     async function sessionStatus(user, business) {
@@ -798,11 +807,25 @@
     }
 
     let optInContext = null;
+    // At most one offer per workspace per page session, whatever the stored
+    // preference says, so a failed preference write can never cause a loop.
+    const optInOfferedThisSession = new Set();
+
+    function anotherOverlayOpen() {
+        return !!document.querySelector('.fixed[id$="-modal"]:not(.hidden), dialog[open], #payment-overlay:not([hidden])');
+    }
+
+    async function declineOptIn() {
+        const context = optInContext; optInContext = null;
+        if (context?.scope) await setOptInState(context.scope, "declined").catch(() => {});
+    }
 
     async function offerOptIn(context) {
         if (!context?.token || !navigator.onLine) return false;
         const state = await sessionStatus(context.user, context.business);
         if (!state.scope || state.identity || state.opt_in_state !== "never_prompted") return false;
+        if (optInOfferedThisSession.has(state.scope) || anotherOverlayOpen()) return false;
+        optInOfferedThisSession.add(state.scope);
         optInContext = { ...context, scope: state.scope };
         const dialog = document.getElementById("offline-opt-in-dialog");
         if (!dialog.open) dialog.showModal();
@@ -828,7 +851,7 @@
                     <div id="offline-workspace-fields"><label for="offline-identity">Workspace</label><select id="offline-identity"></select>
                     <label for="offline-pin">Offline PIN</label><input id="offline-pin" type="password" inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12" autocomplete="off" required></div>
                     <p id="offline-unlock-status" role="status"></p>
-                    <div class="offline-dialog-actions"><button type="button" id="offline-biometric-unlock" hidden>Use fingerprint or face</button><button type="submit" id="offline-pin-unlock" class="offline-primary">Unlock with PIN</button><button type="button" id="offline-retry-online">Retry internet</button></div>
+                    <div class="offline-dialog-actions"><button type="button" id="offline-biometric-unlock" hidden>Use fingerprint or face</button><button type="submit" id="offline-pin-unlock" class="offline-primary">Unlock with PIN</button><button type="button" id="offline-retry-online">Try again</button></div>
                 </form>
             </dialog>
             <dialog id="offline-setup-dialog" class="offline-dialog" aria-labelledby="offline-setup-title">
@@ -872,8 +895,7 @@
                 <div class="offline-dialog-actions"><button type="button" id="offline-remove-cancel">Cancel</button><button type="button" id="offline-remove-confirm" class="offline-danger">Remove Offline Data</button></div>
             </dialog>`);
         document.getElementById("offline-opt-in-not-now").addEventListener("click", async () => {
-            if (optInContext?.scope) await setOptInState(optInContext.scope, "declined");
-            optInContext = null; document.getElementById("offline-opt-in-dialog").close();
+            await declineOptIn(); document.getElementById("offline-opt-in-dialog").close();
         });
         document.getElementById("offline-opt-in-enable").addEventListener("click", () => {
             const context = optInContext; optInContext = null;
@@ -882,9 +904,12 @@
         });
         document.getElementById("offline-opt-in-dialog").addEventListener("cancel", async (event) => {
             event.preventDefault();
-            if (optInContext?.scope) await setOptInState(optInContext.scope, "declined");
-            optInContext = null; event.currentTarget.close();
+            const dialog = event.currentTarget;
+            await declineOptIn(); dialog.close();
         });
+        // Closed any other way without a choice: treat it as "Not Now" so the
+        // offer snoozes instead of coming straight back.
+        document.getElementById("offline-opt-in-dialog").addEventListener("close", () => { if (optInContext) declineOptIn(); });
         document.getElementById("offline-remove-cancel").addEventListener("click", () => document.getElementById("offline-remove-dialog").close());
         document.getElementById("offline-remove-dialog").addEventListener("cancel", (event) => { if (!removeInFlight) event.currentTarget.close(); else event.preventDefault(); });
         document.getElementById("offline-remove-confirm").addEventListener("click", async () => {
@@ -951,6 +976,29 @@
         if (dialog?.open) dialog.close();
         const pin = document.getElementById("offline-pin");
         if (pin) pin.value = "";
+        const status = document.getElementById("offline-unlock-status");
+        if (status) status.textContent = "";
+    }
+
+    function setRetryStatus(message, busy) {
+        const status = document.getElementById("offline-unlock-status");
+        const button = document.getElementById("offline-retry-online");
+        if (status) status.textContent = message || "";
+        if (button) { button.disabled = !!busy; button.setAttribute("aria-busy", busy ? "true" : "false"); }
+    }
+
+    // Called by the app only after a fresh, successful backend reachability
+    // check. It dismisses the cold-start gate so the normal online flow
+    // (sign-in, or the refresh-cookie session) takes over, exactly as if the
+    // boot check had succeeded. It decrypts nothing and loads no cached data:
+    // a locked vault stays locked, and an unlocked offline workspace is left
+    // to resume through resumeOnline() once the online session is validated.
+    function recoverOnline() {
+        if (active?.offline) return false;
+        closeUnlockUi();
+        setRetryStatus("", false);
+        setAccessState(ACCESS_STATES.ONLINE);
+        return true;
     }
 
     async function configureBiometricButton() {
@@ -992,12 +1040,18 @@
         const dialog = document.getElementById("offline-unlock-dialog");
         const select = document.getElementById("offline-identity");
         const copy = document.getElementById("offline-unlock-copy");
+        const title = document.getElementById("offline-unlock-title");
+        setRetryStatus("", false);
         const workspaceFields = document.getElementById("offline-workspace-fields");
         const pinButton = document.getElementById("offline-pin-unlock");
         const biometricButton = document.getElementById("offline-biometric-unlock");
         select.innerHTML = "";
         if (!identities.length) {
-            copy.textContent = "Internet connection is required for first sign-in on this device.";
+            // No offline workspace exists here, so the only way in is online.
+            // The trigger was a failed or slow server check, not proof that
+            // the device has no internet, so say exactly that.
+            title.textContent = "Can’t reach Cauldra right now";
+            copy.textContent = "Cauldra couldn’t connect to its server. Check your internet connection, then tap Try again. The first sign-in on this device needs a connection.";
             workspaceFields.hidden = true; pinButton.hidden = true; biometricButton.hidden = true;
             document.getElementById("offline-pin").disabled = true;
             setAccessState(ACCESS_STATES.OFFLINE_ACCESS_NOT_PROVISIONED);
@@ -1007,6 +1061,7 @@
         const valid = identities.filter((identity) => !identity.revoked_locally_at && Number(identity.expires_at || 0) > Date.now());
         if (!valid.length) {
             const revoked = identities.some((identity) => identity.revoked_locally_at);
+            title.textContent = "Offline Access unavailable";
             copy.textContent = revoked
                 ? "Offline Access was disabled on this device. Connect to the internet to enable it again."
                 : "Offline Access has expired. Connect to the internet to refresh it.";
@@ -1016,6 +1071,7 @@
             if (!dialog.open) dialog.showModal();
             return false;
         }
+        title.textContent = "Open your offline workspace";
         copy.textContent = "Choose a previously verified workspace and enter its offline PIN.";
         workspaceFields.hidden = false; pinButton.hidden = false;
         document.getElementById("offline-pin").disabled = false;
@@ -1120,10 +1176,17 @@
 
     function installLifecycle() {
         document.addEventListener("visibilitychange", () => handleAppActivity(!document.hidden));
-        const appPlugin = window.Capacitor?.Plugins?.App;
-        if (appPlugin && typeof appPlugin.addListener === "function") {
-            appPlugin.addListener("appStateChange", ({ isActive }) => handleAppActivity(!!isActive)).catch(() => {});
-        }
+        // addListener returns a Promise from registerPlugin() but a plain
+        // handle from the legacy Capacitor.Plugins proxy; calling .catch on
+        // that handle threw on every Android launch (AND-001).
+        const capacitor = window.Capacitor;
+        if (!capacitor?.isNativePlatform?.()) return;
+        try {
+            const appPlugin = typeof capacitor.registerPlugin === "function" ? capacitor.registerPlugin("App") : capacitor.Plugins?.App;
+            if (appPlugin && typeof appPlugin.addListener === "function") {
+                Promise.resolve(appPlugin.addListener("appStateChange", ({ isActive }) => handleAppActivity(!!isActive))).catch(() => {});
+            }
+        } catch (_) { /* relock still runs through visibilitychange */ }
     }
 
     document.addEventListener("DOMContentLoaded", () => { installUi(); installLifecycle(); });
@@ -1132,7 +1195,7 @@
         DB_VERSION, CLIENT_SCHEMA_VERSION, ACCESS_STATES, openDb, listIdentities, requestColdStart, unlock, unlockWithBiometric,
         resumeOnline, provision, refreshAccess, refreshSnapshot, cacheWrite, cacheRead, enqueue, listOutbox, updateOutbox, removeOutbox,
         openSetup, openChangePin, openBiometricSetup, openSyncDetails, biometricStatus, enableBiometrics, disableBiometrics,
-        removeCurrentData, changePin, disable, storageStatus, quarantineActive, closeUnlockUi, offerOptIn, sessionStatus, lock: lockWorkspace,
+        removeCurrentData, changePin, disable, storageStatus, quarantineActive, closeUnlockUi, recoverOnline, setRetryStatus, offerOptIn, sessionStatus, lock: lockWorkspace,
         setState(state) { if (Object.values(ACCESS_STATES).includes(state)) setAccessState(state); }, currentState() { return accessState; },
         isUnlocked() { return !!active; }, isOffline() { return !!(active && active.offline); },
         currentScope() { return active && active.scope; }, currentDeviceId() { return active && active.record.device_id; },

@@ -21,7 +21,8 @@ try{
  if(document.readyState==='loading')await new Promise(resolve=>addEventListener('DOMContentLoaded',resolve,{once:true}));
  const mock=window.__cauldraBiometricMock;
  await CauldraOffline.requestColdStart();const preflightDialog=document.getElementById('offline-unlock-dialog');
- report('first-time offline device exposes no workspace',preflightDialog.open&&/internet connection.*required/i.test(preflightDialog.textContent)&&document.getElementById('offline-workspace-fields').hidden);
+ report('first-time offline device exposes no workspace',preflightDialog.open&&/couldn’t connect to its server/i.test(preflightDialog.textContent)&&!/internet connection.*required/i.test(preflightDialog.textContent)&&document.getElementById('offline-workspace-fields').hidden);
+ CauldraOffline.closeUnlockUi(); // Batch A: the opt-in is never stacked over another open dialog.
  report('biometrics are not invoked without prior opt-in',mock.unlockCalls===0);
  const user={id:10,business_id:1,username:'admin',firstname:'Ada',lastname:'Okafor',role:'admin',auth_version:1};
  const business={id:1,business_id:1,company_name:'Cauldra Test Shop',currency:'NGN',timezone:'Africa/Lagos'};
