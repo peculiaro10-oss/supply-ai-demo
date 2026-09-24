@@ -448,6 +448,17 @@ class InventoryViewPermissionTests(BatchBBase):
         self.assertEqual(self.status(self.manager, '/products/'), 403)
         self.assertEqual(self.client.get('/products/').status_code, 401)
 
+    def test_offline_snapshot_follows_the_same_rule(self):
+        r = self.client.get('/offline/snapshot', headers=self.auth(self.staff))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual([p['name'] for p in r.json()['products']], ['A rice'])
+        self.deny(self.staff, 'inventory.view', 'sales.create')
+        r = self.client.get('/offline/snapshot', headers=self.auth(self.staff))
+        self.assertEqual(r.status_code, 200, r.text)
+        snap = r.json()
+        self.assertEqual((snap['products'], snap['stocks']), ([], []))
+        self.assertEqual(snap['freshness'].get('/products/'), 'permission unavailable')
+
     def test_other_tenant_product_is_unavailable(self):
         b_product = self.db.query(main.Product).filter_by(name='B rice').one()
         self.assertEqual(self.status(self.admin, f'/products/{b_product.id}/warehouse-stocks'), 404)
