@@ -20,6 +20,8 @@ const recover = offline.match(/function recoverOnline\(\) \{[\s\S]+?\n    \}/)?.
 assert(recover.includes('if (active?.offline) return false;'), 'recovery must never touch an unlocked offline workspace');
 assert(!/unlock\(|rawDataKey|applyOfflineSnapshot|cacheRead/.test(recover), 'recovery must not decrypt or load cached data');
 assert(/probe\.reason === "timeout"\) probe = await probeBackend\(BOOT_SLOW_RETRY_TIMEOUT_MS\)/.test(app), 'only a timed-out boot check gets the slower second chance');
+assert(/if \(probe\.reason === "timeout"\) scheduleSlowStartAutoRetry\(\);/.test(app), 'a slow start (timeout only) retries automatically');
+assert(/offline\.currentState\(\) !== offline\.ACCESS_STATES\.OFFLINE_ACCESS_NOT_PROVISIONED\) return;/.test(app), 'automatic retries never disturb a device that has an offline workspace');
 assert(!offline.includes('Internet connection is required for first sign-in on this device.'), 'the gate must not claim there is definitely no internet');
 assert(offline.includes('data-mandatory="true"') && offline.includes('if (event.currentTarget.dataset.mandatory === "true") event.preventDefault();'), 'the gate itself stays mandatory');
 

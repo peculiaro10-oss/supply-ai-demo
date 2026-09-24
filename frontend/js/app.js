@@ -29897,6 +29897,23 @@
         const RETRY_REACHABILITY_TIMEOUT_MS = 10000;
         let onlineBootCompleted = false;
 
+        // When the gate appeared only because the server was slow to answer
+        // (not because the device is offline) and there is no offline
+        // workspace to unlock, keep checking in the background for a short
+        // while and recover on its own -- the same path as "Try again". A
+        // device with a workspace keeps its PIN screen undisturbed.
+        const SLOW_START_AUTO_RETRY_DELAYS_MS = [3000, 10000, 20000];
+        function scheduleSlowStartAutoRetry(attempt = 0) {
+            if (attempt >= SLOW_START_AUTO_RETRY_DELAYS_MS.length) return;
+            setTimeout(() => {
+                const offline = window.CauldraOffline;
+                const gate = document.getElementById("offline-unlock-dialog");
+                if (!offline || !gate?.open || offline.currentState() !== offline.ACCESS_STATES.OFFLINE_ACCESS_NOT_PROVISIONED) return;
+                if (!retryOnlineInFlight) window.dispatchEvent(new Event("cauldra-retry-online"));
+                scheduleSlowStartAutoRetry(attempt + 1);
+            }, SLOW_START_AUTO_RETRY_DELAYS_MS[attempt]);
+        }
+
         async function bootstrapApplication() {
             let probe = await probeBackend();
             if (!probe.ok && probe.reason === "timeout") probe = await probeBackend(BOOT_SLOW_RETRY_TIMEOUT_MS);
@@ -29906,6 +29923,7 @@
                 document.getElementById("cauldra-auth-boot-screen")?.setAttribute("aria-hidden", "true");
                 setSyncStatus("offline");
                 await window.CauldraOffline?.requestColdStart();
+                if (probe.reason === "timeout") scheduleSlowStartAutoRetry();
                 return "offline_unlock";
             }
             await loadData();
