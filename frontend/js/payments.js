@@ -18,6 +18,29 @@ window.CauldraPayments = (() => {
     let savedOverflow = '', refreshTimer = null, checking = null;
     const el = id => document.getElementById(id);
     const native = () => !!window.Capacitor?.isNativePlatform?.();
+    // NATIVE-PAY-001: the packaged app loads no @capacitor/core bundle, so the
+    // native bridge exposes plugins only as Capacitor.Plugins.<Name> and
+    // Capacitor.registerPlugin is undefined. Calling registerPlugin threw, and
+    // the Android checkout could never open. Same rule as nativeAppPlugin() in
+    // app.js: prefer registerPlugin when a bundle provides it, otherwise use
+    // the bridge's own plugin object.
+    function nativePlugin(name) {
+        const capacitor = window.Capacitor;
+        if (!capacitor?.isNativePlatform?.()) return null;
+        const available = typeof capacitor.isPluginAvailable === 'function'
+            ? capacitor.isPluginAvailable(name) : !!capacitor.Plugins?.[name];
+        if (!available) return null;
+        if (typeof capacitor.registerPlugin === 'function') return capacitor.registerPlugin(name);
+        return capacitor.Plugins?.[name] || null;
+    }
+    function forget() {
+        // PAY-001: the attempt is dropped from this tab only. The server keeps
+        // its payment record, and a payment Paystack later confirms is still
+        // applied by the webhook, so nothing is lost by closing this.
+        sessionStorage.removeItem(storageKey);
+        clearTimeout(refreshTimer);
+        active = null;
+    }
     const owner = () => typeof authToken === 'string' && authToken ? `${currentUserProfile?.business_id || ''}:${currentUserProfile?.id || ''}` : 'onboarding';
     function paymentDiagnostic(event, fields = {}) {
         const allowed = ['phase','native','httpStatus','referencePresent','accessCodePresent','providerHostname','pluginAvailable'];
@@ -77,6 +100,10 @@ window.CauldraPayments = (() => {
     }
     function close() {
         if (providerOpen) return; // use Paystack/native own close control
+        // Closing an attempt that never reached a confirmed payment dismisses
+        // it for good (PAY-001); it no longer reopens on every page load.
+        const phase = el('payment-overlay').dataset.state;
+        if (!verifying && ['pending', 'cancelled', 'error', 'success'].includes(phase)) forget();
         el('payment-overlay').hidden = true;
         document.body.style.overflow = savedOverflow;
         returnFocus?.focus?.();
@@ -109,7 +136,7 @@ window.CauldraPayments = (() => {
                 status('pending', 'Your secure Paystack checkout is ready to resume.');
                 await launch();
             } else if (saved.reference) {
-                status('pending', 'An earlier payment is still open. Check its status before starting another.');
+                status('pending', 'An earlier checkout was not finished. Check its status, or close this to start again.');
                 await verify(false);
             } else {
                 status('error', 'Paystack initialization did not create a checkout. You can retry safely.');
@@ -191,11 +218,11 @@ window.CauldraPayments = (() => {
         } catch (_) {return false;}
     }
     async function launchNative() {
-        const pluginAvailable = !!window.Capacitor?.isPluginAvailable?.('InAppBrowser');
+        const browser = nativePlugin('InAppBrowser');
+        const pluginAvailable = !!browser;
         paymentDiagnostic('PAYSTACK_NATIVE_PLUGIN_CHECKED', {phase:'checkout_ready',native:true,
             pluginAvailable,referencePresent:!!active?.reference,accessCodePresent:!!active?.access_code});
         if (!pluginAvailable) throw checkoutError('PAYSTACK_NATIVE_PLUGIN_UNAVAILABLE');
-        const browser = window.Capacitor.registerPlugin('InAppBrowser');
         await clearNativeListeners();
         try {
             listeners.push(await browser.addListener('browserClosed', onCancel));
@@ -205,8 +232,8 @@ window.CauldraPayments = (() => {
                 await clearNativeListeners();
                 await browser.close().catch(() => {}); providerOpen = false; await verify(true);
             }));
-            if (window.Capacitor.isPluginAvailable('App')) {
-                const app = window.Capacitor.registerPlugin('App');
+            const app = nativePlugin('App');
+            if (app) {
                 listeners.push(await app.addListener('appUrlOpen', async ({url}) => {
                     if (matchesReturn(url)) {await clearNativeListeners(); await browser.close().catch(() => {}); providerOpen=false; await verify(true);}
                 }));
@@ -283,7 +310,11 @@ window.CauldraPayments = (() => {
                 const data=await response.json();
                 if (active !== attempt || attempt.ownerId !== owner()) return;
                 if (response.status===202 || data.status==='pending') {
-                    status(cancelled?'cancelled':'pending',cancelled?'Checkout closed. Payment is unconfirmed; you can resume or check again.':'Payment is still being confirmed. Do not pay again.');
+                    // PAY-001: an unfinished checkout is not money in flight.
+                    // Say what is known, and that closing is safe.
+                    status(cancelled?'cancelled':'pending',cancelled
+                        ?'Checkout closed. No payment has been confirmed. You can resume the checkout, or close this.'
+                        :'Paystack has not confirmed a payment for this checkout yet. If you completed it, Cauldra applies it automatically once Paystack confirms. Otherwise you can resume the checkout, or close this.');
                     if (poll) {clearTimeout(refreshTimer); refreshTimer=setTimeout(()=>verify(false),5000);}
                     return;
                 }
@@ -337,11 +368,15 @@ window.CauldraPayments = (() => {
             active={kind,reference,ownerId:owner()};
         }
         // The URL is only a routing hint; confirmation is always tenant-scoped.
-        show(); await verify(true);
+        // Only a real provider return (a reference in the URL) polls; a page
+        // load that merely finds an earlier attempt checks it once.
+        show(); await verify(!!reference);
     }
     document.addEventListener('DOMContentLoaded', () => {
         el('payment-close').addEventListener('click',close);
-        el('payment-check').addEventListener('click',()=>verify(true));
+        // One confirmation per click (PAY-001 fired two); polling is kept for
+        // the provider's own return, where a result is actually expected.
+        el('payment-check').addEventListener('click',()=>verify(false));
         el('payment-resume').addEventListener('click',launch);
         el('payment-retry-init').addEventListener('click',retryInitialization);
         el('payment-overlay').addEventListener('keydown', event => {

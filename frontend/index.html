@@ -1472,6 +1472,7 @@
                         <div id="subscription-warning" class="hidden mb-2 rounded-lg px-2.5 py-2 text-[11px]"></div>
                         <div class="usage-meter"><div class="flex justify-between gap-3 text-[11px]"><span class="font-semibold text-textMain">AI Credits</span><span id="subscription-ai-label" class="font-mono text-textSec">0 / 0</span></div><div class="h-2 rounded-full bg-cardBg overflow-hidden mt-1.5"><div id="subscription-ai-bar" class="h-full bg-primary rounded-full" style="width:0%"></div></div><div id="subscription-ai-detail" class="text-[10px] text-textSec mt-1.5"></div></div>
                         <div id="subscription-resources" class="grid grid-cols-2 gap-2 content-start mt-3"></div>
+                        <div id="billing-over-limit-box" role="status" class="hidden mt-3 rounded-xl bg-warning/10 border border-warning/30 px-3 py-2.5 break-words"></div>
                     </div>
 
                     <!-- Pending downgrade notice -->
@@ -1491,12 +1492,13 @@
                     <!-- Plan picker -->
                     <div>
                         <div class="flex items-center justify-between mb-2">
-                            <p class="text-textMain font-bold">Plans</p>
-                            <div class="flex items-center gap-1 bg-bgMain border border-borderCol rounded-xl p-1">
-                                <button type="button" id="billing-interval-btn-monthly" onclick="setBillingIntervalChoice('monthly')" class="px-2.5 py-1 rounded-lg font-semibold transition cursor-pointer">Monthly</button>
-                                <button type="button" id="billing-interval-btn-annual" onclick="setBillingIntervalChoice('annual')" class="px-2.5 py-1 rounded-lg font-semibold transition cursor-pointer">Annual</button>
+                            <p id="billing-plans-heading" class="text-textMain font-bold">Plans</p>
+                            <div role="group" aria-label="Billing interval" class="flex items-center gap-1 bg-bgMain border border-borderCol rounded-xl p-1">
+                                <button type="button" id="billing-interval-btn-monthly" onclick="setBillingIntervalChoice('monthly')" aria-pressed="true" class="px-2.5 py-1 rounded-lg font-semibold transition cursor-pointer">Monthly</button>
+                                <button type="button" id="billing-interval-btn-annual" onclick="setBillingIntervalChoice('annual')" aria-pressed="false" class="px-2.5 py-1 rounded-lg font-semibold transition cursor-pointer">Annual</button>
                             </div>
                         </div>
+                        <p id="billing-admin-only-note" class="hidden mb-2 rounded-xl bg-bgMain border border-borderCol px-3 py-2 text-textSec leading-relaxed" data-i18n="subscription.adminOnlyPlanChanges">Only the business Admin can change the plan or payment details. You can see the plans and your usage here.</p>
                         <div id="billing-plan-cards" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5"></div>
                     </div>
 
@@ -1714,9 +1716,26 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-sm w-full shadow-2xl text-xs space-y-3.5 max-h-[90vh] overflow-y-auto">
             <h3 id="downgrade-confirm-title" class="font-bold text-sm text-textMain flex items-center gap-2 break-words"><i class="fa-solid fa-arrow-down text-warning shrink-0"></i> <span class="min-w-0">Downgrade?</span></h3>
             <p id="downgrade-confirm-body" class="text-textSec leading-relaxed break-words">—</p>
+            <div id="downgrade-confirm-impact" class="hidden rounded-xl bg-warning/10 border border-warning/30 px-3 py-2.5 break-words"></div>
             <div class="flex flex-col sm:flex-row gap-2 pt-1">
                 <button type="button" onclick="closeDowngradeConfirmModal()" class="flex-1 bg-bgMain hover:bg-cardHover text-textSec px-3 py-2.5 rounded-xl border border-borderCol cursor-pointer">Keep Current Plan</button>
                 <button type="button" id="downgrade-confirm-submit-btn" onclick="confirmScheduleDowngrade()" class="flex-1 bg-warning hover:brightness-95 text-white px-3 py-2.5 rounded-xl font-semibold cursor-pointer">Confirm Downgrade</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- PLAN CHANGE CONFIRMATION (UX-005 / PLAN-005): every plan change started
+         from a plan card is confirmed here with the plan, interval and price,
+         and for a lower plan, what would be over its limits. -->
+    <div id="plan-change-confirm-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-[135] hidden flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="plan-change-confirm-title" aria-describedby="plan-change-confirm-body">
+        <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-sm w-full shadow-2xl text-xs space-y-3.5 max-h-[90vh] overflow-y-auto">
+            <h3 id="plan-change-confirm-title" class="font-bold text-sm text-textMain break-words">Switch plan?</h3>
+            <p id="plan-change-confirm-summary" class="text-textMain font-semibold bg-primary/10 border border-primary/25 rounded-xl px-3 py-2 break-words">—</p>
+            <p id="plan-change-confirm-body" class="text-textSec leading-relaxed break-words">—</p>
+            <div id="plan-change-confirm-impact" class="hidden rounded-xl bg-warning/10 border border-warning/30 px-3 py-2.5 break-words"></div>
+            <div class="flex flex-col sm:flex-row gap-2 pt-1">
+                <button type="button" onclick="closePlanChangeConfirm()" class="flex-1 bg-bgMain hover:bg-cardHover text-textSec px-3 py-2.5 rounded-xl border border-borderCol cursor-pointer">Keep Current Plan</button>
+                <button type="button" id="plan-change-confirm-submit" onclick="confirmPlanChange()" class="flex-1 bg-primary hover:bg-primaryHover text-white px-3 py-2.5 rounded-xl font-semibold cursor-pointer break-words">Confirm</button>
             </div>
         </div>
     </div>
@@ -1915,7 +1934,7 @@
                         <input type="password" id="emp-password" required minlength="6" placeholder="Enter temporary password" data-i18n-placeholder="team.tempPasswordPlaceholder" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 pr-9 text-textMain focus:outline-none focus:border-primary">
                         <button type="button" onclick="togglePasswordVisibility('emp-password', this)" class="absolute right-2.5 top-2.5 text-textSec hover:text-textMain cursor-pointer" aria-label="Show password" data-i18n-aria-label="team.showPassword"><i class="fa-solid fa-eye text-xs"></i></button>
                     </div>
-                    <p class="text-[9px] text-textSec mt-1" data-i18n="team.passwordHint">At least 6 characters — this is temporary, the employee will replace it with their own permanent password at first sign-in.</p>
+                    <p class="text-[9px] text-textSec mt-1" data-i18n="team.tempPasswordRuleHint">At least 6 characters — this is temporary, the employee will replace it with their own permanent password at first sign-in.</p>
                 </div>
                 <div>
                     <label class="block font-medium text-textSec mb-1"><span data-i18n="team.confirmTemporaryPassword">Confirm Temporary Password</span> <span class="text-danger">*</span></label>
@@ -2478,7 +2497,8 @@
                 </div>
             </div>
 
-            <div class="bg-bgMain border border-primary/30 rounded-xl p-4 mb-4 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-md">
+            <div id="price-monitor-plan-note" role="status" class="hidden mb-3 rounded-xl bg-warning/10 border border-warning/30 px-3 py-2.5 text-xs text-textMain break-words"></div>
+            <div id="price-monitor-ocr-block" class="bg-bgMain border border-primary/30 rounded-xl p-4 mb-4 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-md">
                 <div class="flex items-center gap-3">
                     <div class="w-10 h-10 rounded-xl bg-primary/20 text-primary flex items-center justify-center text-base shrink-0">
                         <i class="fa-solid fa-file-invoice-dollar"></i>
@@ -2543,6 +2563,23 @@
     </div>
 
     <!-- SUPPLIER HUB MODAL -->
+    <!-- SUPPLIER EDIT (supplier.edit) -->
+    <div id="supplier-edit-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-[60] hidden flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="supplier-edit-title">
+        <form onsubmit="saveSupplierEdit(event)" class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-sm w-full shadow-2xl text-xs space-y-3 max-h-[90vh] overflow-y-auto">
+            <h3 id="supplier-edit-title" class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-pen text-primary"></i> Edit supplier</h3>
+            <label class="block"><span class="block font-medium text-textSec mb-1">Name <span class="text-danger">*</span></span>
+                <input id="supplier-edit-name" type="text" required minlength="2" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary"></label>
+            <label class="block"><span class="block font-medium text-textSec mb-1">Contact email</span>
+                <input id="supplier-edit-email" type="email" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary"></label>
+            <label class="block"><span class="block font-medium text-textSec mb-1">Phone <span class="text-danger">*</span></span>
+                <input id="supplier-edit-phone" type="tel" required class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary"></label>
+            <div class="flex flex-col sm:flex-row gap-2 pt-1">
+                <button type="button" onclick="closeSupplierEditModal()" class="flex-1 bg-bgMain hover:bg-cardHover text-textSec px-3 py-2.5 rounded-xl border border-borderCol cursor-pointer">Cancel</button>
+                <button type="submit" id="supplier-edit-save" class="flex-1 bg-primary hover:bg-primaryHover text-white px-3 py-2.5 rounded-xl font-semibold cursor-pointer">Save changes</button>
+            </div>
+        </form>
+    </div>
+
     <div id="supplier-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-3xl w-full shadow-2xl flex flex-col max-h-[85vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">

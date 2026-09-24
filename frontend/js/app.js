@@ -1449,7 +1449,7 @@
                     copiedToClipboard: "{item} copied to clipboard!", copyFailed: "Failed to copy {item}.",
                     signInToUseFeature: "Sign in or register a business to access {feature}.",
                     noRoleAccessToFeature: "Your {role} account does not have access to {feature}.",
-                    featureUpgradeRequired: "{feature} is an AI-powered feature available on Starter and above. Upgrade to unlock it.",
+                    featureUpgradeRequired: "{feature} is an AI-powered feature available on {plan} and above. Upgrade to unlock it.",
                     signedOutSuccess: "Successfully signed out.", selectSupplier: "Select supplier", selectProduct: "Select product",
                     checkNow: "Check Now", enterValidEmail: "Please enter a valid email address.",
                     unableToConnect: "Unable to connect right now. Please check your connection and try again.", done: "Done",
@@ -1560,6 +1560,22 @@
                     includedCreditsRemaining: "{count} included credits remaining",
                     creditsExhausted: "Included AI credits are exhausted. Further AI use is recorded as billable overage.",
                     creditsWarning80: "You have used 80% of your included AI credits.", unlimited: "Unlimited",
+                    aiNotIncluded: "AI features are not included in the {plan} plan.",
+                    aiUsedOnEarlierPlan: "{count} credits used earlier this period were included in the plan you were on at the time. They are not charged again.",
+                    inactiveDefault: "Your subscription is not currently active.",
+                    dataKept: "Your business data is kept.", choosePlan: "Choose a plan",
+                    askAdmin: "Ask your business Admin to renew the subscription.",
+                    adminOnlyPlanChanges: "Only the business Admin can change the plan or payment details. You can see the plans and your usage here.",
+                    overLimitTitle: "Your usage is above this plan's limits",
+                    overLimitBody: "Nothing has been deleted or switched off. You can keep using what you have, but you can't add more until you're back within the limit or you upgrade.",
+                    overLimitRow: "{label}: {current} of {limit}",
+                    planChangeWillExceed: "After this change your usage will be above the {plan} limits:",
+                    confirmPlanTitle: "Switch to {plan}?", confirmUpgradeTitle: "Upgrade to {plan}?", confirmSubscribeTitle: "Subscribe to {plan}?",
+                    confirmTrialSwitchBody: "Your free trial continues on {plan}. You won't be charged now. When the trial ends, your subscription continues at {price}.",
+                    confirmCheckoutBody: "You'll go to Paystack's secure checkout to pay {price}. Your plan changes only after Paystack confirms the payment.",
+                    confirmUpgradeBody: "You'll go to Paystack's secure checkout to pay for the upgrade. Paystack shows the exact amount before you pay; your plan changes only after the payment is confirmed. From your next renewal you pay {price}.",
+                    actionSwitchTo: "Switch to {plan}", actionUpgradeTo: "Upgrade to {plan}", actionSubscribeTo: "Subscribe to {plan}",
+                    actionDowngradeTo: "Downgrade to {plan}", actionStartTrial: "Start free trial on {plan}",
                     resourceProducts: "Products", resourceSuppliers: "Suppliers", resourceWarehouses: "Warehouses", resourceUsers: "Users",
                     resourcePriceSources: "Price sources", resourcePurchaseOrders: "Purchase orders", resourceStorage: "Storage",
                     choosePlanVerifyPayment: "Please choose a plan and verify a payment method to continue.",
@@ -1654,7 +1670,7 @@
                     geminiUnavailable: "Gemini pricing analysis is unavailable right now.",
                     geminiAdviceReady: "Gemini pricing advice is ready.",
                     suggestedPrices: "Suggested wholesale: {wholesale} · Suggested retail: {retail}.",
-                    advisorStarterRequired: "AI Margin Advisor is available on Starter and above.",
+                    advisorStarterRequired: "AI Margin Advisor is available on {plan} and above.",
                     geminiTemporarilyUnavailable: "Gemini pricing analysis is temporarily unavailable. You can still enter your price manually.",
                 },
                 team: {
@@ -1667,6 +1683,9 @@
                     tempPasswordWarningFull: "This password is temporary. The employee will be required to create a permanent password before using the app.",
                     roleLabel: "Role", firstName: "First Name", lastName: "Last Name", tempPasswordPlaceholder: "Enter temporary password",
                     showPassword: "Show password", passwordHint: "Use at least 8 characters with uppercase, lowercase, and a number.",
+                    // COPY-002: the Add Employee field takes a TEMPORARY password,
+                    // governed by validate_temp_password_strength() (6+ characters).
+                    tempPasswordRuleHint: "At least 6 characters — this is temporary, the employee will replace it with their own permanent password at first sign-in.",
                     tempPasswordWarningShort: "This password is temporary. The employee must change it before using the app.",
                     positionLabel: "Position / Specific Role", positionPlaceholder: "e.g. Sales Personnel, Floor Manager",
                     createEmployee: "Create Employee", accessDeniedTeamManagement: "Only Admins and Managers can access Team Management.",
@@ -1733,8 +1752,8 @@
                     attentionCount: { one: "1 thing deserves your attention.", other: "{count} things deserve your attention." },
                     noPriorities: "No immediate priorities were found in your current data.",
                     keepRecording: "Continue recording normal sales and inventory activity. Cauldra will surface useful priorities when evidence supports them.",
-                    starterRequired: "Business Brain is available on Starter and above.",
-                    upgradeToUnlock: "Upgrade to Starter to unlock Business Brain →",
+                    starterRequired: "Business Brain is available on {plan} and above.",
+                    upgradeToUnlock: "Upgrade to {plan} to unlock Business Brain →",
                     temporarilyUnavailable: "Business intelligence is temporarily unavailable. Your normal business tools are unaffected.",
                     accuracyImproving: "Predictions have been getting more accurate recently.",
                     accuracyDeclining: "Recent predictions have been less accurate than earlier ones.",
@@ -2036,7 +2055,7 @@
                     copiedToClipboard: "{item} copié dans le presse-papiers !", copyFailed: "Échec de la copie de {item}.",
                     signInToUseFeature: "Connectez-vous ou enregistrez une entreprise pour accéder à {feature}.",
                     noRoleAccessToFeature: "Votre compte {role} n'a pas accès à {feature}.",
-                    featureUpgradeRequired: "{feature} est une fonctionnalité IA disponible à partir du forfait Starter. Passez à un forfait supérieur pour la débloquer.",
+                    featureUpgradeRequired: "{feature} est une fonctionnalité IA disponible à partir du forfait {plan}. Passez à un forfait supérieur pour la débloquer.",
                     signedOutSuccess: "Déconnexion réussie.", selectSupplier: "Sélectionner un fournisseur", selectProduct: "Sélectionner un produit",
                     checkNow: "Vérifier maintenant", enterValidEmail: "Veuillez saisir une adresse e-mail valide.",
                     unableToConnect: "Connexion impossible pour le moment. Vérifiez votre connexion et réessayez.",
@@ -2140,7 +2159,7 @@
                     geminiUnavailable: "L'analyse tarifaire Gemini n'est pas disponible pour le moment.",
                     geminiAdviceReady: "Conseil tarifaire Gemini prêt.",
                     suggestedPrices: "Prix de gros suggéré : {wholesale} · Prix de détail suggéré : {retail}.",
-                    advisorStarterRequired: "Le conseiller de marge IA est disponible à partir du forfait Starter.",
+                    advisorStarterRequired: "Le conseiller de marge IA est disponible à partir du forfait {plan}.",
                     geminiTemporarilyUnavailable: "L'analyse tarifaire Gemini est temporairement indisponible. Vous pouvez toujours saisir votre prix manuellement.",
                 },
                 team: {
@@ -2206,8 +2225,8 @@
                     attentionCount: { one: "1 élément mérite votre attention.", other: "{count} éléments méritent votre attention." },
                     noPriorities: "Aucune priorité immédiate n'a été trouvée dans vos données actuelles.",
                     keepRecording: "Continuez à enregistrer les ventes et l'activité d'inventaire habituelles. Cauldra fera ressortir des priorités utiles lorsque les preuves le justifieront.",
-                    starterRequired: "Business Brain est disponible à partir du forfait Starter.",
-                    upgradeToUnlock: "Passez au forfait Starter pour débloquer Business Brain →",
+                    starterRequired: "Business Brain est disponible à partir du forfait {plan}.",
+                    upgradeToUnlock: "Passez au forfait {plan} pour débloquer Business Brain →",
                     temporarilyUnavailable: "L'intelligence d'affaires est temporairement indisponible. Vos outils habituels ne sont pas affectés.",
                     accuracyImproving: "Les prédictions sont devenues plus précises récemment.",
                     accuracyDeclining: "Les prédictions récentes ont été moins précises que les précédentes.",
@@ -2448,7 +2467,7 @@
                     copiedToClipboard: "¡{item} copiado al portapapeles!", copyFailed: "Error al copiar {item}.",
                     signInToUseFeature: "Inicie sesión o registre una empresa para acceder a {feature}.",
                     noRoleAccessToFeature: "Su cuenta de {role} no tiene acceso a {feature}.",
-                    featureUpgradeRequired: "{feature} es una función impulsada por IA disponible en el plan Starter y superiores. Actualice para desbloquearla.",
+                    featureUpgradeRequired: "{feature} es una función impulsada por IA disponible en el plan {plan} y superiores. Actualice para desbloquearla.",
                     signedOutSuccess: "Sesión cerrada correctamente.", selectSupplier: "Seleccionar proveedor", selectProduct: "Seleccionar producto",
                     checkNow: "Verificar ahora", enterValidEmail: "Por favor ingrese una dirección de correo válida.",
                     unableToConnect: "No se puede conectar en este momento. Verifique su conexión e inténtelo de nuevo.",
@@ -2552,7 +2571,7 @@
                     geminiUnavailable: "El análisis de precios de Gemini no está disponible en este momento.",
                     geminiAdviceReady: "Consejo de precios de Gemini listo.",
                     suggestedPrices: "Precio mayorista sugerido: {wholesale} · Precio minorista sugerido: {retail}.",
-                    advisorStarterRequired: "El asesor de márgenes de IA está disponible en el plan Starter y superiores.",
+                    advisorStarterRequired: "El asesor de márgenes de IA está disponible en el plan {plan} y superiores.",
                     geminiTemporarilyUnavailable: "El análisis de precios de Gemini no está disponible temporalmente. Aún puede ingresar su precio manualmente.",
                 },
                 team: {
@@ -2618,8 +2637,8 @@
                     attentionCount: { one: "1 elemento merece su atención.", other: "{count} elementos merecen su atención." },
                     noPriorities: "No se encontraron prioridades inmediatas en sus datos actuales.",
                     keepRecording: "Continúe registrando la actividad normal de ventas e inventario. Cauldra mostrará prioridades útiles cuando la evidencia lo respalde.",
-                    starterRequired: "Business Brain está disponible en el plan Starter y superiores.",
-                    upgradeToUnlock: "Actualice a Starter para desbloquear Business Brain →",
+                    starterRequired: "Business Brain está disponible en el plan {plan} y superiores.",
+                    upgradeToUnlock: "Actualice a {plan} para desbloquear Business Brain →",
                     temporarilyUnavailable: "La inteligencia empresarial no está disponible temporalmente. Sus herramientas normales no se ven afectadas.",
                     accuracyImproving: "Las predicciones han sido más precisas recientemente.",
                     accuracyDeclining: "Las predicciones recientes han sido menos precisas que las anteriores.",
@@ -2859,7 +2878,7 @@
                     copiedToClipboard: "{item}已复制到剪贴板!", copyFailed: "复制{item}失败。",
                     signInToUseFeature: "请登录或注册企业以使用{feature}。",
                     noRoleAccessToFeature: "您的{role}账户无权使用{feature}。",
-                    featureUpgradeRequired: "{feature}是Starter及以上套餐提供的AI功能,请升级以解锁。",
+                    featureUpgradeRequired: "{feature}是{plan}及以上套餐提供的AI功能,请升级以解锁。",
                     signedOutSuccess: "已成功退出登录。", selectSupplier: "选择供应商", selectProduct: "选择产品",
                     checkNow: "立即检查", enterValidEmail: "请输入有效的电子邮件地址。",
                     unableToConnect: "暂时无法连接,请检查网络连接后重试。",
@@ -2963,7 +2982,7 @@
                     geminiUnavailable: "Gemini定价分析暂时不可用。",
                     geminiAdviceReady: "Gemini定价建议已就绪。",
                     suggestedPrices: "建议批发价:{wholesale} · 建议零售价:{retail}。",
-                    advisorStarterRequired: "AI利润顾问适用于Starter及以上套餐。",
+                    advisorStarterRequired: "AI利润顾问适用于{plan}及以上套餐。",
                     geminiTemporarilyUnavailable: "Gemini定价分析暂时不可用,您仍可手动输入价格。",
                 },
                 team: {
@@ -3029,8 +3048,8 @@
                     attentionCount: { one: "有1项内容值得您关注。", other: "有{count}项内容值得您关注。" },
                     noPriorities: "在您当前的数据中未发现紧急优先事项。",
                     keepRecording: "请继续记录正常的销售和库存活动。当有足够证据支持时,Cauldra将显示有用的优先事项。",
-                    starterRequired: "商业大脑适用于Starter及以上套餐。",
-                    upgradeToUnlock: "升级到Starter以解锁商业大脑 →",
+                    starterRequired: "商业大脑适用于{plan}及以上套餐。",
+                    upgradeToUnlock: "升级到{plan}以解锁商业大脑 →",
                     temporarilyUnavailable: "商业智能功能暂时不可用,您的常规业务工具不受影响。",
                     accuracyImproving: "预测最近变得更加准确。",
                     accuracyDeclining: "近期预测的准确性低于早期预测。",
@@ -3270,7 +3289,7 @@
                     copiedToClipboard: "تم نسخ {item} إلى الحافظة!", copyFailed: "فشل نسخ {item}.",
                     signInToUseFeature: "يرجى تسجيل الدخول أو تسجيل نشاط تجاري للوصول إلى {feature}.",
                     noRoleAccessToFeature: "لا يملك حساب {role} الخاص بك صلاحية الوصول إلى {feature}.",
-                    featureUpgradeRequired: "{feature} ميزة مدعومة بالذكاء الاصطناعي متاحة في باقة Starter وما فوق. قم بالترقية لفتحها.",
+                    featureUpgradeRequired: "{feature} ميزة مدعومة بالذكاء الاصطناعي متاحة في باقة {plan} وما فوق. قم بالترقية لفتحها.",
                     signedOutSuccess: "تم تسجيل الخروج بنجاح.", selectSupplier: "اختر المورد", selectProduct: "اختر المنتج",
                     checkNow: "تحقق الآن", enterValidEmail: "يرجى إدخال عنوان بريد إلكتروني صالح.",
                     unableToConnect: "تعذر الاتصال الآن. يرجى التحقق من اتصالك والمحاولة مرة أخرى.",
@@ -3374,7 +3393,7 @@
                     geminiUnavailable: "تحليل التسعير من Gemini غير متاح حاليًا.",
                     geminiAdviceReady: "نصيحة التسعير من Gemini جاهزة.",
                     suggestedPrices: "سعر الجملة المقترح: {wholesale} · سعر التجزئة المقترح: {retail}.",
-                    advisorStarterRequired: "مستشار هامش الربح بالذكاء الاصطناعي متاح في باقة Starter وما فوق.",
+                    advisorStarterRequired: "مستشار هامش الربح بالذكاء الاصطناعي متاح في باقة {plan} وما فوق.",
                     geminiTemporarilyUnavailable: "تحليل التسعير من Gemini غير متاح مؤقتًا. يمكنك إدخال سعرك يدويًا.",
                 },
                 team: {
@@ -3440,8 +3459,8 @@
                     attentionCount: { one: "هناك أمر واحد يستحق اهتمامك.", other: "هناك {count} أمور تستحق اهتمامك." },
                     noPriorities: "لم يتم العثور على أولويات فورية في بياناتك الحالية.",
                     keepRecording: "واصل تسجيل أنشطة المبيعات والمخزون الاعتيادية. سيعرض Cauldra أولويات مفيدة عندما تدعمها الأدلة.",
-                    starterRequired: "عقل Cauldra التجاري متاح في باقة Starter وما فوق.",
-                    upgradeToUnlock: "قم بالترقية إلى Starter لفتح عقل Cauldra التجاري ←",
+                    starterRequired: "عقل Cauldra التجاري متاح في باقة {plan} وما فوق.",
+                    upgradeToUnlock: "قم بالترقية إلى {plan} لفتح عقل Cauldra التجاري ←",
                     temporarilyUnavailable: "الذكاء التجاري غير متاح مؤقتًا. أدوات عملك الاعتيادية غير متأثرة.",
                     accuracyImproving: "أصبحت التوقعات أكثر دقة مؤخرًا.",
                     accuracyDeclining: "كانت التوقعات الأخيرة أقل دقة من السابقة.",
@@ -3682,7 +3701,7 @@
                     copiedToClipboard: "{item} copiado para a área de transferência!", copyFailed: "Falha ao copiar {item}.",
                     signInToUseFeature: "Faça login ou registre uma empresa para acessar {feature}.",
                     noRoleAccessToFeature: "Sua conta de {role} não tem acesso a {feature}.",
-                    featureUpgradeRequired: "{feature} é um recurso com IA disponível no plano Starter e superiores. Faça upgrade para desbloquear.",
+                    featureUpgradeRequired: "{feature} é um recurso com IA disponível no plano {plan} e superiores. Faça upgrade para desbloquear.",
                     signedOutSuccess: "Sessão encerrada com sucesso.", selectSupplier: "Selecionar fornecedor", selectProduct: "Selecionar produto",
                     checkNow: "Verificar agora", enterValidEmail: "Por favor, insira um endereço de e-mail válido.",
                     unableToConnect: "Não foi possível conectar agora. Verifique sua conexão e tente novamente.",
@@ -3786,7 +3805,7 @@
                     geminiUnavailable: "A análise de preços do Gemini está indisponível no momento.",
                     geminiAdviceReady: "Recomendação de preços do Gemini pronta.",
                     suggestedPrices: "Preço de atacado sugerido: {wholesale} · Preço de varejo sugerido: {retail}.",
-                    advisorStarterRequired: "O Consultor de Margem com IA está disponível no plano Starter e superiores.",
+                    advisorStarterRequired: "O Consultor de Margem com IA está disponível no plano {plan} e superiores.",
                     geminiTemporarilyUnavailable: "A análise de preços do Gemini está temporariamente indisponível. Você ainda pode inserir seu preço manualmente.",
                 },
                 team: {
@@ -3852,8 +3871,8 @@
                     attentionCount: { one: "1 item merece sua atenção.", other: "{count} itens merecem sua atenção." },
                     noPriorities: "Nenhuma prioridade imediata foi encontrada em seus dados atuais.",
                     keepRecording: "Continue registrando as vendas normais e a atividade de estoque. A Cauldra mostrará prioridades úteis quando as evidências as sustentarem.",
-                    starterRequired: "O Business Brain está disponível no plano Starter e superiores.",
-                    upgradeToUnlock: "Faça upgrade para o Starter para desbloquear o Business Brain →",
+                    starterRequired: "O Business Brain está disponível no plano {plan} e superiores.",
+                    upgradeToUnlock: "Faça upgrade para o {plan} para desbloquear o Business Brain →",
                     temporarilyUnavailable: "A inteligência de negócios está temporariamente indisponível. Suas ferramentas normais não são afetadas.",
                     accuracyImproving: "As previsões têm ficado mais precisas recentemente.",
                     accuracyDeclining: "As previsões recentes têm sido menos precisas do que as anteriores.",
@@ -4094,7 +4113,7 @@
                     copiedToClipboard: "{item} in die Zwischenablage kopiert!", copyFailed: "Kopieren von {item} fehlgeschlagen.",
                     signInToUseFeature: "Melden Sie sich an oder registrieren Sie ein Unternehmen, um auf {feature} zuzugreifen.",
                     noRoleAccessToFeature: "Ihr {role}-Konto hat keinen Zugriff auf {feature}.",
-                    featureUpgradeRequired: "{feature} ist eine KI-Funktion, die ab dem Starter-Tarif verfügbar ist. Upgraden Sie, um sie freizuschalten.",
+                    featureUpgradeRequired: "{feature} ist eine KI-Funktion, die ab dem {plan}-Tarif verfügbar ist. Upgraden Sie, um sie freizuschalten.",
                     signedOutSuccess: "Erfolgreich abgemeldet.", selectSupplier: "Lieferant auswählen", selectProduct: "Produkt auswählen",
                     checkNow: "Jetzt prüfen", enterValidEmail: "Bitte geben Sie eine gültige E-Mail-Adresse ein.",
                     unableToConnect: "Derzeit keine Verbindung möglich. Bitte überprüfen Sie Ihre Verbindung und versuchen Sie es erneut.",
@@ -4198,7 +4217,7 @@
                     geminiUnavailable: "Die Gemini-Preisanalyse ist derzeit nicht verfügbar.",
                     geminiAdviceReady: "Gemini-Preisempfehlung bereit.",
                     suggestedPrices: "Empfohlener Großhandelspreis: {wholesale} · Empfohlener Verkaufspreis: {retail}.",
-                    advisorStarterRequired: "Der KI-Margenberater ist ab dem Starter-Tarif verfügbar.",
+                    advisorStarterRequired: "Der KI-Margenberater ist ab dem {plan}-Tarif verfügbar.",
                     geminiTemporarilyUnavailable: "Die Gemini-Preisanalyse ist vorübergehend nicht verfügbar. Sie können Ihren Preis weiterhin manuell eingeben.",
                 },
                 team: {
@@ -4264,8 +4283,8 @@
                     attentionCount: { one: "1 Sache verdient Ihre Aufmerksamkeit.", other: "{count} Dinge verdienen Ihre Aufmerksamkeit." },
                     noPriorities: "In Ihren aktuellen Daten wurden keine unmittelbaren Prioritäten gefunden.",
                     keepRecording: "Erfassen Sie weiterhin normale Verkaufs- und Bestandsaktivitäten. Cauldra zeigt nützliche Prioritäten an, sobald Belege dies unterstützen.",
-                    starterRequired: "Business Brain ist ab dem Starter-Tarif verfügbar.",
-                    upgradeToUnlock: "Upgraden Sie auf Starter, um Business Brain freizuschalten →",
+                    starterRequired: "Business Brain ist ab dem {plan}-Tarif verfügbar.",
+                    upgradeToUnlock: "Upgraden Sie auf {plan}, um Business Brain freizuschalten →",
                     temporarilyUnavailable: "Business Intelligence ist vorübergehend nicht verfügbar. Ihre normalen Geschäftstools sind nicht betroffen.",
                     accuracyImproving: "Die Prognosen sind in letzter Zeit genauer geworden.",
                     accuracyDeclining: "Die jüngsten Prognosen waren weniger genau als frühere.",
@@ -4506,7 +4525,7 @@
                     copiedToClipboard: "{item}をクリップボードにコピーしました!", copyFailed: "{item}のコピーに失敗しました。",
                     signInToUseFeature: "{feature}を利用するにはログインするか、事業を登録してください。",
                     noRoleAccessToFeature: "{role}アカウントは{feature}にアクセスできません。",
-                    featureUpgradeRequired: "{feature}はStarterプラン以上で利用できるAI機能です。アップグレードして解除してください。",
+                    featureUpgradeRequired: "{feature}は{plan}プラン以上で利用できるAI機能です。アップグレードして解除してください。",
                     signedOutSuccess: "正常にログアウトしました。", selectSupplier: "仕入先を選択", selectProduct: "商品を選択",
                     checkNow: "今すぐ確認", enterValidEmail: "有効なメールアドレスを入力してください。",
                     unableToConnect: "現在接続できません。接続を確認して再試行してください。",
@@ -4610,7 +4629,7 @@
                     geminiUnavailable: "Geminiの価格分析は現在利用できません。",
                     geminiAdviceReady: "Geminiの価格提案の準備ができました。",
                     suggestedPrices: "推奨卸売価格:{wholesale}・推奨小売価格:{retail}。",
-                    advisorStarterRequired: "AI利益率アドバイザーはStarterプラン以上で利用できます。",
+                    advisorStarterRequired: "AI利益率アドバイザーは{plan}プラン以上で利用できます。",
                     geminiTemporarilyUnavailable: "Geminiの価格分析は一時的に利用できません。価格は手動で入力できます。",
                 },
                 team: {
@@ -4676,8 +4695,8 @@
                     attentionCount: { one: "1件注目すべき事項があります。", other: "{count}件注目すべき事項があります。" },
                     noPriorities: "現在のデータに緊急の優先事項は見つかりませんでした。",
                     keepRecording: "通常の販売と在庫活動の記録を続けてください。証拠がそろい次第、Cauldraが有用な優先事項を提示します。",
-                    starterRequired: "ビジネスブレインはStarterプラン以上で利用できます。",
-                    upgradeToUnlock: "Starterにアップグレードしてビジネスブレインを解除 →",
+                    starterRequired: "ビジネスブレインは{plan}プラン以上で利用できます。",
+                    upgradeToUnlock: "{plan}にアップグレードしてビジネスブレインを解除 →",
                     temporarilyUnavailable: "ビジネスインテリジェンスは一時的に利用できません。通常の業務ツールには影響ありません。",
                     accuracyImproving: "最近予測の精度が向上しています。",
                     accuracyDeclining: "最近の予測は以前の予測より精度が低下しています。",
@@ -4918,7 +4937,7 @@
                     copiedToClipboard: "{item}이(가) 클립보드에 복사되었습니다!", copyFailed: "{item} 복사에 실패했습니다.",
                     signInToUseFeature: "{feature}에 액세스하려면 로그인하거나 비즈니스를 등록하세요.",
                     noRoleAccessToFeature: "{role} 계정은 {feature}에 액세스할 수 없습니다.",
-                    featureUpgradeRequired: "{feature}은(는) Starter 이상 요금제에서 제공되는 AI 기능입니다. 업그레이드하여 잠금을 해제하세요.",
+                    featureUpgradeRequired: "{feature}은(는) {plan} 이상 요금제에서 제공되는 AI 기능입니다. 업그레이드하여 잠금을 해제하세요.",
                     signedOutSuccess: "로그아웃되었습니다.", selectSupplier: "공급업체 선택", selectProduct: "제품 선택",
                     checkNow: "지금 확인", enterValidEmail: "유효한 이메일 주소를 입력해 주세요.",
                     unableToConnect: "지금은 연결할 수 없습니다. 연결 상태를 확인하고 다시 시도해 주세요.",
@@ -5022,7 +5041,7 @@
                     geminiUnavailable: "Gemini 가격 분석을 현재 사용할 수 없습니다.",
                     geminiAdviceReady: "Gemini 가격 추천이 준비되었습니다.",
                     suggestedPrices: "추천 도매가: {wholesale} · 추천 소매가: {retail}.",
-                    advisorStarterRequired: "AI 마진 어드바이저는 Starter 이상 요금제에서 사용할 수 있습니다.",
+                    advisorStarterRequired: "AI 마진 어드바이저는 {plan} 이상 요금제에서 사용할 수 있습니다.",
                     geminiTemporarilyUnavailable: "Gemini 가격 분석을 일시적으로 사용할 수 없습니다. 가격을 직접 입력할 수 있습니다.",
                 },
                 team: {
@@ -5088,8 +5107,8 @@
                     attentionCount: { one: "주목할 사항이 1개 있습니다.", other: "주목할 사항이 {count}개 있습니다." },
                     noPriorities: "현재 데이터에서 즉각적인 우선순위가 발견되지 않았습니다.",
                     keepRecording: "정상적인 판매 및 재고 활동 기록을 계속하세요. 근거가 뒷받침될 때 Cauldra가 유용한 우선순위를 제시합니다.",
-                    starterRequired: "비즈니스 브레인은 Starter 이상 요금제에서 사용할 수 있습니다.",
-                    upgradeToUnlock: "Starter로 업그레이드하여 비즈니스 브레인 잠금 해제 →",
+                    starterRequired: "비즈니스 브레인은 {plan} 이상 요금제에서 사용할 수 있습니다.",
+                    upgradeToUnlock: "{plan}로 업그레이드하여 비즈니스 브레인 잠금 해제 →",
                     temporarilyUnavailable: "비즈니스 인텔리전스를 일시적으로 사용할 수 없습니다. 일반 비즈니스 도구는 영향을 받지 않습니다.",
                     accuracyImproving: "최근 예측 정확도가 향상되었습니다.",
                     accuracyDeclining: "최근 예측이 이전보다 정확도가 낮아졌습니다.",
@@ -5330,7 +5349,7 @@
                     copiedToClipboard: "{item} copiato negli appunti!", copyFailed: "Impossibile copiare {item}.",
                     signInToUseFeature: "Accedi o registra un'attività per accedere a {feature}.",
                     noRoleAccessToFeature: "Il tuo account {role} non ha accesso a {feature}.",
-                    featureUpgradeRequired: "{feature} è una funzionalità basata sull'IA disponibile dal piano Starter in su. Esegui l'upgrade per sbloccarla.",
+                    featureUpgradeRequired: "{feature} è una funzionalità basata sull'IA disponibile dal piano {plan} in su. Esegui l'upgrade per sbloccarla.",
                     signedOutSuccess: "Disconnessione avvenuta con successo.", selectSupplier: "Seleziona fornitore", selectProduct: "Seleziona prodotto",
                     checkNow: "Controlla ora", enterValidEmail: "Inserisci un indirizzo email valido.",
                     unableToConnect: "Impossibile connettersi al momento. Controlla la connessione e riprova.",
@@ -5434,7 +5453,7 @@
                     geminiUnavailable: "L'analisi dei prezzi Gemini non è disponibile al momento.",
                     geminiAdviceReady: "Consiglio sui prezzi Gemini pronto.",
                     suggestedPrices: "Prezzo all'ingrosso suggerito: {wholesale} · Prezzo al dettaglio suggerito: {retail}.",
-                    advisorStarterRequired: "Il consulente margini IA è disponibile dal piano Starter in su.",
+                    advisorStarterRequired: "Il consulente margini IA è disponibile dal piano {plan} in su.",
                     geminiTemporarilyUnavailable: "L'analisi dei prezzi Gemini non è temporaneamente disponibile. Puoi comunque inserire il prezzo manualmente.",
                 },
                 team: {
@@ -5500,8 +5519,8 @@
                     attentionCount: { one: "1 elemento merita la tua attenzione.", other: "{count} elementi meritano la tua attenzione." },
                     noPriorities: "Nessuna priorità immediata trovata nei tuoi dati attuali.",
                     keepRecording: "Continua a registrare le normali attività di vendita e magazzino. Cauldra mostrerà priorità utili quando le prove le supporteranno.",
-                    starterRequired: "Business Brain è disponibile dal piano Starter in su.",
-                    upgradeToUnlock: "Esegui l'upgrade a Starter per sbloccare Business Brain →",
+                    starterRequired: "Business Brain è disponibile dal piano {plan} in su.",
+                    upgradeToUnlock: "Esegui l'upgrade a {plan} per sbloccare Business Brain →",
                     temporarilyUnavailable: "La business intelligence non è temporaneamente disponibile. I tuoi normali strumenti aziendali non sono interessati.",
                     accuracyImproving: "Le previsioni sono diventate più accurate di recente.",
                     accuracyDeclining: "Le previsioni recenti sono state meno accurate di quelle precedenti.",
@@ -5742,7 +5761,7 @@
                     copiedToClipboard: "{item} gekopieerd naar klembord!", copyFailed: "Kopiëren van {item} mislukt.",
                     signInToUseFeature: "Log in of registreer een bedrijf om toegang te krijgen tot {feature}.",
                     noRoleAccessToFeature: "Uw {role}-account heeft geen toegang tot {feature}.",
-                    featureUpgradeRequired: "{feature} is een AI-functie die beschikbaar is vanaf het Starter-abonnement. Upgrade om te ontgrendelen.",
+                    featureUpgradeRequired: "{feature} is een AI-functie die beschikbaar is vanaf het {plan}-abonnement. Upgrade om te ontgrendelen.",
                     signedOutSuccess: "Succesvol uitgelogd.", selectSupplier: "Leverancier selecteren", selectProduct: "Product selecteren",
                     checkNow: "Nu controleren", enterValidEmail: "Voer een geldig e-mailadres in.",
                     unableToConnect: "Kan momenteel geen verbinding maken. Controleer uw verbinding en probeer het opnieuw.",
@@ -5846,7 +5865,7 @@
                     geminiUnavailable: "De Gemini-prijsanalyse is momenteel niet beschikbaar.",
                     geminiAdviceReady: "Gemini-prijsadvies gereed.",
                     suggestedPrices: "Aanbevolen groothandelsprijs: {wholesale} · Aanbevolen verkoopprijs: {retail}.",
-                    advisorStarterRequired: "De AI-marge-adviseur is beschikbaar vanaf het Starter-abonnement.",
+                    advisorStarterRequired: "De AI-marge-adviseur is beschikbaar vanaf het {plan}-abonnement.",
                     geminiTemporarilyUnavailable: "De Gemini-prijsanalyse is tijdelijk niet beschikbaar. U kunt uw prijs nog steeds handmatig invoeren.",
                 },
                 team: {
@@ -5912,8 +5931,8 @@
                     attentionCount: { one: "1 zaak verdient uw aandacht.", other: "{count} zaken verdienen uw aandacht." },
                     noPriorities: "Er zijn geen onmiddellijke prioriteiten gevonden in uw huidige gegevens.",
                     keepRecording: "Blijf normale verkoop- en voorraadactiviteiten registreren. Cauldra toont nuttige prioriteiten zodra bewijs dit ondersteunt.",
-                    starterRequired: "Business Brain is beschikbaar vanaf het Starter-abonnement.",
-                    upgradeToUnlock: "Upgrade naar Starter om Business Brain te ontgrendelen →",
+                    starterRequired: "Business Brain is beschikbaar vanaf het {plan}-abonnement.",
+                    upgradeToUnlock: "Upgrade naar {plan} om Business Brain te ontgrendelen →",
                     temporarilyUnavailable: "Business intelligence is tijdelijk niet beschikbaar. Uw normale bedrijfstools zijn niet beïnvloed.",
                     accuracyImproving: "Voorspellingen zijn recentelijk nauwkeuriger geworden.",
                     accuracyDeclining: "Recente voorspellingen waren minder nauwkeurig dan eerdere.",
@@ -6154,7 +6173,7 @@
                     copiedToClipboard: "{item} panoya kopyalandı!", copyFailed: "{item} kopyalanamadı.",
                     signInToUseFeature: "{feature} özelliğine erişmek için giriş yapın veya bir işletme kaydedin.",
                     noRoleAccessToFeature: "{role} hesabınızın {feature} erişimi yok.",
-                    featureUpgradeRequired: "{feature}, Starter ve üzeri planlarda sunulan bir yapay zeka özelliğidir. Kilidini açmak için yükseltin.",
+                    featureUpgradeRequired: "{feature}, {plan} ve üzeri planlarda sunulan bir yapay zeka özelliğidir. Kilidini açmak için yükseltin.",
                     signedOutSuccess: "Başarıyla çıkış yapıldı.", selectSupplier: "Tedarikçi seçin", selectProduct: "Ürün seçin",
                     checkNow: "Şimdi kontrol et", enterValidEmail: "Lütfen geçerli bir e-posta adresi girin.",
                     unableToConnect: "Şu anda bağlanılamıyor. Lütfen bağlantınızı kontrol edip tekrar deneyin.",
@@ -6258,7 +6277,7 @@
                     geminiUnavailable: "Gemini fiyatlandırma analizi şu anda kullanılamıyor.",
                     geminiAdviceReady: "Gemini fiyatlandırma önerisi hazır.",
                     suggestedPrices: "Önerilen toptan fiyat: {wholesale} · Önerilen perakende fiyat: {retail}.",
-                    advisorStarterRequired: "Yapay Zeka Marj Danışmanı Starter ve üzeri planlarda kullanılabilir.",
+                    advisorStarterRequired: "Yapay Zeka Marj Danışmanı {plan} ve üzeri planlarda kullanılabilir.",
                     geminiTemporarilyUnavailable: "Gemini fiyatlandırma analizi geçici olarak kullanılamıyor. Fiyatınızı yine de manuel olarak girebilirsiniz.",
                 },
                 team: {
@@ -6324,8 +6343,8 @@
                     attentionCount: { one: "1 konu dikkatinizi hak ediyor.", other: "{count} konu dikkatinizi hak ediyor." },
                     noPriorities: "Mevcut verilerinizde acil öncelik bulunamadı.",
                     keepRecording: "Normal satış ve envanter faaliyetlerini kaydetmeye devam edin. Kanıtlar desteklediğinde Cauldra faydalı öncelikleri ortaya çıkaracaktır.",
-                    starterRequired: "İş Beyni, Starter ve üzeri planlarda kullanılabilir.",
-                    upgradeToUnlock: "İş Beyni'nin kilidini açmak için Starter'a yükseltin →",
+                    starterRequired: "İş Beyni, {plan} ve üzeri planlarda kullanılabilir.",
+                    upgradeToUnlock: "İş Beyni'nin kilidini açmak için {plan}'a yükseltin →",
                     temporarilyUnavailable: "İş zekası geçici olarak kullanılamıyor. Normal iş araçlarınız etkilenmez.",
                     accuracyImproving: "Tahminler son zamanlarda daha doğru hale geldi.",
                     accuracyDeclining: "Son tahminler önceki tahminlerden daha az doğru oldu.",
@@ -6566,7 +6585,7 @@
                     copiedToClipboard: "{item} скопировано в буфер обмена!", copyFailed: "Не удалось скопировать {item}.",
                     signInToUseFeature: "Войдите или зарегистрируйте бизнес, чтобы получить доступ к {feature}.",
                     noRoleAccessToFeature: "Ваша учётная запись {role} не имеет доступа к {feature}.",
-                    featureUpgradeRequired: "{feature} — это функция на основе ИИ, доступная на тарифе Starter и выше. Улучшите тариф, чтобы разблокировать её.",
+                    featureUpgradeRequired: "{feature} — это функция на основе ИИ, доступная на тарифе {plan} и выше. Улучшите тариф, чтобы разблокировать её.",
                     signedOutSuccess: "Выход выполнен успешно.", selectSupplier: "Выберите поставщика", selectProduct: "Выберите товар",
                     checkNow: "Проверить сейчас", enterValidEmail: "Пожалуйста, введите корректный адрес электронной почты.",
                     unableToConnect: "Не удалось подключиться сейчас. Проверьте соединение и повторите попытку.",
@@ -6670,7 +6689,7 @@
                     geminiUnavailable: "Анализ цен Gemini сейчас недоступен.",
                     geminiAdviceReady: "Рекомендация по цене от Gemini готова.",
                     suggestedPrices: "Рекомендуемая оптовая цена: {wholesale} · Рекомендуемая розничная цена: {retail}.",
-                    advisorStarterRequired: "Советник по марже на основе ИИ доступен на тарифе Starter и выше.",
+                    advisorStarterRequired: "Советник по марже на основе ИИ доступен на тарифе {plan} и выше.",
                     geminiTemporarilyUnavailable: "Анализ цен Gemini временно недоступен. Вы можете ввести цену вручную.",
                 },
                 team: {
@@ -6736,8 +6755,8 @@
                     attentionCount: { one: "1 пункт заслуживает вашего внимания.", other: "{count} пунктов заслуживают вашего внимания." },
                     noPriorities: "В ваших текущих данных не найдено срочных приоритетов.",
                     keepRecording: "Продолжайте записывать обычные продажи и активность по запасам. Cauldra покажет полезные приоритеты, когда появятся достаточные основания.",
-                    starterRequired: "Business Brain доступен на тарифе Starter и выше.",
-                    upgradeToUnlock: "Улучшите тариф до Starter, чтобы разблокировать Business Brain →",
+                    starterRequired: "Business Brain доступен на тарифе {plan} и выше.",
+                    upgradeToUnlock: "Улучшите тариф до {plan}, чтобы разблокировать Business Brain →",
                     temporarilyUnavailable: "Бизнес-аналитика временно недоступна. Ваши обычные бизнес-инструменты не затронуты.",
                     accuracyImproving: "Прогнозы стали точнее в последнее время.",
                     accuracyDeclining: "Недавние прогнозы были менее точными, чем предыдущие.",
@@ -6978,7 +6997,7 @@
                     copiedToClipboard: "{item} क्लिपबोर्ड पर कॉपी हो गया!", copyFailed: "{item} कॉपी करने में विफल।",
                     signInToUseFeature: "{feature} तक पहुँचने के लिए साइन इन करें या व्यवसाय पंजीकृत करें।",
                     noRoleAccessToFeature: "आपके {role} खाते की {feature} तक पहुँच नहीं है।",
-                    featureUpgradeRequired: "{feature} एक AI-संचालित सुविधा है जो Starter और उससे ऊपर के प्लान पर उपलब्ध है। इसे अनलॉक करने के लिए अपग्रेड करें।",
+                    featureUpgradeRequired: "{feature} एक AI-संचालित सुविधा है जो {plan} और उससे ऊपर के प्लान पर उपलब्ध है। इसे अनलॉक करने के लिए अपग्रेड करें।",
                     signedOutSuccess: "सफलतापूर्वक साइन आउट हो गए।", selectSupplier: "आपूर्तिकर्ता चुनें", selectProduct: "उत्पाद चुनें",
                     checkNow: "अभी जांचें", enterValidEmail: "कृपया एक मान्य ईमेल पता दर्ज करें।",
                     unableToConnect: "अभी कनेक्ट नहीं हो सका। कृपया अपना कनेक्शन जांचें और फिर से प्रयास करें।",
@@ -7082,7 +7101,7 @@
                     geminiUnavailable: "Gemini मूल्य विश्लेषण अभी उपलब्ध नहीं है।",
                     geminiAdviceReady: "Gemini मूल्य निर्धारण सलाह तैयार है।",
                     suggestedPrices: "अनुशंसित थोक मूल्य: {wholesale} · अनुशंसित खुदरा मूल्य: {retail}।",
-                    advisorStarterRequired: "AI मार्जिन सलाहकार Starter और उससे ऊपर के प्लान पर उपलब्ध है।",
+                    advisorStarterRequired: "AI मार्जिन सलाहकार {plan} और उससे ऊपर के प्लान पर उपलब्ध है।",
                     geminiTemporarilyUnavailable: "Gemini मूल्य विश्लेषण अस्थायी रूप से उपलब्ध नहीं है। आप अभी भी मैन्युअल रूप से अपना मूल्य दर्ज कर सकते हैं।",
                 },
                 team: {
@@ -7148,8 +7167,8 @@
                     attentionCount: { one: "1 चीज़ आपके ध्यान देने योग्य है।", other: "{count} चीज़ें आपके ध्यान देने योग्य हैं।" },
                     noPriorities: "आपके वर्तमान डेटा में कोई तत्काल प्राथमिकता नहीं मिली।",
                     keepRecording: "सामान्य बिक्री और इन्वेंटरी गतिविधि दर्ज करना जारी रखें। जब प्रमाण उपलब्ध होंगे तो Cauldra उपयोगी प्राथमिकताएं दिखाएगा।",
-                    starterRequired: "बिज़नेस ब्रेन Starter और उससे ऊपर के प्लान पर उपलब्ध है।",
-                    upgradeToUnlock: "बिज़नेस ब्रेन अनलॉक करने के लिए Starter में अपग्रेड करें →",
+                    starterRequired: "बिज़नेस ब्रेन {plan} और उससे ऊपर के प्लान पर उपलब्ध है।",
+                    upgradeToUnlock: "बिज़नेस ब्रेन अनलॉक करने के लिए {plan} में अपग्रेड करें →",
                     temporarilyUnavailable: "बिज़नेस इंटेलिजेंस अस्थायी रूप से अनुपलब्ध है। आपके सामान्य व्यवसाय उपकरण प्रभावित नहीं हैं।",
                     accuracyImproving: "हाल ही में पूर्वानुमान अधिक सटीक हो गए हैं।",
                     accuracyDeclining: "हाल के पूर्वानुमान पहले की तुलना में कम सटीक रहे हैं।",
@@ -7390,7 +7409,7 @@
                     copiedToClipboard: "{item} ক্লিপবোর্ডে কপি করা হয়েছে!", copyFailed: "{item} কপি করতে ব্যর্থ হয়েছে।",
                     signInToUseFeature: "{feature} অ্যাক্সেস করতে সাইন ইন করুন বা একটি ব্যবসা নিবন্ধন করুন।",
                     noRoleAccessToFeature: "আপনার {role} অ্যাকাউন্টের {feature}-এ অ্যাক্সেস নেই।",
-                    featureUpgradeRequired: "{feature} একটি AI-চালিত বৈশিষ্ট্য যা Starter এবং তার উপরে উপলব্ধ। এটি আনলক করতে আপগ্রেড করুন।",
+                    featureUpgradeRequired: "{feature} একটি AI-চালিত বৈশিষ্ট্য যা {plan} এবং তার উপরে উপলব্ধ। এটি আনলক করতে আপগ্রেড করুন।",
                     signedOutSuccess: "সফলভাবে সাইন আউট হয়েছে।", selectSupplier: "সরবরাহকারী নির্বাচন করুন", selectProduct: "পণ্য নির্বাচন করুন",
                     checkNow: "এখনই পরীক্ষা করুন", enterValidEmail: "অনুগ্রহ করে একটি বৈধ ইমেল ঠিকানা লিখুন।",
                     unableToConnect: "এই মুহূর্তে সংযোগ করা যাচ্ছে না। আপনার সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।",
@@ -7494,7 +7513,7 @@
                     geminiUnavailable: "Gemini মূল্য বিশ্লেষণ এই মুহূর্তে অনুপলব্ধ।",
                     geminiAdviceReady: "Gemini মূল্য নির্ধারণ পরামর্শ প্রস্তুত।",
                     suggestedPrices: "প্রস্তাবিত পাইকারি মূল্য: {wholesale} · প্রস্তাবিত খুচরা মূল্য: {retail}।",
-                    advisorStarterRequired: "AI মার্জিন পরামর্শদাতা Starter এবং তার উপরে উপলব্ধ।",
+                    advisorStarterRequired: "AI মার্জিন পরামর্শদাতা {plan} এবং তার উপরে উপলব্ধ।",
                     geminiTemporarilyUnavailable: "Gemini মূল্য বিশ্লেষণ সাময়িকভাবে অনুপলব্ধ। আপনি এখনও ম্যানুয়ালি আপনার মূল্য লিখতে পারেন।",
                 },
                 team: {
@@ -7560,8 +7579,8 @@
                     attentionCount: { one: "১টি বিষয় আপনার মনোযোগ প্রয়োজন।", other: "{count}টি বিষয় আপনার মনোযোগ প্রয়োজন।" },
                     noPriorities: "আপনার বর্তমান তথ্যে কোনো তাৎক্ষণিক অগ্রাধিকার পাওয়া যায়নি।",
                     keepRecording: "স্বাভাবিক বিক্রয় এবং ইনভেন্টরি কার্যকলাপ রেকর্ড করা চালিয়ে যান। প্রমাণ সমর্থন করলে Cauldra উপযোগী অগ্রাধিকার দেখাবে।",
-                    starterRequired: "বিজনেস ব্রেইন Starter এবং তার উপরে উপলব্ধ।",
-                    upgradeToUnlock: "বিজনেস ব্রেইন আনলক করতে Starter-এ আপগ্রেড করুন →",
+                    starterRequired: "বিজনেস ব্রেইন {plan} এবং তার উপরে উপলব্ধ।",
+                    upgradeToUnlock: "বিজনেস ব্রেইন আনলক করতে {plan}-এ আপগ্রেড করুন →",
                     temporarilyUnavailable: "ব্যবসায়িক বুদ্ধিমত্তা সাময়িকভাবে অনুপলব্ধ। আপনার স্বাভাবিক ব্যবসায়িক সরঞ্জামগুলি প্রভাবিত হয় না।",
                     accuracyImproving: "সম্প্রতি পূর্বাভাসগুলি আরও নির্ভুল হয়ে উঠেছে।",
                     accuracyDeclining: "সাম্প্রতিক পূর্বাভাসগুলি আগেরগুলির চেয়ে কম নির্ভুল হয়েছে।",
@@ -7802,7 +7821,7 @@
                     copiedToClipboard: "{item} imenakiliwa kwenye ubao wa kunakili!", copyFailed: "Imeshindwa kunakili {item}.",
                     signInToUseFeature: "Ingia au usajili biashara ili kufikia {feature}.",
                     noRoleAccessToFeature: "Akaunti yako ya {role} haina ufikiaji wa {feature}.",
-                    featureUpgradeRequired: "{feature} ni kipengele cha AI kinachopatikana kwenye mpango wa Starter na zaidi. Boresha ili kukifungua.",
+                    featureUpgradeRequired: "{feature} ni kipengele cha AI kinachopatikana kwenye mpango wa {plan} na zaidi. Boresha ili kukifungua.",
                     signedOutSuccess: "Umetoka kwa mafanikio.", selectSupplier: "Chagua msambazaji", selectProduct: "Chagua bidhaa",
                     checkNow: "Angalia sasa", enterValidEmail: "Tafadhali weka anwani sahihi ya barua pepe.",
                     unableToConnect: "Imeshindwa kuunganisha kwa sasa. Tafadhali angalia muunganisho wako na ujaribu tena.",
@@ -7906,7 +7925,7 @@
                     geminiUnavailable: "Uchambuzi wa bei wa Gemini hapatikani kwa sasa.",
                     geminiAdviceReady: "Ushauri wa bei wa Gemini uko tayari.",
                     suggestedPrices: "Bei ya jumla iliyopendekezwa: {wholesale} · Bei ya rejareja iliyopendekezwa: {retail}.",
-                    advisorStarterRequired: "Mshauri wa Faida wa AI unapatikana kwenye mpango wa Starter na zaidi.",
+                    advisorStarterRequired: "Mshauri wa Faida wa AI unapatikana kwenye mpango wa {plan} na zaidi.",
                     geminiTemporarilyUnavailable: "Uchambuzi wa bei wa Gemini hapatikani kwa muda. Bado unaweza kuweka bei yako kwa mkono.",
                 },
                 team: {
@@ -7972,8 +7991,8 @@
                     attentionCount: { one: "Jambo 1 linastahili tahadhari yako.", other: "Mambo {count} yanastahili tahadhari yako." },
                     noPriorities: "Hakuna vipaumbele vya haraka vilivyopatikana katika data yako ya sasa.",
                     keepRecording: "Endelea kurekodi mauzo ya kawaida na shughuli za hesabu. Cauldra itaonyesha vipaumbele muhimu wakati ushahidi unavyounga mkono.",
-                    starterRequired: "Business Brain inapatikana kwenye mpango wa Starter na zaidi.",
-                    upgradeToUnlock: "Boresha kwenda Starter ili kufungua Business Brain →",
+                    starterRequired: "Business Brain inapatikana kwenye mpango wa {plan} na zaidi.",
+                    upgradeToUnlock: "Boresha kwenda {plan} ili kufungua Business Brain →",
                     temporarilyUnavailable: "Akili ya biashara hapatikani kwa muda. Zana zako za kawaida za biashara hazijaathirika.",
                     accuracyImproving: "Utabiri umekuwa sahihi zaidi hivi karibuni.",
                     accuracyDeclining: "Utabiri wa hivi karibuni umekuwa sahihi kidogo kuliko wa awali.",
@@ -8214,7 +8233,7 @@
                     copiedToClipboard: "A ti dà {item} kọ́pì sí clipboard!", copyFailed: "Kíkọ́pì {item} kùnà.",
                     signInToUseFeature: "Wọlé tàbí forúkọsílẹ̀ iṣẹ́ kan láti wọlé sí {feature}.",
                     noRoleAccessToFeature: "Àkántì {role} rẹ kò ní ààyè sí {feature}.",
-                    featureUpgradeRequired: "{feature} jẹ́ ẹ̀yà AI tí ó wà lórí ètò Starter àti jù bẹ́ẹ̀ lọ. Ṣe àtúnṣe láti ṣí i sílẹ̀.",
+                    featureUpgradeRequired: "{feature} jẹ́ ẹ̀yà AI tí ó wà lórí ètò {plan} àti jù bẹ́ẹ̀ lọ. Ṣe àtúnṣe láti ṣí i sílẹ̀.",
                     signedOutSuccess: "A ti jáde ní àṣeyọrí.", selectSupplier: "Yan olùpèsè", selectProduct: "Yan ọjà",
                     checkNow: "Ṣàyẹ̀wò báyìí", enterValidEmail: "Jọ̀wọ́ tẹ àdírẹ́ẹ̀sì ìmeèlì tí ó tọ́ sí i.",
                     unableToConnect: "A kò lè sopọ̀ lọ́wọ́lọ́wọ́. Jọ̀wọ́ ṣàyẹ̀wò ìsopọ̀ rẹ kí o sì tún gbìyànjú.",
@@ -8318,7 +8337,7 @@
                     geminiUnavailable: "Ìtúpalẹ̀ owó Gemini kò sí lọ́wọ́lọ́wọ́.",
                     geminiAdviceReady: "Àbá owó Gemini ti ṣetán.",
                     suggestedPrices: "Owó ìtajà pọ̀ tí a dábàá: {wholesale} · Owó títà tí a dábàá: {retail}.",
-                    advisorStarterRequired: "Olùdámọ̀ràn Èrè AI wà lórí ètò Starter àti jù bẹ́ẹ̀ lọ.",
+                    advisorStarterRequired: "Olùdámọ̀ràn Èrè AI wà lórí ètò {plan} àti jù bẹ́ẹ̀ lọ.",
                     geminiTemporarilyUnavailable: "Ìtúpalẹ̀ owó Gemini kò sí fún ìgbà díẹ̀. O lè tẹ owó rẹ sí i pẹ̀lú ọwọ́ síbẹ̀.",
                 },
                 team: {
@@ -8384,8 +8403,8 @@
                     attentionCount: { one: "Ohun kan yẹ kí o kíyèsí.", other: "Ohun {count} yẹ kí o kíyèsí." },
                     noPriorities: "A kò rí àyọ́nda kánkán nínú dátà rẹ lọ́wọ́lọ́wọ́.",
                     keepRecording: "Máa ṣàkọsílẹ̀ títà àti ìgbòkègbodò ọjà lásán. Cauldra yóò fi àyọ́nda tí ó wúlò hàn nígbà tí ẹ̀rí bá ti tó.",
-                    starterRequired: "Business Brain wà lórí ètò Starter àti jù bẹ́ẹ̀ lọ.",
-                    upgradeToUnlock: "Ṣe àtúnṣe sí Starter láti ṣí Business Brain sílẹ̀ →",
+                    starterRequired: "Business Brain wà lórí ètò {plan} àti jù bẹ́ẹ̀ lọ.",
+                    upgradeToUnlock: "Ṣe àtúnṣe sí {plan} láti ṣí Business Brain sílẹ̀ →",
                     temporarilyUnavailable: "Ọgbọ́n iṣẹ́ kò sí fún ìgbà díẹ̀. Àwọn ohun èlò iṣẹ́ rẹ lásán kò kan.",
                     accuracyImproving: "Àwọn àsọtẹ́lẹ̀ ti túbọ̀ dára síi láìpẹ́.",
                     accuracyDeclining: "Àwọn àsọtẹ́lẹ̀ láìpẹ́ ti dín kù ní ìpéye ju àwọn tí ó ṣáájú lọ.",
@@ -8626,7 +8645,7 @@
                     copiedToClipboard: "Edepụtala {item} n'clipboard!", copyFailed: "Ọ dara mgbe a na-edepụta {item}.",
                     signInToUseFeature: "Banye ma ọ bụ debanye azụmahịa iji nweta {feature}.",
                     noRoleAccessToFeature: "Akaụntụ {role} gị enweghị ohere ịbanye {feature}.",
-                    featureUpgradeRequired: "{feature} bụ atụmatụ AI dị na Starter na ndị dị elu. Melite iji mepee ya.",
+                    featureUpgradeRequired: "{feature} bụ atụmatụ AI dị na {plan} na ndị dị elu. Melite iji mepee ya.",
                     signedOutSuccess: "Ị pụọla nke ọma.", selectSupplier: "Họrọ onye na-ebubata", selectProduct: "Họrọ ngwaahịa",
                     checkNow: "Lelee ugbu a", enterValidEmail: "Biko tinye adreesị email ziri ezi.",
                     unableToConnect: "Enweghị ike ijikọ ugbu a. Biko lelee njikọ gị ma nwaa ọzọ.",
@@ -8730,7 +8749,7 @@
                     geminiUnavailable: "Enweghị nyocha ọnụ ahịa Gemini ugbu a.",
                     geminiAdviceReady: "Ndụmọdụ ọnụ ahịa Gemini dị njikere.",
                     suggestedPrices: "Ọnụ ahịa mgbatọ a tụrụ aro: {wholesale} · Ọnụ ahịa ere a tụrụ aro: {retail}.",
-                    advisorStarterRequired: "Onye ndụmọdụ Uru AI dị na Starter na ndị dị elu.",
+                    advisorStarterRequired: "Onye ndụmọdụ Uru AI dị na {plan} na ndị dị elu.",
                     geminiTemporarilyUnavailable: "Enweghị nyocha ọnụ ahịa Gemini nwa oge. Ị nwere ike ịtinye ọnụ ahịa gị n'aka gị.",
                 },
                 team: {
@@ -8796,8 +8815,8 @@
                     attentionCount: { one: "Ihe 1 kwesịrị ntị gị.", other: "Ihe {count} kwesịrị ntị gị." },
                     noPriorities: "Ahụghị ihe mbụ ọ bụla na data gị ugbu a.",
                     keepRecording: "Gaa n'ihu na-edekọ ahịa na omume ngwongwo nkịtị. Cauldra ga-egosi ihe mbụ bara uru mgbe akaebe kwadoro ya.",
-                    starterRequired: "Business Brain dị na Starter na ndị dị elu.",
-                    upgradeToUnlock: "Melite na Starter iji mepee Business Brain →",
+                    starterRequired: "Business Brain dị na {plan} na ndị dị elu.",
+                    upgradeToUnlock: "Melite na {plan} iji mepee Business Brain →",
                     temporarilyUnavailable: "Ọgụgụ isi azụmahịa adịghị nwa oge. Ngwá ọrụ azụmahịa gị nkịtị anaghị emetụta.",
                     accuracyImproving: "Amụma abịala nnọọ ka ziri ezi n'oge na-adịbeghị anya.",
                     accuracyDeclining: "Amụma na-adịbeghị anya adịla ntakịrị ziri ezi karịa nke mbụ.",
@@ -9038,7 +9057,7 @@
                     copiedToClipboard: "An kwafi {item} zuwa allo!", copyFailed: "An kasa kwafi {item}.",
                     signInToUseFeature: "Ka shiga ko ka yi rijistar kasuwanci don samun {feature}.",
                     noRoleAccessToFeature: "Asusun {role} naka ba shi da damar shiga {feature}.",
-                    featureUpgradeRequired: "{feature} fasaha ce ta AI da ake samu daga tsarin Starter zuwa sama. Ka inganta don buɗe ta.",
+                    featureUpgradeRequired: "{feature} fasaha ce ta AI da ake samu daga tsarin {plan} zuwa sama. Ka inganta don buɗe ta.",
                     signedOutSuccess: "An fita cikin nasara.", selectSupplier: "Zaɓi mai kaya", selectProduct: "Zaɓi kaya",
                     checkNow: "Duba yanzu", enterValidEmail: "Da fatan za a shigar da adireshin imel mai inganci.",
                     unableToConnect: "An kasa haɗawa a yanzu. Da fatan za a duba haɗin ku sannan a sake gwadawa.",
@@ -9142,7 +9161,7 @@
                     geminiUnavailable: "Nazarin farashi na Gemini ba ya samuwa a yanzu.",
                     geminiAdviceReady: "Shawarar farashi ta Gemini a shirye take.",
                     suggestedPrices: "Farashin sayarwa mai yawa da aka bayar: {wholesale} · Farashin siyarwa da aka bayar: {retail}.",
-                    advisorStarterRequired: "Mai Ba da Shawarar Riba na AI yana samuwa daga tsarin Starter zuwa sama.",
+                    advisorStarterRequired: "Mai Ba da Shawarar Riba na AI yana samuwa daga tsarin {plan} zuwa sama.",
                     geminiTemporarilyUnavailable: "Nazarin farashi na Gemini ba ya samuwa na ɗan lokaci. Har yanzu za ku iya shigar da farashinku da hannu.",
                 },
                 team: {
@@ -9208,8 +9227,8 @@
                     attentionCount: { one: "Abu 1 ya cancanci kulawarku.", other: "Abubuwa {count} sun cancanci kulawarku." },
                     noPriorities: "Ba a sami wata muhimmiyar fifiko a bayananku na yanzu ba.",
                     keepRecording: "Ci gaba da rubuta sayarwa da ayyukan kaya na yau da kullun. Cauldra za ta nuna fifikon amfani lokacin da hujja ta tallafa.",
-                    starterRequired: "Business Brain yana samuwa daga tsarin Starter zuwa sama.",
-                    upgradeToUnlock: "Ka inganta zuwa Starter don buɗe Business Brain →",
+                    starterRequired: "Business Brain yana samuwa daga tsarin {plan} zuwa sama.",
+                    upgradeToUnlock: "Ka inganta zuwa {plan} don buɗe Business Brain →",
                     temporarilyUnavailable: "Basirar kasuwanci ba ta samuwa na ɗan lokaci. Kayan aikin kasuwancinku na yau da kullun ba su shafa ba.",
                     accuracyImproving: "Hasashe sun ƙara zama daidai kwanan nan.",
                     accuracyDeclining: "Hasashen kwanan nan sun kasance ƙasa da daidai fiye da na baya.",
@@ -9450,7 +9469,7 @@
                     copiedToClipboard: "{item} скопійовано в буфер обміну!", copyFailed: "Не вдалося скопіювати {item}.",
                     signInToUseFeature: "Увійдіть або зареєструйте бізнес, щоб отримати доступ до {feature}.",
                     noRoleAccessToFeature: "Ваш обліковий запис {role} не має доступу до {feature}.",
-                    featureUpgradeRequired: "{feature} — це функція на основі ШІ, доступна на тарифі Starter і вище. Покращте тариф, щоб розблокувати її.",
+                    featureUpgradeRequired: "{feature} — це функція на основі ШІ, доступна на тарифі {plan} і вище. Покращте тариф, щоб розблокувати її.",
                     signedOutSuccess: "Вихід виконано успішно.", selectSupplier: "Виберіть постачальника", selectProduct: "Виберіть товар",
                     checkNow: "Перевірити зараз", enterValidEmail: "Будь ласка, введіть дійсну адресу електронної пошти.",
                     unableToConnect: "Не вдалося підключитися зараз. Перевірте з'єднання та спробуйте ще раз.",
@@ -9554,7 +9573,7 @@
                     geminiUnavailable: "Аналіз цін Gemini наразі недоступний.",
                     geminiAdviceReady: "Рекомендація щодо ціни від Gemini готова.",
                     suggestedPrices: "Рекомендована оптова ціна: {wholesale} · Рекомендована роздрібна ціна: {retail}.",
-                    advisorStarterRequired: "Радник з маржі на основі ШІ доступний на тарифі Starter і вище.",
+                    advisorStarterRequired: "Радник з маржі на основі ШІ доступний на тарифі {plan} і вище.",
                     geminiTemporarilyUnavailable: "Аналіз цін Gemini тимчасово недоступний. Ви можете ввести ціну вручну.",
                 },
                 team: {
@@ -9620,8 +9639,8 @@
                     attentionCount: { one: "1 пункт заслуговує на вашу увагу.", other: "{count} пунктів заслуговують на вашу увагу." },
                     noPriorities: "У ваших поточних даних не знайдено термінових пріоритетів.",
                     keepRecording: "Продовжуйте записувати звичайні продажі та активність інвентаря. Cauldra покаже корисні пріоритети, коли з'являться достатні докази.",
-                    starterRequired: "Business Brain доступний на тарифі Starter і вище.",
-                    upgradeToUnlock: "Покращте до Starter, щоб розблокувати Business Brain →",
+                    starterRequired: "Business Brain доступний на тарифі {plan} і вище.",
+                    upgradeToUnlock: "Покращте до {plan}, щоб розблокувати Business Brain →",
                     temporarilyUnavailable: "Бізнес-аналітика тимчасово недоступна. Ваші звичайні бізнес-інструменти не постраждали.",
                     accuracyImproving: "Прогнози стали точнішими останнім часом.",
                     accuracyDeclining: "Останні прогнози були менш точними, ніж попередні.",
@@ -9862,7 +9881,7 @@
                     copiedToClipboard: "Skopiowano {item} do schowka!", copyFailed: "Nie udało się skopiować {item}.",
                     signInToUseFeature: "Zaloguj się lub zarejestruj firmę, aby uzyskać dostęp do {feature}.",
                     noRoleAccessToFeature: "Twoje konto {role} nie ma dostępu do {feature}.",
-                    featureUpgradeRequired: "{feature} to funkcja oparta na AI dostępna od planu Starter wzwyż. Ulepsz plan, aby ją odblokować.",
+                    featureUpgradeRequired: "{feature} to funkcja oparta na AI dostępna od planu {plan} wzwyż. Ulepsz plan, aby ją odblokować.",
                     signedOutSuccess: "Wylogowano pomyślnie.", selectSupplier: "Wybierz dostawcę", selectProduct: "Wybierz produkt",
                     checkNow: "Sprawdź teraz", enterValidEmail: "Wprowadź prawidłowy adres e-mail.",
                     unableToConnect: "Nie można teraz połączyć. Sprawdź połączenie i spróbuj ponownie.",
@@ -9966,7 +9985,7 @@
                     geminiUnavailable: "Analiza cen Gemini jest obecnie niedostępna.",
                     geminiAdviceReady: "Rekomendacja cenowa Gemini gotowa.",
                     suggestedPrices: "Sugerowana cena hurtowa: {wholesale} · Sugerowana cena detaliczna: {retail}.",
-                    advisorStarterRequired: "Doradca marży AI jest dostępny od planu Starter wzwyż.",
+                    advisorStarterRequired: "Doradca marży AI jest dostępny od planu {plan} wzwyż.",
                     geminiTemporarilyUnavailable: "Analiza cen Gemini jest tymczasowo niedostępna. Nadal możesz wprowadzić cenę ręcznie.",
                 },
                 team: {
@@ -10032,8 +10051,8 @@
                     attentionCount: { one: "1 sprawa zasługuje na Twoją uwagę.", other: "{count} spraw zasługuje na Twoją uwagę." },
                     noPriorities: "Nie znaleziono pilnych priorytetów w Twoich aktualnych danych.",
                     keepRecording: "Kontynuuj rejestrowanie normalnej sprzedaży i aktywności magazynowej. Cauldra pokaże przydatne priorytety, gdy dowody będą wystarczające.",
-                    starterRequired: "Business Brain jest dostępny od planu Starter wzwyż.",
-                    upgradeToUnlock: "Ulepsz do Starter, aby odblokować Business Brain →",
+                    starterRequired: "Business Brain jest dostępny od planu {plan} wzwyż.",
+                    upgradeToUnlock: "Ulepsz do {plan}, aby odblokować Business Brain →",
                     temporarilyUnavailable: "Analityka biznesowa jest tymczasowo niedostępna. Twoje zwykłe narzędzia biznesowe nie są dotknięte.",
                     accuracyImproving: "Prognozy stały się ostatnio dokładniejsze.",
                     accuracyDeclining: "Ostatnie prognozy były mniej dokładne niż wcześniejsze.",
@@ -10274,7 +10293,7 @@
                     copiedToClipboard: "Đã sao chép {item} vào bộ nhớ tạm!", copyFailed: "Sao chép {item} thất bại.",
                     signInToUseFeature: "Đăng nhập hoặc đăng ký doanh nghiệp để truy cập {feature}.",
                     noRoleAccessToFeature: "Tài khoản {role} của bạn không có quyền truy cập {feature}.",
-                    featureUpgradeRequired: "{feature} là tính năng AI có sẵn từ gói Starter trở lên. Hãy nâng cấp để mở khóa.",
+                    featureUpgradeRequired: "{feature} là tính năng AI có sẵn từ gói {plan} trở lên. Hãy nâng cấp để mở khóa.",
                     signedOutSuccess: "Đã đăng xuất thành công.", selectSupplier: "Chọn nhà cung cấp", selectProduct: "Chọn sản phẩm",
                     checkNow: "Kiểm tra ngay", enterValidEmail: "Vui lòng nhập địa chỉ email hợp lệ.",
                     unableToConnect: "Không thể kết nối lúc này. Vui lòng kiểm tra kết nối và thử lại.",
@@ -10378,7 +10397,7 @@
                     geminiUnavailable: "Phân tích giá của Gemini hiện không khả dụng.",
                     geminiAdviceReady: "Đề xuất giá từ Gemini đã sẵn sàng.",
                     suggestedPrices: "Giá bán buôn đề xuất: {wholesale} · Giá bán lẻ đề xuất: {retail}.",
-                    advisorStarterRequired: "Cố Vấn Biên Lợi Nhuận AI có sẵn từ gói Starter trở lên.",
+                    advisorStarterRequired: "Cố Vấn Biên Lợi Nhuận AI có sẵn từ gói {plan} trở lên.",
                     geminiTemporarilyUnavailable: "Phân tích giá của Gemini tạm thời không khả dụng. Bạn vẫn có thể nhập giá thủ công.",
                 },
                 team: {
@@ -10444,8 +10463,8 @@
                     attentionCount: { one: "1 điều đáng được bạn chú ý.", other: "{count} điều đáng được bạn chú ý." },
                     noPriorities: "Không tìm thấy ưu tiên khẩn cấp nào trong dữ liệu hiện tại của bạn.",
                     keepRecording: "Tiếp tục ghi nhận hoạt động bán hàng và tồn kho bình thường. Cauldra sẽ hiển thị các ưu tiên hữu ích khi có đủ bằng chứng.",
-                    starterRequired: "Business Brain có sẵn từ gói Starter trở lên.",
-                    upgradeToUnlock: "Nâng cấp lên Starter để mở khóa Business Brain →",
+                    starterRequired: "Business Brain có sẵn từ gói {plan} trở lên.",
+                    upgradeToUnlock: "Nâng cấp lên {plan} để mở khóa Business Brain →",
                     temporarilyUnavailable: "Trí tuệ kinh doanh tạm thời không khả dụng. Các công cụ kinh doanh thông thường của bạn không bị ảnh hưởng.",
                     accuracyImproving: "Các dự đoán đã trở nên chính xác hơn gần đây.",
                     accuracyDeclining: "Các dự đoán gần đây kém chính xác hơn so với trước đó.",
@@ -10686,7 +10705,7 @@
                     copiedToClipboard: "คัดลอก {item} ไปยังคลิปบอร์ดแล้ว!", copyFailed: "คัดลอก {item} ไม่สำเร็จ",
                     signInToUseFeature: "เข้าสู่ระบบหรือลงทะเบียนธุรกิจเพื่อเข้าถึง {feature}",
                     noRoleAccessToFeature: "บัญชี {role} ของคุณไม่มีสิทธิ์เข้าถึง {feature}",
-                    featureUpgradeRequired: "{feature} เป็นฟีเจอร์ AI ที่ใช้ได้ตั้งแต่แพ็กเกจ Starter ขึ้นไป อัปเกรดเพื่อปลดล็อก",
+                    featureUpgradeRequired: "{feature} เป็นฟีเจอร์ AI ที่ใช้ได้ตั้งแต่แพ็กเกจ {plan} ขึ้นไป อัปเกรดเพื่อปลดล็อก",
                     signedOutSuccess: "ออกจากระบบสำเร็จ", selectSupplier: "เลือกซัพพลายเออร์", selectProduct: "เลือกสินค้า",
                     checkNow: "ตรวจสอบตอนนี้", enterValidEmail: "กรุณากรอกที่อยู่อีเมลที่ถูกต้อง",
                     unableToConnect: "ไม่สามารถเชื่อมต่อได้ในขณะนี้ กรุณาตรวจสอบการเชื่อมต่อแล้วลองอีกครั้ง",
@@ -10790,7 +10809,7 @@
                     geminiUnavailable: "การวิเคราะห์ราคาของ Gemini ไม่พร้อมใช้งานในขณะนี้",
                     geminiAdviceReady: "คำแนะนำราคาจาก Gemini พร้อมแล้ว",
                     suggestedPrices: "ราคาขายส่งที่แนะนำ: {wholesale} · ราคาขายปลีกที่แนะนำ: {retail}",
-                    advisorStarterRequired: "ที่ปรึกษากำไร AI มีให้ใช้ตั้งแต่แพ็กเกจ Starter ขึ้นไป",
+                    advisorStarterRequired: "ที่ปรึกษากำไร AI มีให้ใช้ตั้งแต่แพ็กเกจ {plan} ขึ้นไป",
                     geminiTemporarilyUnavailable: "การวิเคราะห์ราคาของ Gemini ไม่พร้อมใช้งานชั่วคราว คุณยังคงกรอกราคาด้วยตนเองได้",
                 },
                 team: {
@@ -10856,8 +10875,8 @@
                     attentionCount: { one: "1 รายการควรได้รับความสนใจของคุณ", other: "{count} รายการควรได้รับความสนใจของคุณ" },
                     noPriorities: "ไม่พบลำดับความสำคัญเร่งด่วนในข้อมูลปัจจุบันของคุณ",
                     keepRecording: "บันทึกยอดขายและกิจกรรมสินค้าคงคลังตามปกติต่อไป Cauldra จะแสดงลำดับความสำคัญที่เป็นประโยชน์เมื่อมีหลักฐานสนับสนุนเพียงพอ",
-                    starterRequired: "Business Brain มีให้ใช้ตั้งแต่แพ็กเกจ Starter ขึ้นไป",
-                    upgradeToUnlock: "อัปเกรดเป็น Starter เพื่อปลดล็อก Business Brain →",
+                    starterRequired: "Business Brain มีให้ใช้ตั้งแต่แพ็กเกจ {plan} ขึ้นไป",
+                    upgradeToUnlock: "อัปเกรดเป็น {plan} เพื่อปลดล็อก Business Brain →",
                     temporarilyUnavailable: "ระบบวิเคราะห์ธุรกิจไม่พร้อมใช้งานชั่วคราว เครื่องมือทางธุรกิจปกติของคุณไม่ได้รับผลกระทบ",
                     accuracyImproving: "การคาดการณ์มีความแม่นยำมากขึ้นเมื่อเร็ว ๆ นี้",
                     accuracyDeclining: "การคาดการณ์ล่าสุดมีความแม่นยำน้อยกว่าครั้งก่อน ๆ",
@@ -11098,7 +11117,7 @@
                     copiedToClipboard: "{item} disalin ke clipboard!", copyFailed: "Gagal menyalin {item}.",
                     signInToUseFeature: "Masuk atau daftarkan bisnis untuk mengakses {feature}.",
                     noRoleAccessToFeature: "Akun {role} Anda tidak memiliki akses ke {feature}.",
-                    featureUpgradeRequired: "{feature} adalah fitur bertenaga AI yang tersedia mulai paket Starter ke atas. Tingkatkan untuk membukanya.",
+                    featureUpgradeRequired: "{feature} adalah fitur bertenaga AI yang tersedia mulai paket {plan} ke atas. Tingkatkan untuk membukanya.",
                     signedOutSuccess: "Berhasil keluar.", selectSupplier: "Pilih pemasok", selectProduct: "Pilih produk",
                     checkNow: "Periksa sekarang", enterValidEmail: "Silakan masukkan alamat email yang valid.",
                     unableToConnect: "Tidak dapat terhubung saat ini. Periksa koneksi Anda dan coba lagi.",
@@ -11202,7 +11221,7 @@
                     geminiUnavailable: "Analisis harga Gemini saat ini tidak tersedia.",
                     geminiAdviceReady: "Rekomendasi harga Gemini siap.",
                     suggestedPrices: "Harga grosir yang disarankan: {wholesale} · Harga eceran yang disarankan: {retail}.",
-                    advisorStarterRequired: "Penasihat Margin AI tersedia mulai paket Starter ke atas.",
+                    advisorStarterRequired: "Penasihat Margin AI tersedia mulai paket {plan} ke atas.",
                     geminiTemporarilyUnavailable: "Analisis harga Gemini sementara tidak tersedia. Anda tetap dapat memasukkan harga secara manual.",
                 },
                 team: {
@@ -11268,8 +11287,8 @@
                     attentionCount: { one: "1 hal layak mendapat perhatian Anda.", other: "{count} hal layak mendapat perhatian Anda." },
                     noPriorities: "Tidak ada prioritas mendesak yang ditemukan dalam data Anda saat ini.",
                     keepRecording: "Terus catat aktivitas penjualan dan inventaris normal. Cauldra akan menampilkan prioritas yang berguna ketika bukti mendukungnya.",
-                    starterRequired: "Business Brain tersedia mulai paket Starter ke atas.",
-                    upgradeToUnlock: "Tingkatkan ke Starter untuk membuka Business Brain →",
+                    starterRequired: "Business Brain tersedia mulai paket {plan} ke atas.",
+                    upgradeToUnlock: "Tingkatkan ke {plan} untuk membuka Business Brain →",
                     temporarilyUnavailable: "Kecerdasan bisnis sementara tidak tersedia. Alat bisnis normal Anda tidak terpengaruh.",
                     accuracyImproving: "Prediksi menjadi lebih akurat akhir-akhir ini.",
                     accuracyDeclining: "Prediksi terbaru kurang akurat dibandingkan sebelumnya.",
@@ -11510,7 +11529,7 @@
                     copiedToClipboard: "{item} disalin ke papan keratan!", copyFailed: "Gagal menyalin {item}.",
                     signInToUseFeature: "Log masuk atau daftarkan perniagaan untuk mengakses {feature}.",
                     noRoleAccessToFeature: "Akaun {role} anda tidak mempunyai akses kepada {feature}.",
-                    featureUpgradeRequired: "{feature} ialah ciri berkuasa AI yang tersedia dari pelan Starter ke atas. Naik taraf untuk membukanya.",
+                    featureUpgradeRequired: "{feature} ialah ciri berkuasa AI yang tersedia dari pelan {plan} ke atas. Naik taraf untuk membukanya.",
                     signedOutSuccess: "Berjaya log keluar.", selectSupplier: "Pilih pembekal", selectProduct: "Pilih produk",
                     checkNow: "Semak sekarang", enterValidEmail: "Sila masukkan alamat e-mel yang sah.",
                     unableToConnect: "Tidak dapat menyambung sekarang. Sila semak sambungan anda dan cuba lagi.",
@@ -11614,7 +11633,7 @@
                     geminiUnavailable: "Analisis harga Gemini tidak tersedia sekarang.",
                     geminiAdviceReady: "Cadangan harga Gemini sedia.",
                     suggestedPrices: "Harga borong yang dicadangkan: {wholesale} · Harga runcit yang dicadangkan: {retail}.",
-                    advisorStarterRequired: "Penasihat Margin AI tersedia dari pelan Starter ke atas.",
+                    advisorStarterRequired: "Penasihat Margin AI tersedia dari pelan {plan} ke atas.",
                     geminiTemporarilyUnavailable: "Analisis harga Gemini tidak tersedia buat sementara waktu. Anda masih boleh memasukkan harga secara manual.",
                 },
                 team: {
@@ -11680,8 +11699,8 @@
                     attentionCount: { one: "1 perkara patut mendapat perhatian anda.", other: "{count} perkara patut mendapat perhatian anda." },
                     noPriorities: "Tiada keutamaan segera ditemui dalam data semasa anda.",
                     keepRecording: "Teruskan merekod jualan biasa dan aktiviti inventori. Cauldra akan menunjukkan keutamaan berguna apabila bukti menyokongnya.",
-                    starterRequired: "Business Brain tersedia dari pelan Starter ke atas.",
-                    upgradeToUnlock: "Naik taraf ke Starter untuk membuka kunci Business Brain →",
+                    starterRequired: "Business Brain tersedia dari pelan {plan} ke atas.",
+                    upgradeToUnlock: "Naik taraf ke {plan} untuk membuka kunci Business Brain →",
                     temporarilyUnavailable: "Kecerdasan perniagaan tidak tersedia buat sementara waktu. Alat perniagaan biasa anda tidak terjejas.",
                     accuracyImproving: "Ramalan menjadi lebih tepat baru-baru ini.",
                     accuracyDeclining: "Ramalan terkini kurang tepat berbanding sebelumnya.",
@@ -11922,7 +11941,7 @@
                     copiedToClipboard: "{item} در کلیپ‌بورد کپی شد!", copyFailed: "کپی {item} ناموفق بود.",
                     signInToUseFeature: "برای دسترسی به {feature} وارد شوید یا یک کسب‌وکار ثبت کنید.",
                     noRoleAccessToFeature: "حساب {role} شما دسترسی به {feature} ندارد.",
-                    featureUpgradeRequired: "{feature} یک ویژگی مبتنی بر هوش مصنوعی است که از طرح Starter به بالا در دسترس است. برای باز کردن آن ارتقا دهید.",
+                    featureUpgradeRequired: "{feature} یک ویژگی مبتنی بر هوش مصنوعی است که از طرح {plan} به بالا در دسترس است. برای باز کردن آن ارتقا دهید.",
                     signedOutSuccess: "با موفقیت خارج شدید.", selectSupplier: "انتخاب تأمین‌کننده", selectProduct: "انتخاب محصول",
                     checkNow: "اکنون بررسی کنید", enterValidEmail: "لطفاً یک آدرس ایمیل معتبر وارد کنید.",
                     unableToConnect: "در حال حاضر امکان اتصال وجود ندارد. لطفاً اتصال خود را بررسی کرده و دوباره امتحان کنید.",
@@ -12026,7 +12045,7 @@
                     geminiUnavailable: "تحلیل قیمت Gemini در حال حاضر در دسترس نیست.",
                     geminiAdviceReady: "پیشنهاد قیمت Gemini آماده است.",
                     suggestedPrices: "قیمت عمده‌فروشی پیشنهادی: {wholesale} · قیمت خرده‌فروشی پیشنهادی: {retail}.",
-                    advisorStarterRequired: "مشاور حاشیه سود هوش مصنوعی از طرح Starter به بالا در دسترس است.",
+                    advisorStarterRequired: "مشاور حاشیه سود هوش مصنوعی از طرح {plan} به بالا در دسترس است.",
                     geminiTemporarilyUnavailable: "تحلیل قیمت Gemini به‌طور موقت در دسترس نیست. شما همچنان می‌توانید قیمت را به‌صورت دستی وارد کنید.",
                 },
                 team: {
@@ -12092,8 +12111,8 @@
                     attentionCount: { one: "۱ مورد شایسته توجه شماست.", other: "{count} مورد شایسته توجه شماست." },
                     noPriorities: "هیچ اولویت فوری در داده‌های فعلی شما یافت نشد.",
                     keepRecording: "به ثبت فروش عادی و فعالیت موجودی ادامه دهید. Cauldra زمانی که شواهد کافی وجود داشته باشد، اولویت‌های مفید را نشان خواهد داد.",
-                    starterRequired: "Business Brain از طرح Starter به بالا در دسترس است.",
-                    upgradeToUnlock: "برای باز کردن Business Brain به Starter ارتقا دهید ←",
+                    starterRequired: "Business Brain از طرح {plan} به بالا در دسترس است.",
+                    upgradeToUnlock: "برای باز کردن Business Brain به {plan} ارتقا دهید ←",
                     temporarilyUnavailable: "هوش تجاری به‌طور موقت در دسترس نیست. ابزارهای عادی کسب‌وکار شما تحت تأثیر قرار نگرفته‌اند.",
                     accuracyImproving: "پیش‌بینی‌ها اخیراً دقیق‌تر شده‌اند.",
                     accuracyDeclining: "پیش‌بینی‌های اخیر نسبت به پیش‌بینی‌های قبلی دقت کمتری داشته‌اند.",
@@ -12334,7 +12353,7 @@
                     copiedToClipboard: "{item} הועתק ללוח!", copyFailed: "העתקת {item} נכשלה.",
                     signInToUseFeature: "היכנס או רשום עסק כדי לגשת אל {feature}.",
                     noRoleAccessToFeature: "לחשבון {role} שלך אין גישה אל {feature}.",
-                    featureUpgradeRequired: "{feature} היא תכונה מבוססת בינה מלאכותית הזמינה החל מחבילת Starter ומעלה. שדרג כדי לפתוח אותה.",
+                    featureUpgradeRequired: "{feature} היא תכונה מבוססת בינה מלאכותית הזמינה החל מחבילת {plan} ומעלה. שדרג כדי לפתוח אותה.",
                     signedOutSuccess: "התנתקת בהצלחה.", selectSupplier: "בחר ספק", selectProduct: "בחר מוצר",
                     checkNow: "בדוק עכשיו", enterValidEmail: "אנא הזן כתובת אימייל תקינה.",
                     unableToConnect: "לא ניתן להתחבר כרגע. בדוק את החיבור שלך ונסה שוב.",
@@ -12438,7 +12457,7 @@
                     geminiUnavailable: "ניתוח התמחור של Gemini אינו זמין כרגע.",
                     geminiAdviceReady: "המלצת התמחור של Gemini מוכנה.",
                     suggestedPrices: "מחיר סיטונאי מומלץ: {wholesale} · מחיר קמעונאי מומלץ: {retail}.",
-                    advisorStarterRequired: "יועץ הרווחיות מבוסס הבינה המלאכותית זמין החל מחבילת Starter ומעלה.",
+                    advisorStarterRequired: "יועץ הרווחיות מבוסס הבינה המלאכותית זמין החל מחבילת {plan} ומעלה.",
                     geminiTemporarilyUnavailable: "ניתוח התמחור של Gemini אינו זמין באופן זמני. עדיין ניתן להזין את המחיר ידנית.",
                 },
                 team: {
@@ -12504,8 +12523,8 @@
                     attentionCount: { one: "פריט אחד ראוי לתשומת ליבך.", other: "{count} פריטים ראויים לתשומת ליבך." },
                     noPriorities: "לא נמצאו עדיפויות דחופות בנתונים הנוכחיים שלך.",
                     keepRecording: "המשך לתעד מכירות ופעילות מלאי רגילות. Cauldra תציג עדיפויות שימושיות כאשר הראיות יתמכו בכך.",
-                    starterRequired: "Business Brain זמין החל מחבילת Starter ומעלה.",
-                    upgradeToUnlock: "שדרג ל-Starter כדי לפתוח את Business Brain ←",
+                    starterRequired: "Business Brain זמין החל מחבילת {plan} ומעלה.",
+                    upgradeToUnlock: "שדרג ל-{plan} כדי לפתוח את Business Brain ←",
                     temporarilyUnavailable: "בינת העסקים אינה זמינה באופן זמני. כלי העסק הרגילים שלך אינם מושפעים.",
                     accuracyImproving: "התחזיות נעשו מדויקות יותר לאחרונה.",
                     accuracyDeclining: "התחזיות האחרונות היו פחות מדויקות מהקודמות.",
@@ -12746,7 +12765,7 @@
                     copiedToClipboard: "{item} a fost copiat în clipboard!", copyFailed: "Copierea {item} a eșuat.",
                     signInToUseFeature: "Conectați-vă sau înregistrați o afacere pentru a accesa {feature}.",
                     noRoleAccessToFeature: "Contul dvs. de {role} nu are acces la {feature}.",
-                    featureUpgradeRequired: "{feature} este o funcție bazată pe IA disponibilă începând cu planul Starter. Faceți upgrade pentru a o debloca.",
+                    featureUpgradeRequired: "{feature} este o funcție bazată pe IA disponibilă începând cu planul {plan}. Faceți upgrade pentru a o debloca.",
                     signedOutSuccess: "V-ați deconectat cu succes.", selectSupplier: "Selectați furnizorul", selectProduct: "Selectați produsul",
                     checkNow: "Verificați acum", enterValidEmail: "Vă rugăm să introduceți o adresă de e-mail validă.",
                     unableToConnect: "Nu se poate conecta acum. Verificați conexiunea și încercați din nou.",
@@ -12850,7 +12869,7 @@
                     geminiUnavailable: "Analiza prețurilor Gemini nu este disponibilă în prezent.",
                     geminiAdviceReady: "Recomandarea de preț Gemini este gata.",
                     suggestedPrices: "Preț angro sugerat: {wholesale} · Preț cu amănuntul sugerat: {retail}.",
-                    advisorStarterRequired: "Consilierul de marjă IA este disponibil începând cu planul Starter.",
+                    advisorStarterRequired: "Consilierul de marjă IA este disponibil începând cu planul {plan}.",
                     geminiTemporarilyUnavailable: "Analiza prețurilor Gemini este temporar indisponibilă. Puteți introduce în continuare prețul manual.",
                 },
                 team: {
@@ -12916,8 +12935,8 @@
                     attentionCount: { one: "1 lucru merită atenția dvs.", other: "{count} lucruri merită atenția dvs." },
                     noPriorities: "Nu au fost găsite priorități imediate în datele dvs. curente.",
                     keepRecording: "Continuați să înregistrați vânzările și activitatea de inventar normală. Cauldra va afișa priorități utile atunci când dovezile le susțin.",
-                    starterRequired: "Business Brain este disponibil începând cu planul Starter.",
-                    upgradeToUnlock: "Faceți upgrade la Starter pentru a debloca Business Brain →",
+                    starterRequired: "Business Brain este disponibil începând cu planul {plan}.",
+                    upgradeToUnlock: "Faceți upgrade la {plan} pentru a debloca Business Brain →",
                     temporarilyUnavailable: "Business intelligence este temporar indisponibil. Instrumentele dvs. normale de afaceri nu sunt afectate.",
                     accuracyImproving: "Previziunile au devenit mai precise recent.",
                     accuracyDeclining: "Previziunile recente au fost mai puțin precise decât cele anterioare.",
@@ -13158,7 +13177,7 @@
                     copiedToClipboard: "{item} zkopírováno do schránky!", copyFailed: "Kopírování {item} se nezdařilo.",
                     signInToUseFeature: "Přihlaste se nebo zaregistrujte firmu pro přístup k {feature}.",
                     noRoleAccessToFeature: "Váš účet {role} nemá přístup k {feature}.",
-                    featureUpgradeRequired: "{feature} je funkce založená na AI dostupná od plánu Starter výše. Upgradujte a odemkněte ji.",
+                    featureUpgradeRequired: "{feature} je funkce založená na AI dostupná od plánu {plan} výše. Upgradujte a odemkněte ji.",
                     signedOutSuccess: "Úspěšně odhlášeno.", selectSupplier: "Vyberte dodavatele", selectProduct: "Vyberte produkt",
                     checkNow: "Zkontrolovat nyní", enterValidEmail: "Zadejte prosím platnou e-mailovou adresu.",
                     unableToConnect: "Nyní se nelze připojit. Zkontrolujte prosím připojení a zkuste to znovu.",
@@ -13262,7 +13281,7 @@
                     geminiUnavailable: "Analýza cen Gemini není v současnosti k dispozici.",
                     geminiAdviceReady: "Cenové doporučení Gemini je připraveno.",
                     suggestedPrices: "Navrhovaná velkoobchodní cena: {wholesale} · Navrhovaná maloobchodní cena: {retail}.",
-                    advisorStarterRequired: "Poradce pro marže AI je k dispozici od plánu Starter výše.",
+                    advisorStarterRequired: "Poradce pro marže AI je k dispozici od plánu {plan} výše.",
                     geminiTemporarilyUnavailable: "Analýza cen Gemini je dočasně nedostupná. Cenu můžete stále zadat ručně.",
                 },
                 team: {
@@ -13328,8 +13347,8 @@
                     attentionCount: { one: "1 věc si zaslouží vaši pozornost.", other: "{count} věcí si zaslouží vaši pozornost." },
                     noPriorities: "Ve vašich aktuálních datech nebyly nalezeny žádné okamžité priority.",
                     keepRecording: "Pokračujte v zaznamenávání běžných prodejů a inventárních aktivit. Cauldra zobrazí užitečné priority, jakmile je podpoří důkazy.",
-                    starterRequired: "Business Brain je k dispozici od plánu Starter výše.",
-                    upgradeToUnlock: "Upgradujte na Starter a odemkněte Business Brain →",
+                    starterRequired: "Business Brain je k dispozici od plánu {plan} výše.",
+                    upgradeToUnlock: "Upgradujte na {plan} a odemkněte Business Brain →",
                     temporarilyUnavailable: "Obchodní inteligence je dočasně nedostupná. Vaše běžné obchodní nástroje nejsou ovlivněny.",
                     accuracyImproving: "Předpovědi se v poslední době staly přesnějšími.",
                     accuracyDeclining: "Nedávné předpovědi byly méně přesné než dřívější.",
@@ -13570,7 +13589,7 @@
                     copiedToClipboard: "{item} kopierades till urklipp!", copyFailed: "Det gick inte att kopiera {item}.",
                     signInToUseFeature: "Logga in eller registrera ett företag för att komma åt {feature}.",
                     noRoleAccessToFeature: "Ditt {role}-konto har inte åtkomst till {feature}.",
-                    featureUpgradeRequired: "{feature} är en AI-driven funktion som är tillgänglig från Starter-planen och uppåt. Uppgradera för att låsa upp den.",
+                    featureUpgradeRequired: "{feature} är en AI-driven funktion som är tillgänglig från {plan}-planen och uppåt. Uppgradera för att låsa upp den.",
                     signedOutSuccess: "Du har loggats ut.", selectSupplier: "Välj leverantör", selectProduct: "Välj produkt",
                     checkNow: "Kontrollera nu", enterValidEmail: "Ange en giltig e-postadress.",
                     unableToConnect: "Det går inte att ansluta just nu. Kontrollera din anslutning och försök igen.",
@@ -13674,7 +13693,7 @@
                     geminiUnavailable: "Gemini-prisanalys är inte tillgänglig för närvarande.",
                     geminiAdviceReady: "Gemini-prisrekommendation klar.",
                     suggestedPrices: "Föreslaget grossistpris: {wholesale} · Föreslaget detaljhandelspris: {retail}.",
-                    advisorStarterRequired: "AI-marginalrådgivaren är tillgänglig från Starter-planen och uppåt.",
+                    advisorStarterRequired: "AI-marginalrådgivaren är tillgänglig från {plan}-planen och uppåt.",
                     geminiTemporarilyUnavailable: "Gemini-prisanalys är tillfälligt otillgänglig. Du kan fortfarande ange priset manuellt.",
                 },
                 team: {
@@ -13740,8 +13759,8 @@
                     attentionCount: { one: "1 sak förtjänar din uppmärksamhet.", other: "{count} saker förtjänar din uppmärksamhet." },
                     noPriorities: "Inga omedelbara prioriteringar hittades i dina nuvarande data.",
                     keepRecording: "Fortsätt registrera normal försäljning och lageraktivitet. Cauldra kommer att visa användbara prioriteringar när bevis stödjer det.",
-                    starterRequired: "Business Brain är tillgänglig från Starter-planen och uppåt.",
-                    upgradeToUnlock: "Uppgradera till Starter för att låsa upp Business Brain →",
+                    starterRequired: "Business Brain är tillgänglig från {plan}-planen och uppåt.",
+                    upgradeToUnlock: "Uppgradera till {plan} för att låsa upp Business Brain →",
                     temporarilyUnavailable: "Affärsintelligens är tillfälligt otillgänglig. Dina vanliga affärsverktyg påverkas inte.",
                     accuracyImproving: "Prognoserna har blivit mer exakta på sistone.",
                     accuracyDeclining: "De senaste prognoserna har varit mindre exakta än tidigare.",
@@ -13982,7 +14001,7 @@
                     copiedToClipboard: "{item} kopieret til udklipsholder!", copyFailed: "Kunne ikke kopiere {item}.",
                     signInToUseFeature: "Log ind eller registrer en virksomhed for at få adgang til {feature}.",
                     noRoleAccessToFeature: "Din {role}-konto har ikke adgang til {feature}.",
-                    featureUpgradeRequired: "{feature} er en AI-funktion, der er tilgængelig fra Starter-planen og opefter. Opgrader for at låse den op.",
+                    featureUpgradeRequired: "{feature} er en AI-funktion, der er tilgængelig fra {plan}-planen og opefter. Opgrader for at låse den op.",
                     signedOutSuccess: "Du er logget ud.", selectSupplier: "Vælg leverandør", selectProduct: "Vælg produkt",
                     checkNow: "Kontroller nu", enterValidEmail: "Indtast venligst en gyldig e-mailadresse.",
                     unableToConnect: "Kan ikke oprette forbindelse lige nu. Kontroller din forbindelse, og prøv igen.",
@@ -14086,7 +14105,7 @@
                     geminiUnavailable: "Gemini-prisanalyse er ikke tilgængelig i øjeblikket.",
                     geminiAdviceReady: "Gemini-prisanbefaling klar.",
                     suggestedPrices: "Foreslået engrospris: {wholesale} · Foreslået salgspris: {retail}.",
-                    advisorStarterRequired: "AI-marginrådgiveren er tilgængelig fra Starter-planen og opefter.",
+                    advisorStarterRequired: "AI-marginrådgiveren er tilgængelig fra {plan}-planen og opefter.",
                     geminiTemporarilyUnavailable: "Gemini-prisanalyse er midlertidigt utilgængelig. Du kan stadig indtaste prisen manuelt.",
                 },
                 team: {
@@ -14152,8 +14171,8 @@
                     attentionCount: { one: "1 ting fortjener din opmærksomhed.", other: "{count} ting fortjener din opmærksomhed." },
                     noPriorities: "Der blev ikke fundet umiddelbare prioriteter i dine nuværende data.",
                     keepRecording: "Fortsæt med at registrere normalt salg og lageraktivitet. Cauldra vil vise nyttige prioriteter, når beviser understøtter det.",
-                    starterRequired: "Business Brain er tilgængelig fra Starter-planen og opefter.",
-                    upgradeToUnlock: "Opgrader til Starter for at låse Business Brain op →",
+                    starterRequired: "Business Brain er tilgængelig fra {plan}-planen og opefter.",
+                    upgradeToUnlock: "Opgrader til {plan} for at låse Business Brain op →",
                     temporarilyUnavailable: "Business intelligence er midlertidigt utilgængelig. Dine normale forretningsværktøjer er ikke påvirket.",
                     accuracyImproving: "Prognoserne er blevet mere præcise på det seneste.",
                     accuracyDeclining: "De seneste prognoser har været mindre præcise end tidligere.",
@@ -14394,7 +14413,7 @@
                     copiedToClipboard: "{item} kopiert til utklippstavlen!", copyFailed: "Kunne ikke kopiere {item}.",
                     signInToUseFeature: "Logg inn eller registrer en bedrift for å få tilgang til {feature}.",
                     noRoleAccessToFeature: "{role}-kontoen din har ikke tilgang til {feature}.",
-                    featureUpgradeRequired: "{feature} er en AI-drevet funksjon som er tilgjengelig fra Starter-planen og oppover. Oppgrader for å låse den opp.",
+                    featureUpgradeRequired: "{feature} er en AI-drevet funksjon som er tilgjengelig fra {plan}-planen og oppover. Oppgrader for å låse den opp.",
                     signedOutSuccess: "Du er logget ut.", selectSupplier: "Velg leverandør", selectProduct: "Velg produkt",
                     checkNow: "Sjekk nå", enterValidEmail: "Vennligst skriv inn en gyldig e-postadresse.",
                     unableToConnect: "Kan ikke koble til nå. Sjekk tilkoblingen din og prøv igjen.",
@@ -14498,7 +14517,7 @@
                     geminiUnavailable: "Gemini-prisanalyse er ikke tilgjengelig for øyeblikket.",
                     geminiAdviceReady: "Gemini-prisanbefaling er klar.",
                     suggestedPrices: "Foreslått engrospris: {wholesale} · Foreslått utsalgspris: {retail}.",
-                    advisorStarterRequired: "AI-marginrådgiveren er tilgjengelig fra Starter-planen og oppover.",
+                    advisorStarterRequired: "AI-marginrådgiveren er tilgjengelig fra {plan}-planen og oppover.",
                     geminiTemporarilyUnavailable: "Gemini-prisanalyse er midlertidig utilgjengelig. Du kan fortsatt skrive inn prisen manuelt.",
                 },
                 team: {
@@ -14564,8 +14583,8 @@
                     attentionCount: { one: "1 ting fortjener din oppmerksomhet.", other: "{count} ting fortjener din oppmerksomhet." },
                     noPriorities: "Ingen umiddelbare prioriteringer ble funnet i de nåværende dataene dine.",
                     keepRecording: "Fortsett å registrere normalt salg og lageraktivitet. Cauldra vil vise nyttige prioriteringer når bevis støtter dem.",
-                    starterRequired: "Business Brain er tilgjengelig fra Starter-planen og oppover.",
-                    upgradeToUnlock: "Oppgrader til Starter for å låse opp Business Brain →",
+                    starterRequired: "Business Brain er tilgjengelig fra {plan}-planen og oppover.",
+                    upgradeToUnlock: "Oppgrader til {plan} for å låse opp Business Brain →",
                     temporarilyUnavailable: "Forretningsintelligens er midlertidig utilgjengelig. De vanlige forretningsverktøyene dine er ikke påvirket.",
                     accuracyImproving: "Prognosene har blitt mer nøyaktige den siste tiden.",
                     accuracyDeclining: "De siste prognosene har vært mindre nøyaktige enn tidligere.",
@@ -14806,7 +14825,7 @@
                     copiedToClipboard: "{item} kopioitu leikepöydälle!", copyFailed: "Kohteen {item} kopiointi epäonnistui.",
                     signInToUseFeature: "Kirjaudu sisään tai rekisteröi yritys käyttääksesi ominaisuutta {feature}.",
                     noRoleAccessToFeature: "Tilisi ({role}) ei voi käyttää ominaisuutta {feature}.",
-                    featureUpgradeRequired: "{feature} on tekoälypohjainen ominaisuus, joka on saatavilla Starter-tasosta alkaen. Päivitä avataksesi sen.",
+                    featureUpgradeRequired: "{feature} on tekoälypohjainen ominaisuus, joka on saatavilla {plan}-tasosta alkaen. Päivitä avataksesi sen.",
                     signedOutSuccess: "Olet kirjautunut ulos.", selectSupplier: "Valitse toimittaja", selectProduct: "Valitse tuote",
                     checkNow: "Tarkista nyt", enterValidEmail: "Anna kelvollinen sähköpostiosoite.",
                     unableToConnect: "Yhteyttä ei voida muodostaa juuri nyt. Tarkista yhteytesi ja yritä uudelleen.",
@@ -14910,7 +14929,7 @@
                     geminiUnavailable: "Gemini-hinta-analyysi ei ole tällä hetkellä saatavilla.",
                     geminiAdviceReady: "Gemini-hintasuositus on valmis.",
                     suggestedPrices: "Ehdotettu tukkuhinta: {wholesale} · Ehdotettu vähittäishinta: {retail}.",
-                    advisorStarterRequired: "Tekoälyn kateneuvoja on saatavilla Starter-tasosta alkaen.",
+                    advisorStarterRequired: "Tekoälyn kateneuvoja on saatavilla {plan}-tasosta alkaen.",
                     geminiTemporarilyUnavailable: "Gemini-hinta-analyysi ei ole tilapäisesti käytettävissä. Voit silti syöttää hinnan manuaalisesti.",
                 },
                 team: {
@@ -14976,8 +14995,8 @@
                     attentionCount: { one: "1 asia ansaitsee huomiosi.", other: "{count} asiaa ansaitsee huomiosi." },
                     noPriorities: "Nykyisistä tiedoistasi ei löytynyt välittömiä prioriteetteja.",
                     keepRecording: "Jatka normaalin myynnin ja varastotoiminnan kirjaamista. Cauldra näyttää hyödyllisiä prioriteetteja, kun todisteet tukevat niitä.",
-                    starterRequired: "Business Brain on saatavilla Starter-tasosta alkaen.",
-                    upgradeToUnlock: "Päivitä Starter-tasoon avataksesi Business Brainin →",
+                    starterRequired: "Business Brain on saatavilla {plan}-tasosta alkaen.",
+                    upgradeToUnlock: "Päivitä {plan}-tasoon avataksesi Business Brainin →",
                     temporarilyUnavailable: "Liiketoiminta-analytiikka ei ole tilapäisesti käytettävissä. Tavalliset liiketoimintatyökalusi eivät ole vaikuttuneet.",
                     accuracyImproving: "Ennusteet ovat parantuneet tarkkuudeltaan viime aikoina.",
                     accuracyDeclining: "Viimeisimmät ennusteet ovat olleet epätarkempia kuin aiemmin.",
@@ -15218,7 +15237,7 @@
                     copiedToClipboard: "Το {item} αντιγράφηκε στο πρόχειρο!", copyFailed: "Αποτυχία αντιγραφής {item}.",
                     signInToUseFeature: "Συνδεθείτε ή δημιουργήστε μια επιχείρηση για να αποκτήσετε πρόσβαση σε {feature}.",
                     noRoleAccessToFeature: "Ο λογαριασμός σας ({role}) δεν έχει πρόσβαση σε {feature}.",
-                    featureUpgradeRequired: "Το {feature} είναι μια λειτουργία με τεχνητή νοημοσύνη διαθέσιμη από το πρόγραμμα Starter και άνω. Αναβαθμίστε για να την ξεκλειδώσετε.",
+                    featureUpgradeRequired: "Το {feature} είναι μια λειτουργία με τεχνητή νοημοσύνη διαθέσιμη από το πρόγραμμα {plan} και άνω. Αναβαθμίστε για να την ξεκλειδώσετε.",
                     signedOutSuccess: "Έχετε αποσυνδεθεί.", selectSupplier: "Επιλέξτε προμηθευτή", selectProduct: "Επιλέξτε προϊόν",
                     checkNow: "Έλεγχος τώρα", enterValidEmail: "Εισαγάγετε μια έγκυρη διεύθυνση email.",
                     unableToConnect: "Δεν είναι δυνατή η σύνδεση αυτή τη στιγμή. Ελέγξτε τη σύνδεσή σας και δοκιμάστε ξανά.",
@@ -15322,7 +15341,7 @@
                     geminiUnavailable: "Η ανάλυση τιμών Gemini δεν είναι διαθέσιμη αυτή τη στιγμή.",
                     geminiAdviceReady: "Η σύσταση τιμολόγησης Gemini είναι έτοιμη.",
                     suggestedPrices: "Προτεινόμενη χονδρική τιμή: {wholesale} · Προτεινόμενη λιανική τιμή: {retail}.",
-                    advisorStarterRequired: "Ο σύμβουλος περιθωρίου AI είναι διαθέσιμος από το πρόγραμμα Starter και άνω.",
+                    advisorStarterRequired: "Ο σύμβουλος περιθωρίου AI είναι διαθέσιμος από το πρόγραμμα {plan} και άνω.",
                     geminiTemporarilyUnavailable: "Η ανάλυση τιμών Gemini δεν είναι προσωρινά διαθέσιμη. Μπορείτε ακόμα να εισαγάγετε την τιμή με μη αυτόματο τρόπο.",
                 },
                 team: {
@@ -15388,8 +15407,8 @@
                     attentionCount: { one: "1 στοιχείο αξίζει την προσοχή σας.", other: "{count} στοιχεία αξίζουν την προσοχή σας." },
                     noPriorities: "Δεν βρέθηκαν άμεσες προτεραιότητες στα τρέχοντα δεδομένα σας.",
                     keepRecording: "Συνεχίστε να καταγράφετε κανονικές πωλήσεις και δραστηριότητα αποθέματος. Το Cauldra θα εμφανίσει χρήσιμες προτεραιότητες όταν τα στοιχεία τις υποστηρίζουν.",
-                    starterRequired: "Το Business Brain είναι διαθέσιμο από το πρόγραμμα Starter και άνω.",
-                    upgradeToUnlock: "Αναβαθμίστε στο Starter για να ξεκλειδώσετε το Business Brain →",
+                    starterRequired: "Το Business Brain είναι διαθέσιμο από το πρόγραμμα {plan} και άνω.",
+                    upgradeToUnlock: "Αναβαθμίστε στο {plan} για να ξεκλειδώσετε το Business Brain →",
                     temporarilyUnavailable: "Η επιχειρηματική νοημοσύνη δεν είναι προσωρινά διαθέσιμη. Τα κανονικά εργαλεία επιχείρησής σας δεν επηρεάζονται.",
                     accuracyImproving: "Οι προβλέψεις έχουν γίνει πιο ακριβείς πρόσφατα.",
                     accuracyDeclining: "Οι πρόσφατες προβλέψεις ήταν λιγότερο ακριβείς από πριν.",
@@ -15630,7 +15649,7 @@
                     copiedToClipboard: "{item} vágólapra másolva!", copyFailed: "Nem sikerült másolni: {item}.",
                     signInToUseFeature: "Jelentkezzen be vagy regisztráljon egy vállalkozást a(z) {feature} eléréséhez.",
                     noRoleAccessToFeature: "A(z) {role} fiókja nem férhet hozzá ehhez: {feature}.",
-                    featureUpgradeRequired: "A(z) {feature} egy mesterséges intelligenciával működő funkció, amely a Starter csomagtól kezdve érhető el. Frissítsen a feloldásához.",
+                    featureUpgradeRequired: "A(z) {feature} egy mesterséges intelligenciával működő funkció, amely a {plan} csomagtól kezdve érhető el. Frissítsen a feloldásához.",
                     signedOutSuccess: "Kijelentkezett.", selectSupplier: "Válasszon beszállítót", selectProduct: "Válasszon terméket",
                     checkNow: "Ellenőrzés most", enterValidEmail: "Adjon meg egy érvényes e-mail-címet.",
                     unableToConnect: "Jelenleg nem lehet csatlakozni. Ellenőrizze a kapcsolatot, és próbálja újra.",
@@ -15734,7 +15753,7 @@
                     geminiUnavailable: "A Gemini áranalízis jelenleg nem érhető el.",
                     geminiAdviceReady: "A Gemini árajánlás készen áll.",
                     suggestedPrices: "Javasolt nagykereskedelmi ár: {wholesale} · Javasolt kiskereskedelmi ár: {retail}.",
-                    advisorStarterRequired: "Az AI árrés tanácsadó a Starter csomagtól kezdve érhető el.",
+                    advisorStarterRequired: "Az AI árrés tanácsadó a {plan} csomagtól kezdve érhető el.",
                     geminiTemporarilyUnavailable: "A Gemini áranalízis átmenetileg nem érhető el. Az árat továbbra is manuálisan megadhatja.",
                 },
                 team: {
@@ -15800,8 +15819,8 @@
                     attentionCount: { one: "1 dolog érdemel figyelmet.", other: "{count} dolog érdemel figyelmet." },
                     noPriorities: "Nem találtunk azonnali prioritásokat a jelenlegi adataiban.",
                     keepRecording: "Folytassa a normál eladások és készletmozgások rögzítését. A Cauldra hasznos prioritásokat fog megjeleníteni, amint azokat bizonyítékok támasztják alá.",
-                    starterRequired: "A Business Brain a Starter csomagtól kezdve érhető el.",
-                    upgradeToUnlock: "Frissítsen a Starter csomagra a Business Brain feloldásához →",
+                    starterRequired: "A Business Brain a {plan} csomagtól kezdve érhető el.",
+                    upgradeToUnlock: "Frissítsen a {plan} csomagra a Business Brain feloldásához →",
                     temporarilyUnavailable: "Az üzleti intelligencia átmenetileg nem érhető el. A szokásos üzleti eszközeit ez nem érinti.",
                     accuracyImproving: "A előrejelzések az utóbbi időben pontosabbá váltak.",
                     accuracyDeclining: "A legutóbbi előrejelzések kevésbé voltak pontosak, mint korábban.",
@@ -17291,6 +17310,7 @@
 
         function showApiError(response, data, fallback = "Something went wrong. Please try again.") {
             if (response?.status === 401) return "Your session could not be verified. Please sign in again.";
+            if (noteSubscriptionResponse(response, data)) return `${subscriptionBlockedMessage} ${t("subscription.dataKept")}`;
             if (response?.status === 403) return friendlyErrorMessage(data, "You do not have permission to perform this action.");
             if (response?.status === 404) { const detail = friendlyErrorMessage(data, ""); return detail || fallback; }
             if (response?.status === 409) return friendlyErrorMessage(data, "That action cannot be completed because the information has changed.");
@@ -17349,10 +17369,69 @@
         // Without this an entitled Admin would lose that destination after a reload
         // until some unrelated event happened to re-render the nav.
         function applyAiEntitlement(source) {
-            if (!source || typeof source.ai_included !== 'boolean') return;
+            if (!source) return;
+            applyPlanFeatureState(source);
+            applySubscriptionAccessState(source);
+            if (typeof source.ai_included !== 'boolean') return;
             if (currentAiEntitled === source.ai_included) return;
             currentAiEntitled = source.ai_included;
             try { applySettingsMenuPermissions(); } catch (_) { /* nav not mounted yet; the next render picks it up */ }
+        }
+
+        // PLAN-001 / PLAN-007: what the server says the plan includes, and the
+        // public name of the plan that unlocks each feature. Same fail-closed
+        // rule as AI: an absent flag is not treated as "included".
+        let currentPriceMonitorIncluded = false;
+        let featureMinPlanLabels = { ai: 'Business', price_monitor: 'Business' };
+        function applyPlanFeatureState(source) {
+            if (typeof source.price_monitor_included === 'boolean') currentPriceMonitorIncluded = source.price_monitor_included;
+            if (source.feature_min_plan_labels && typeof source.feature_min_plan_labels === 'object') {
+                featureMinPlanLabels = { ...featureMinPlanLabels, ...source.feature_min_plan_labels };
+            }
+        }
+
+        // SUB-002 / SUB-004: one app-wide answer to "may this business use
+        // Cauldra right now?". Set from the sign-in payload for every role and
+        // from any 402 a request receives; a module never guesses a cause.
+        let subscriptionBlockedMessage = null;
+        function applySubscriptionAccessState(source) {
+            if (!('subscription_blocked_message' in source)) return;
+            setSubscriptionBlocked(source.subscription_blocked_message || null);
+        }
+        function setSubscriptionBlocked(message) {
+            const next = message ? String(message) : null;
+            if (next === subscriptionBlockedMessage) return;
+            subscriptionBlockedMessage = next;
+            renderSubscriptionBlockedBanner();
+            if (next) { try { renderInventoryTable([]); } catch (_) { /* inventory not mounted yet */ } }
+        }
+        function noteSubscriptionResponse(response, data) {
+            if (response?.status !== 402) return false;
+            setSubscriptionBlocked(friendlyErrorMessage(data, t("subscription.inactiveDefault")));
+            return true;
+        }
+        function renderSubscriptionBlockedBanner() {
+            let banner = document.getElementById('subscription-blocked-banner');
+            if (!subscriptionBlockedMessage || !hasAuthenticatedBusinessContext()) { banner?.classList.add('hidden'); return; }
+            if (!banner) {
+                banner = document.createElement('div');
+                banner.id = 'subscription-blocked-banner';
+                banner.setAttribute('role', 'alert');
+                banner.className = 'mx-3 sm:mx-4 mt-3 rounded-xl border border-danger/30 bg-danger/10 text-textMain px-3 py-2.5 text-xs flex flex-wrap items-center gap-2';
+                const host = document.querySelector('main') || document.body;
+                host.insertBefore(banner, host.firstChild);
+            }
+            const isAdmin = getCurrentRole() === 'admin';
+            banner.innerHTML = `<i class="fa-solid fa-circle-exclamation text-danger shrink-0"></i>`
+                + `<span class="min-w-0 flex-1 break-words">${escapeHtml(subscriptionBlockedMessage)} ${escapeHtml(t("subscription.dataKept"))}</span>`
+                + (isAdmin ? `<button type="button" onclick="openBillingModal()" class="shrink-0 bg-primary hover:bg-primaryHover text-white px-3 py-1.5 rounded-lg font-semibold cursor-pointer">${escapeHtml(t("subscription.choosePlan"))}</button>`
+                           : `<span class="shrink-0 text-textSec">${escapeHtml(t("subscription.askAdmin"))}</span>`);
+            banner.classList.remove('hidden');
+        }
+        function showSubscriptionBlockedNotice() {
+            renderSubscriptionBlockedBanner();
+            showToast(`${subscriptionBlockedMessage} ${t("subscription.dataKept")}`, 'error');
+            if (getCurrentRole() === 'admin') openBillingModal();
         }
 
         function featureDisplayName(featureName) {
@@ -17380,9 +17459,17 @@
                 showToast(t("common.noRoleAccessToFeature", {role: roleLabel, feature: featureDisplayName(featureName)}), 'error');
                 return;
             }
+            // SUB-002: while the subscription does not allow use, every module
+            // gives the same, true reason — never "no Business Day" and never
+            // a silent click.
+            if (subscriptionBlockedMessage) {
+                showSubscriptionBlockedNotice();
+                return;
+            }
             if (AI_GATED_FEATURE_NAMES.has(featureName.toLowerCase()) && !currentAiEntitled) {
-                showToast(t("common.featureUpgradeRequired", {feature: featureDisplayName(featureName)}), 'info');
-                openBillingModal();
+                showToast(t("common.featureUpgradeRequired", {feature: featureDisplayName(featureName), plan: featureMinPlanLabels.ai}), 'info');
+                // Staff cannot open Billing at all; the toast alone is the answer.
+                if (getCurrentRole() === 'admin' || getCurrentRole() === 'manager') openBillingModal();
                 return;
             }
             callback();
@@ -18570,6 +18657,8 @@
             posCart = [];
             billingUsageCache = null;
             currentAiEntitled = false; // same fail-closed default a fresh guest load starts with
+            currentPriceMonitorIncluded = false;
+            setSubscriptionBlocked(null);
             inventoryStatusCounts = { healthy: 0, low: 0, out: 0 };
             inventoryStatusFilter = null;
             selectedWarehouseFilter = "ALL";
@@ -20390,6 +20479,12 @@
                 cancelRow.classList.add("hidden");
             }
 
+            // UX-001: say why a Manager has no plan buttons.
+            document.getElementById('billing-admin-only-note')?.classList.toggle('hidden', isAdmin);
+            // PLAN-005: after a downgrade below current usage, say so plainly
+            // (nothing is removed; only adding more is blocked).
+            renderOverLimitNotice(document.getElementById('billing-over-limit-box'), usage.over_limit_resources, t('subscription.overLimitTitle'));
+
             // Pending downgrade — server-authoritative; this box is purely a
             // display of usage.pending_downgrade, never a client-side decision.
             const pendingBox = document.getElementById("billing-pending-downgrade-box");
@@ -20415,12 +20510,18 @@
         // of the time.
         function renderBillingAiUsage(data) {
             currentAiEntitled = Number(data.included_ai_credits || 0) > 0;
+            applyPlanFeatureState(data);
             const used = Number(data.used_ai_credits || 0), included = Number(data.included_ai_credits || 0), percent = included ? Math.min(100, (used / included) * 100) : 0;
             document.getElementById('subscription-ai-label').textContent = t('subscription.creditsUsedOfIncluded', { used: used.toLocaleString(getBusinessLocale()), included: included.toLocaleString(getBusinessLocale()) });
             const bar = document.getElementById('subscription-ai-bar'); bar.style.width = `${percent}%`; bar.className = `h-full rounded-full ${data.ai_warning === 'overage' ? 'bg-danger' : data.ai_warning === 'warning' ? 'bg-warning' : 'bg-primary'}`;
-            document.getElementById('subscription-ai-detail').textContent = data.overage_credits
-                ? t('subscription.overageCreditsEstimate', { count: data.overage_credits.toLocaleString(getBusinessLocale()), amount: formatCurrency(data.estimated_overage_charge || 0) })
-                : t('subscription.includedCreditsRemaining', { count: Number(data.remaining_ai_credits || 0).toLocaleString(getBusinessLocale()) });
+            const earlierPlanCredits = Number(data.included_by_earlier_plan_credits || 0);
+            const aiDetailParts = [];
+            if (data.overage_credits) aiDetailParts.push(t('subscription.overageCreditsEstimate', { count: data.overage_credits.toLocaleString(getBusinessLocale()), amount: formatCurrency(data.estimated_overage_charge || 0) }));
+            else if (!included) aiDetailParts.push(t('subscription.aiNotIncluded', { plan: data.plan_label || '' })); // PLAN-002: no "0 remaining" on a plan without AI
+            else aiDetailParts.push(t('subscription.includedCreditsRemaining', { count: Number(data.remaining_ai_credits || 0).toLocaleString(getBusinessLocale()) }));
+            // PLAN-008: credits a previous plan already included are named, never re-priced.
+            if (earlierPlanCredits > 0) aiDetailParts.push(t('subscription.aiUsedOnEarlierPlan', { count: earlierPlanCredits.toLocaleString(getBusinessLocale()) }));
+            document.getElementById('subscription-ai-detail').textContent = aiDetailParts.join(' ');
             const warning = document.getElementById('subscription-warning');
             if (data.ai_warning) { warning.classList.remove('hidden'); warning.className = `mb-2 rounded-lg px-2.5 py-2 text-[11px] ${data.ai_warning === 'overage' ? 'bg-danger/10 text-danger border border-danger/25' : 'bg-warning/10 text-warning border border-warning/25'}`; warning.textContent = data.ai_warning === 'overage' ? t('subscription.creditsExhausted') : t('subscription.creditsWarning80'); } else warning.classList.add('hidden');
             const labels = { products: t('subscription.resourceProducts'), suppliers: t('subscription.resourceSuppliers'), warehouses: t('subscription.resourceWarehouses'), users: t('subscription.resourceUsers'), price_monitor_sources: t('subscription.resourcePriceSources'), purchase_orders: t('subscription.resourcePurchaseOrders'), storage: t('subscription.resourceStorage') };
@@ -20440,6 +20541,9 @@
             const inactiveCls = "px-2.5 py-1 rounded-lg font-semibold transition cursor-pointer text-textSec hover:text-textMain";
             monthlyBtn.className = billingIntervalChoice === 'monthly' ? activeCls : inactiveCls;
             annualBtn.className = billingIntervalChoice === 'annual' ? activeCls : inactiveCls;
+            // OBS-1: the selected interval is announced, not only coloured.
+            monthlyBtn.setAttribute('aria-pressed', String(billingIntervalChoice === 'monthly'));
+            annualBtn.setAttribute('aria-pressed', String(billingIntervalChoice === 'annual'));
         }
 
         function setBillingIntervalChoice(interval) {
@@ -20480,22 +20584,28 @@
                 const features = buildPlanFeatureLines(p.limits);
                 let actionLabel = "";
                 let priceButtonHtml;
+                // UX-006: the price is information, the button says what it
+                // does. UX-001: a Manager sees the price as plain text, never a
+                // button-shaped box that does nothing.
+                const priceLine = `<p class="text-center text-textMain font-bold text-sm mb-1.5">${formatNaira(price)} <span class="font-semibold text-xs text-textSec">/ ${intervalLabel}</span></p>`;
+                const label = escapeHtml(p.label);
                 if (!isAdmin) {
-                    priceButtonHtml = `<div class="w-full text-center bg-bgMain border border-borderCol text-textMain py-2.5 rounded-xl font-bold text-sm">${formatNaira(price)} <span class="font-semibold text-xs opacity-70">/ ${intervalLabel}</span></div>`;
+                    priceButtonHtml = priceLine + (isCurrent ? `<p class="text-center text-primary text-[10px] font-semibold">Current Plan</p>` : '');
                 } else if (isCurrent) {
-                    priceButtonHtml = `<button type="button" disabled class="w-full bg-bgMain text-textSec border border-borderCol py-2.5 rounded-xl font-bold text-sm cursor-not-allowed">Current Plan</button>`;
+                    priceButtonHtml = priceLine + `<button type="button" disabled class="w-full bg-bgMain text-textSec border border-borderCol py-2.5 rounded-xl font-bold text-sm cursor-not-allowed">Current Plan</button>`;
                 } else if (isPendingTarget) {
                     actionLabel = "Downgrade scheduled for your next renewal";
-                    priceButtonHtml = `<button type="button" disabled class="w-full bg-warning/15 text-warning border border-warning/30 py-2.5 rounded-xl font-bold text-sm cursor-not-allowed">Scheduled</button>`;
+                    priceButtonHtml = priceLine + `<button type="button" disabled class="w-full bg-warning/15 text-warning border border-warning/30 py-2.5 rounded-xl font-bold text-sm cursor-not-allowed">Scheduled</button>`;
                 } else {
-                    let onclickFn;
-                    if (usage.can_start_trial) { actionLabel = "Start your 14-day free trial"; onclickFn = `openTrialConfirm('${id}','${billingIntervalChoice}')`; }
-                    else if (usage.status === 'trialing') { actionLabel = "Switch to this plan"; onclickFn = `switchPlanImmediate('${id}','${billingIntervalChoice}')`; }
-                    else if (isDowngradeTarget) { actionLabel = "Takes effect at your next renewal"; onclickFn = `openDowngradeConfirm('${id}','${billingIntervalChoice}')`; }
-                    else if (['active', 'past_due'].includes(usage.status)) { actionLabel = "Switch / subscribe to this plan"; onclickFn = `subscribeNow('${id}','${billingIntervalChoice}')`; }
-                    else { actionLabel = "Subscribe to this plan"; onclickFn = `subscribeNow('${id}','${billingIntervalChoice}')`; }
+                    let onclickFn, buttonText;
+                    const isUpgrade = order.indexOf(id) > order.indexOf(currentPlan);
+                    if (usage.can_start_trial) { actionLabel = "Start your 14-day free trial"; buttonText = t('subscription.actionStartTrial', {plan: label}); onclickFn = `openTrialConfirm('${id}','${billingIntervalChoice}')`; }
+                    else if (usage.status === 'trialing') { actionLabel = "No charge during your trial"; buttonText = t('subscription.actionSwitchTo', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','trial_switch')`; }
+                    else if (isDowngradeTarget) { actionLabel = "Takes effect at your next renewal"; buttonText = t('subscription.actionDowngradeTo', {plan: label}); onclickFn = `openDowngradeConfirm('${id}','${billingIntervalChoice}')`; }
+                    else if (['active', 'past_due'].includes(usage.status)) { buttonText = isUpgrade ? t('subscription.actionUpgradeTo', {plan: label}) : t('subscription.actionSwitchTo', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','${isUpgrade ? 'upgrade' : 'checkout'}')`; }
+                    else { buttonText = t('subscription.actionSubscribeTo', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','checkout')`; }
                     const btnColor = isDowngradeTarget ? "bg-textSec/80 hover:bg-textSec text-white shadow-md" : "bg-primary hover:bg-primaryHover text-white shadow-md shadow-primary/20";
-                    priceButtonHtml = `<button type="button" onclick="${onclickFn}" class="w-full ${btnColor} py-2.5 rounded-xl font-bold text-sm transition cursor-pointer">${formatNaira(price)} <span class="font-semibold text-xs opacity-90">/ ${intervalLabel}</span></button>`;
+                    priceButtonHtml = priceLine + `<button type="button" onclick="${onclickFn}" class="w-full ${btnColor} py-2.5 rounded-xl font-bold text-sm transition cursor-pointer">${buttonText}</button>`;
                 }
                 return `
                     <div class="flex flex-col rounded-xl border-2 ${isCurrent ? 'border-primary bg-primary/10' : 'border-borderCol bg-bgMain'} p-3">
@@ -20630,12 +20740,85 @@
             return CauldraPayments.start('checkout', {plan, billing_interval:interval});
         }
 
-        async function switchPlanImmediate(plan, interval) {
+        // PLAN-005: one renderer for "usage above the plan's limits", used by
+        // the billing status and by every plan-change confirmation.
+        function overLimitRowsHtml(rows) {
+            return (rows || []).map(r => `<li>${escapeHtml(t('subscription.overLimitRow', {
+                label: r.label, current: `${Number(r.current).toLocaleString(getBusinessLocale())}${r.unit ? ' ' + r.unit : ''}`,
+                limit: `${Number(r.limit).toLocaleString(getBusinessLocale())}${r.unit ? ' ' + r.unit : ''}`,
+            }))}</li>`).join('');
+        }
+        function renderOverLimitNotice(box, rows, title) {
+            if (!box) return;
+            if (!rows || !rows.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+            box.innerHTML = `<p class="font-bold text-textMain">${escapeHtml(title)}</p>`
+                + `<ul class="list-disc pl-4 mt-1 space-y-0.5 text-textSec">${overLimitRowsHtml(rows)}</ul>`
+                + `<p class="text-textSec mt-1.5 leading-relaxed">${escapeHtml(t('subscription.overLimitBody'))}</p>`;
+            box.classList.remove('hidden');
+        }
+
+        // UX-005 / PLAN-005: every plan change the Admin starts from a plan
+        // card is confirmed first, naming the plan, the interval and the price,
+        // and — for a lower plan — what would be over its limits. The ₦200,000
+        // Enterprise switch used to apply on a single click.
+        let pendingPlanChange = null;
+        async function openPlanChangeConfirm(plan, interval, kind) {
+            const usage = billingUsageCache;
+            const target = usage?.plans?.[plan];
+            if (!usage || !target) return;
+            const price = interval === 'annual' ? target.annual_price : target.monthly_price;
+            const priceText = `${formatNaira(price)}/${interval === 'annual' ? 'year' : 'month'}`;
+            const labelHtml = escapeHtml(target.label);
+            pendingPlanChange = { plan, interval, kind, price };
+            const titleKey = kind === 'upgrade' ? 'subscription.confirmUpgradeTitle' : kind === 'checkout' ? 'subscription.confirmSubscribeTitle' : 'subscription.confirmPlanTitle';
+            const bodyKey = kind === 'trial_switch' ? 'subscription.confirmTrialSwitchBody' : kind === 'upgrade' ? 'subscription.confirmUpgradeBody' : 'subscription.confirmCheckoutBody';
+            document.getElementById('plan-change-confirm-title').textContent = t(titleKey, { plan: target.label });
+            document.getElementById('plan-change-confirm-summary').textContent = `${target.label} · ${interval === 'annual' ? 'Annual' : 'Monthly'} · ${priceText}`;
+            document.getElementById('plan-change-confirm-body').textContent = t(bodyKey, { plan: target.label, price: priceText });
+            const submit = document.getElementById('plan-change-confirm-submit');
+            submit.innerHTML = kind === 'upgrade' ? t('subscription.actionUpgradeTo', { plan: labelHtml })
+                : kind === 'checkout' ? t('subscription.actionSubscribeTo', { plan: labelHtml }) : t('subscription.actionSwitchTo', { plan: labelHtml });
+            submit.disabled = false;
+            const impactBox = document.getElementById('plan-change-confirm-impact');
+            impactBox.classList.add('hidden'); impactBox.innerHTML = '';
+            document.getElementById('plan-change-confirm-modal').classList.remove('hidden');
+            submit.focus();
+            const rank = {core:0, starter:1, business:2, enterprise:3};
+            if (rank[plan] < rank[String(usage.plan || '').toLowerCase()]) {
+                try {
+                    const res = await fetch(`${API_URL}/subscription/downgrade-impact?plan=${encodeURIComponent(plan)}`, { headers: { 'Authorization': `Bearer ${authToken}` } });
+                    const data = await res.json().catch(() => ({}));
+                    if (res.ok && pendingPlanChange?.plan === plan) renderOverLimitNotice(impactBox, overLimitRowsFromImpact(data), t('subscription.planChangeWillExceed', { plan: target.label }));
+                } catch (_) { /* the preview is advisory; the server still enforces every limit */ }
+            }
+        }
+        function overLimitRowsFromImpact(data) {
+            return (data?.capacity_impact || []).filter(r => r.status === 'OVER_LIMIT').map(r => ({
+                resource: r.resource, label: r.label || r.resource.replace(/_/g, ' '),
+                current: r.resource === 'storage_gb' ? Math.round(r.current / 1024 ** 3 * 1000) / 1000 : r.current,
+                limit: r.configured_limit, unit: r.resource === 'storage_gb' ? 'GB' : null,
+            }));
+        }
+        function closePlanChangeConfirm() {
+            document.getElementById('plan-change-confirm-modal')?.classList.add('hidden');
+            pendingPlanChange = null;
+        }
+        async function confirmPlanChange() {
+            const selection = pendingPlanChange;
+            if (!selection) return;
+            const submit = document.getElementById('plan-change-confirm-submit');
+            submit.disabled = true;
+            closePlanChangeConfirm();
+            if (selection.kind === 'trial_switch') return switchPlanImmediate(selection.plan, selection.interval, selection.price);
+            return subscribeNow(selection.plan, selection.interval);
+        }
+
+        async function switchPlanImmediate(plan, interval, expectedAmount) {
             try {
                 const res = await fetch(`${API_URL}/subscription/change-plan`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
-                    body: JSON.stringify({ plan, billing_interval: interval })
+                    body: JSON.stringify({ plan, billing_interval: interval, ...(Number.isFinite(expectedAmount) ? { expected_amount_naira: expectedAmount } : {}) })
                 });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) {
@@ -20672,7 +20855,14 @@
                 `You'll keep your current <strong>${currentLabel}</strong> features until the end of your current billing period${effectiveDate ? ` (<strong>${escapeHtml(effectiveDate)}</strong>)` : ''}.<br><br>` +
                 `Your account will then switch to <strong>${targetLabel}</strong> at your next renewal. You'll be charged the ${targetLabel} price of <strong>${targetPrice}/${intervalWord}</strong> for that billing period.<br><br>` +
                 `No refund is issued for the remainder of your current period, and you can cancel this scheduled downgrade at any time before it takes effect.`;
+            const impactBox = document.getElementById("downgrade-confirm-impact");
+            if (impactBox) { impactBox.classList.add('hidden'); impactBox.innerHTML = ''; }
             document.getElementById("downgrade-confirm-modal").classList.remove("hidden");
+            // PLAN-005: show what the lower plan's limits mean for this business.
+            fetch(`${API_URL}/subscription/downgrade-impact?plan=${encodeURIComponent(plan)}`, { headers: { 'Authorization': `Bearer ${authToken}` } })
+                .then(res => res.ok ? res.json() : null)
+                .then(data => { if (data && pendingDowngradeSelection?.plan === plan) renderOverLimitNotice(impactBox, overLimitRowsFromImpact(data), t('subscription.planChangeWillExceed', { plan: target.label })); })
+                .catch(() => { /* advisory only */ });
         }
 
         function closeDowngradeConfirmModal() {
@@ -20919,8 +21109,17 @@
             sales: { label: "Sales", grants: ["inventory.view", "sales.create", "sales.wholesale", "sales.refund", "sales.view_history"] },
             inventory_warehouse: { label: "Inventory / Warehouse", grants: ["inventory.view", "inventory.add_product", "inventory.edit_product", "inventory.adjust_stock", "inventory.transfer_stock", "warehouse.view"] },
             procurement: { label: "Procurement", grants: ["supplier.view", "po.view", "po.create", "po.send", "procurement.price_monitor"] },
-            finance: { label: "Finance", grants: ["expenses.record", "expenses.view_all", "expenses.export", "reports.sales", "reports.profit"] },
+            // PRESET-002: expenses.view is what the expense screens and
+            // exports require first; "view all" without it was a 403.
+            finance: { label: "Finance", grants: ["expenses.view", "expenses.record", "expenses.view_all", "expenses.export", "reports.sales", "reports.profit"] },
         };
+        // PRESET-001: a job preset decides the JOB capabilities (inventory,
+        // sales, purchasing, finance). It must not silently take away the
+        // everyday Staff defaults that belong to no particular job — so these
+        // stay as they are whenever a preset is applied. The specialist
+        // presets' deliberate narrowing of inventory/sales codes is unchanged
+        // (operator decision 2026-09-18).
+        const PRESET_PRESERVED_CODES = new Set(["expenses.view", "business_day.manage", "ai.use"]);
 
         let employeePermissionsTargetId = null;
         let employeePermissionsData = null; // last-loaded { user_id, role, categories, version } from GET /users/{id}/permissions
@@ -20990,7 +21189,7 @@
                 </select>
                 <button type="button" onclick="applyEmployeePermissionPreset()" class="text-[11px] px-3 py-1.5 rounded-lg bg-primary/15 text-primary border border-primary/30 font-semibold cursor-pointer whitespace-nowrap">Apply</button>
             </div>
-            <div class="text-[9px] text-textSec mb-3">Presets just tick the boxes below — nothing is saved until you click Save Changes, and every box stays individually editable.</div>`;
+            <div class="text-[9px] text-textSec mb-3">Presets just tick the boxes below — nothing is saved until you click Save Changes, and every box stays individually editable. View Expenses, Business Day and AI access are left as they are.</div>`;
 
             const groupsHtml = Object.entries(categories).map(([category, rows]) => {
                 const rowsHtml = rows.map(row => {
@@ -21045,6 +21244,7 @@
             const checkboxes = document.querySelectorAll('#employee-permissions-body input[data-permission-code]');
             checkboxes.forEach(cb => {
                 if (cb.disabled) return; // never touch a hard-restricted/uneditable row
+                if (PRESET_PRESERVED_CODES.has(cb.dataset.permissionCode) && !grantSet.has(cb.dataset.permissionCode)) return;
                 const wants = grantSet.has(cb.dataset.permissionCode);
                 if (wants) employeePermissionsDraft.add(cb.dataset.permissionCode);
                 else employeePermissionsDraft.delete(cb.dataset.permissionCode);
@@ -22531,7 +22731,7 @@
                     const data = await res.json().catch(()=>({}));
                     if (!res.ok) { const err = new Error(data.detail || t("products.geminiUnavailable")); err.status = res.status; throw err; }
                     tipEl.textContent = `${data.advice || t("products.geminiAdviceReady")} ${t("products.suggestedPrices", {wholesale: formatCurrency(data.suggested_wholesale), retail: formatCurrency(data.suggested_retail)})}`;
-                } catch (e) { tipEl.textContent = e.status === 403 ? (e.message || t("products.advisorStarterRequired")) : t("products.geminiTemporarilyUnavailable"); }
+                } catch (e) { tipEl.textContent = e.status === 403 ? (e.message || t("products.advisorStarterRequired", {plan: featureMinPlanLabels.ai})) : t("products.geminiTemporarilyUnavailable"); }
             }, 500);
         }
 
@@ -22552,7 +22752,7 @@
                     const data = await res.json().catch(()=>({}));
                     if (!res.ok) { const err = new Error(data.detail || t("products.geminiUnavailable")); err.status = res.status; throw err; }
                     tipEl.textContent = `${data.advice || t("products.geminiAdviceReady")} ${t("products.suggestedPrices", {wholesale: formatCurrency(data.suggested_wholesale), retail: formatCurrency(data.suggested_retail)})}`;
-                } catch (e) { tipEl.textContent = e.status === 403 ? (e.message || t("products.advisorStarterRequired")) : t("products.geminiTemporarilyUnavailable"); }
+                } catch (e) { tipEl.textContent = e.status === 403 ? (e.message || t("products.advisorStarterRequired", {plan: featureMinPlanLabels.ai})) : t("products.geminiTemporarilyUnavailable"); }
             }, 500);
         }
 
@@ -23918,6 +24118,7 @@
                     } else {
                         const res = await fetchWithTimeout(`${API_URL}/sales/current-day${qs}`, { headers: { "Authorization": `Bearer ${authToken}` } }, 6500);
                         if (res.ok) d = await res.json();
+                        else if (res.status === 402) noteSubscriptionResponse(res, await res.json().catch(() => ({})));
                     }
                 }
             } catch (_) { /* keep the NOT_STARTED fallback rather than guessing */ }
@@ -24059,6 +24260,14 @@
                 // nothing has ever been opened today or a session was
                 // already opened and closed — this view has no closed/
                 // Reopen state of its own, matching the Dashboard control.
+                if (subscriptionBlockedMessage) {
+                    // SUB-002: the real cause, not a closed Business Day.
+                    status.innerHTML = businessDayBanner("bg-danger", "border-danger/30", "bg-danger/10",
+                        escapeHtml(subscriptionBlockedMessage), escapeHtml(t("subscription.dataKept")), "");
+                    box.innerHTML=''; emptyState.classList.add('hidden'); emptyState.innerHTML=''; document.getElementById('sales-chart').innerHTML='';
+                    hideBusinessDayActivity();
+                    return;
+                }
                 if (!d.open || !b) {
                     status.innerHTML = businessDayBanner("bg-textSec", "border-borderCol", "bg-bgMain",
                         "No Business Day is currently open",
@@ -24070,15 +24279,16 @@
 
                 // OPEN or REOPENED
                 const reopenedTag = d.status === "REOPENED" ? " (Reopened)" : "";
-                // "Transactions" is available to every role, including
-                // Staff — Staff are explicitly authorized to create refunds
-                // (see /sales/transactions) and this is their entry point,
-                // since the day-level Sales History aggregate stays
-                // staff-restricted exactly as before (unrelated, unchanged).
+                // "Transactions" is the entry point for refunds, and its list
+                // (/sales/transactions) requires sales.refund — which Staff do
+                // NOT hold by default (X4: it used to be shown to everyone and
+                // failed with a permission error for Staff).
+                const canRefund = hasPermission('sales.refund');
+                const transactionsBtn = canRefund ? `<button type="button" onclick="openRefundTransactionsModal(${b.id})" class="text-[11px] text-textSec hover:text-primary underline decoration-dotted cursor-pointer${canViewActivity ? "" : " ml-auto"}"><i class="fa-solid fa-receipt mr-1"></i>Transactions</button>` : "";
                 status.innerHTML = businessDayBanner("bg-success", "border-success/30", "bg-success/10",
                     `Business Day Open${reopenedTag} · ${b.date}`,
                     `Opened ${formatBusinessTime(b.opened_at)}${b.opened_by_name ? " by " + b.opened_by_name : ""}`,
-                    `${canViewActivity ? bdActivityToggleBtn(b.id) : ""}<button type="button" onclick="openRefundTransactionsModal(${b.id})" class="text-[11px] text-textSec hover:text-primary underline decoration-dotted cursor-pointer${canViewActivity ? "" : " ml-auto"}"><i class="fa-solid fa-receipt mr-1"></i>Transactions</button>`);
+                    `${canViewActivity ? bdActivityToggleBtn(b.id) : ""}${transactionsBtn}`);
                 box.innerHTML = renderDailySalesCards(b, "Open");
                 renderDailySalesEmptyState(emptyState, b);
                 renderSalesChart();
@@ -24835,10 +25045,11 @@
                 : "";
             // Entry point to individual completed transactions for this day
             // — the only place a refund can be started from (never the POS
-            // cart itself). Available to every role, including Staff, since
-            // Staff are explicitly authorized to create refunds and need a
-            // way to find what they're refunding (see /sales/transactions).
-            const transactionsToggle = `<button type="button" onclick="openRefundTransactionsModal(${x.business_day_id})" class="text-[10px] text-textSec hover:text-primary underline decoration-dotted cursor-pointer">Transactions</button>`;
+            // cart itself). Shown only with sales.refund, which the list
+            // itself requires (X4: Staff do not hold it by default).
+            const transactionsToggle = hasPermission('sales.refund')
+                ? `<button type="button" onclick="openRefundTransactionsModal(${x.business_day_id})" class="text-[10px] text-textSec hover:text-primary underline decoration-dotted cursor-pointer">Transactions</button>`
+                : "";
             // Refunded-that-day indicator — only shown once there's actually
             // something to show (section 26/27), never invented for a day
             // with no refund activity.
@@ -27043,6 +27254,7 @@
             const res = await fetch(`${API_URL}/business-brain`, {credentials:'include', headers:{'Authorization':`Bearer ${authToken}`, 'Accept':'application/json'}});
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
+                noteSubscriptionResponse(res, data);
                 const err = new Error(friendlyErrorMessage(data, t("businessBrain.unavailable")));
                 err.status = res.status;
                 throw err;
@@ -27058,7 +27270,10 @@
             if (!hasAuthenticatedBusinessContext()) { renderBusinessBriefDashboard(); return; }
             try { await fetchBusinessBrain(); }
             catch (err) {
-                if (err.status === 403) dashboardBrainForbiddenMessage = err.message || t("businessBrain.starterRequired");
+                // Business Brain is in every plan, so a refusal is never an
+                // upgrade matter (PLAN-001 showed "Upgrade to Starter" to
+                // Starter customers here): show the server's own reason.
+                if (err.status === 403 || err.status === 402) dashboardBrainForbiddenMessage = err.message || t("businessBrain.unavailable");
             }
             renderBusinessBriefDashboard();
         }
@@ -27191,7 +27406,8 @@
                 return;
             }
             if (dashboardBrainForbiddenMessage) {
-                container.innerHTML = `<button type="button" onclick="openBillingModal()" class="business-brief-upgrade">${brainEsc(t("businessBrain.upgradeToUnlock"))}</button>`;
+                container.innerHTML = businessBriefEmpty('fa-lock', subscriptionBlockedMessage
+                    ? `${subscriptionBlockedMessage} ${t("subscription.dataKept")}` : dashboardBrainForbiddenMessage);
                 return;
             }
             const attention = getBusinessBriefAttentionItems();
@@ -27589,6 +27805,8 @@
                         : Promise.resolve(null)
                 ]);
                 if (productRes.status === 401 || supplierRes?.status === 401) { handleAuthenticationFailure(); return; }
+                if (productRes.status === 402) noteSubscriptionResponse(productRes, await productRes.clone().json().catch(() => ({})));
+                else if (productRes.ok && subscriptionBlockedMessage) setSubscriptionBlocked(null); // resubscribed
                 const serverProducts = productRes.ok ? await productRes.json() : [];
                 const serverSuppliers = supplierRes?.ok ? await supplierRes.json() : [];
                 const unresolvedLocalWork = (await getOutboxForCurrentBusiness().catch(() => [])).some((row) => row.status !== "synced");
@@ -27598,9 +27816,13 @@
                 // Server data is now authoritative for this business — refresh
                 // the offline read cache so viewing/selling can continue from
                 // this snapshot the next time the network is unavailable.
+                // A refused read (e.g. 402 while the subscription is inactive)
+                // is not "the business has no products": never overwrite the
+                // offline copy with an empty list.
                 if (!unresolvedLocalWork) {
-                    cacheProductsLocally(globalProducts);
-                    cacheSuppliersLocally(globalSuppliers);
+                    if (productRes.ok) cacheProductsLocally(globalProducts);
+                    // No supplier.view: still clear the local copy, as before.
+                    if (supplierRes === null || supplierRes.ok) cacheSuppliersLocally(globalSuppliers);
                 }
                 // Re-attach any products created offline that haven't synced
                 // yet — a fresh page load otherwise wouldn't know they exist,
@@ -27781,6 +28003,17 @@
                             <div class="text-textMain font-semibold text-sm">Sign in to see your inventory</div>
                             <div class="text-textSec text-xs max-w-xs">Register your business or sign in to start tracking products, stock levels, and sales.</div>
                             <button type="button" onclick="openBusinessAuthModal()" class="mt-1 text-primary hover:underline font-semibold text-xs cursor-pointer">Get Started →</button>
+                        </div>
+                    </td></tr>`;
+                } else if (subscriptionBlockedMessage) {
+                    // SUB-004: the products are kept; the server just isn't
+                    // serving them while the subscription is inactive. Never
+                    // present that as an empty inventory.
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center py-16">
+                        <div class="flex flex-col items-center gap-2.5">
+                            <i class="fa-solid fa-lock text-3xl text-textSec/40"></i>
+                            <div class="text-textMain font-semibold text-sm">${escapeHtml(subscriptionBlockedMessage)}</div>
+                            <div class="text-textSec text-xs max-w-xs">${escapeHtml(t("subscription.dataKept"))}</div>
                         </div>
                     </td></tr>`;
                 } else {
@@ -28376,6 +28609,7 @@
                         return;
                     }
                     const canDeactivateSupplier = hasPermission('supplier.deactivate');
+                    const canEditSupplier = hasPermission('supplier.edit');
                     tbody.innerHTML = globalSuppliers.map(s => `
                         <tr class="hover:bg-cardHover/50 transition">
                             <td class="py-2.5 px-2 font-bold text-textMain">${escapeHtml(s.name)}</td>
@@ -28386,6 +28620,9 @@
                                     <button type="button" onclick="dispatchWhatsAppOrder('${escapeHtml(s.name)}', '${escapeHtml(s.phone || '')}')" class="bg-success/15 hover:bg-success/25 text-success border border-success/30 px-2.5 py-1 rounded-lg font-semibold transition flex items-center gap-1 cursor-pointer" title="${t('suppliers.whatsappOrderTitle')}">
                                         <i class="fa-brands fa-whatsapp text-xs"></i> ${t('suppliers.order')}
                                     </button>
+                                    ${canEditSupplier ? `<button type="button" onclick="openSupplierEditModal(${s.id})" class="w-6 h-6 rounded-lg bg-primary/15 hover:bg-primary/25 text-primary flex items-center justify-center cursor-pointer" title="Edit supplier" aria-label="Edit supplier ${escapeHtml(s.name)}">
+                                        <i class="fa-solid fa-pen text-[10px]"></i>
+                                    </button>` : ''}
                                     ${canDeactivateSupplier ? `<button type="button" onclick="deleteSupplier(${s.id})" class="w-6 h-6 rounded-lg bg-danger/15 hover:bg-danger/25 text-danger flex items-center justify-center cursor-pointer" title="${t('common.delete')}">
                                         <i class="fa-solid fa-trash-can text-[10px]"></i>
                                     </button>` : ''}
@@ -28468,6 +28705,47 @@
                     loadSuppliers();
                 } catch (error) { showToast(error.message, "error"); }
             }
+        }
+
+        // supplier.edit — the permission existed with nothing behind it; this
+        // edits name, contact email and phone through PATCH /suppliers/{id}.
+        let supplierEditTargetId = null;
+        function openSupplierEditModal(supplierId) {
+            const s = (globalSuppliers || []).find(x => x.id === supplierId);
+            if (!s || !hasPermission('supplier.edit')) return;
+            supplierEditTargetId = supplierId;
+            document.getElementById('supplier-edit-name').value = s.name || '';
+            document.getElementById('supplier-edit-email').value = s.contact_email || '';
+            document.getElementById('supplier-edit-phone').value = s.phone || '';
+            document.getElementById('supplier-edit-modal').classList.remove('hidden');
+            document.getElementById('supplier-edit-name').focus();
+        }
+        function closeSupplierEditModal() {
+            document.getElementById('supplier-edit-modal')?.classList.add('hidden');
+            supplierEditTargetId = null;
+        }
+        async function saveSupplierEdit(event) {
+            event?.preventDefault?.();
+            if (!supplierEditTargetId || !authToken) return;
+            const body = {
+                name: document.getElementById('supplier-edit-name').value.trim(),
+                contact_email: document.getElementById('supplier-edit-email').value.trim(),
+                phone: document.getElementById('supplier-edit-phone').value.trim(),
+            };
+            const btn = document.getElementById('supplier-edit-save');
+            btn.disabled = true;
+            try {
+                const res = await fetch(`${API_URL}/suppliers/${supplierEditTargetId}`, {
+                    method: 'PATCH', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` }, body: JSON.stringify(body)
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(showApiError(res, data, 'The supplier could not be updated.'), 'error'); return; }
+                closeSupplierEditModal();
+                showToast('Supplier updated.', 'success');
+                loadSuppliers();
+            } catch (_) {
+                showToast(t("common.actionFailed"), 'error');
+            } finally { btn.disabled = false; }
         }
 
         async function deleteSupplier(supplierId) {
@@ -28901,10 +29179,24 @@
                 const res=await fetch(`${API_URL}/price-monitor`,{headers:{"Authorization":`Bearer ${authToken}`}}); const data=await res.json();
                 if(!res.ok) throw new Error(showApiError(res,data,t("priceMonitor.loadFailed")));
                 const sources=data.sources||[]; lastPriceMonitorSources=sources; document.getElementById('price-monitor-status').innerText=tPlural("priceMonitor.sourcesMonitored", sources.length);
+                // PLAN-007: on a plan without Price Monitor the records stay
+                // visible (never hidden by a downgrade) but nothing can be
+                // added, recorded or checked; the server refuses those too.
+                const included = data.included !== false;
+                currentPriceMonitorIncluded = included;
+                const planNote = document.getElementById('price-monitor-plan-note');
+                if (planNote) {
+                    planNote.classList.toggle('hidden', included);
+                    planNote.textContent = included ? '' : `Price Monitor is not included in your ${data.plan_label || 'current'} plan. It is included on ${data.upgrade_plan_label || featureMinPlanLabels.price_monitor} and above.${sources.length ? ' Your existing price records stay available to view.' : ''}`;
+                }
+                // Invoice scanning is an AI feature (require_ai_access on the server).
+                document.getElementById('price-monitor-ocr-block')?.classList.toggle('hidden', !included || !currentAiEntitled);
                 const allHistory=sources.flatMap(s=>s.history||[]).sort((a,b)=>new Date(a.recorded_at)-new Date(b.recorded_at));
                 const summary=document.getElementById('price-monitor-summary'); summary.innerHTML=[[t("priceMonitor.monitoring"),sources.length],[t("priceMonitor.priceChanges"),sources.filter(s=>s.change_percent!==null&&Math.abs(s.change_percent)>0.01).length],[t("priceMonitor.websiteSources"),sources.filter(s=>s.source_type==='website').length],[t("priceMonitor.manualList"),sources.filter(s=>s.source_type!=='website').length]].map(x=>`<div class="p-2.5 rounded-xl bg-cardBg border border-borderCol"><div class="text-[9px] text-textSec">${x[0]}</div><div class="font-bold text-sm mt-0.5">${x[1]}</div></div>`).join('');
                 if(allHistory.length){ const max=Math.max(...allHistory.map(x=>x.price),1), min=Math.min(...allHistory.map(x=>x.price)); document.getElementById('price-monitor-chart').innerHTML=`<div class="flex items-end gap-1 h-[140px] px-2">${allHistory.slice(-20).map(x=>`<div class="flex-1 bg-primary/65 rounded-t" style="height:${Math.max(5,((x.price-min)/Math.max(1,max-min))*100)}%" title="${formatCurrency(x.price)} · ${formatBusinessDate(x.recorded_at)}"></div>`).join('')}</div><div class="flex justify-between text-[9px] text-textSec mt-2"><span>${formatCurrency(min)}</span><span>${t("priceMonitor.recordedSupplierPrices")}</span><span>${formatCurrency(max)}</span></div>`; } else document.getElementById('price-monitor-chart').innerText=t("priceMonitor.noHistoryAddSource");
-                container.innerHTML=`<div class="flex justify-end mb-2"><button type="button" onclick="openPriceSourceModal()" class="bg-primary hover:bg-primaryHover text-white px-3 py-2 rounded-xl text-[11px] font-semibold"><i class="fa-solid fa-plus mr-1"></i>${t("priceMonitor.addPriceSource")}</button></div>`+(sources.length?sources.map(s=>`<div class="bg-bgMain border border-borderCol rounded-xl p-3"><div class="flex items-start justify-between gap-3"><div><div class="font-bold text-xs">${escapeHtml(s.product_name)} <span class="text-textSec font-mono text-[10px]">(${escapeHtml(s.sku)})</span></div><div class="text-[10px] text-textSec mt-0.5">${escapeHtml(s.supplier_name)} · ${s.source_type==='website'?t("priceMonitor.sourceTypeWebsite"):s.source_type==='price_list'?t("priceMonitor.sourceTypePriceList"):t("priceMonitor.sourceTypeManual")}</div></div><div class="text-right"><div class="font-mono font-semibold text-textMain">${s.last_price!==null?formatCurrency(s.last_price):t("priceMonitor.noPriceYet")}</div>${s.change_percent!==null?`<div class="text-[10px] ${s.change_percent>0?'text-danger':'text-success'}">${s.change_percent>0?'+':''}${s.change_percent}%</div>`:''}</div></div><div class="flex justify-end gap-2 mt-2">${s.source_type==='website'?`<button type="button" onclick="checkPriceSource(${s.id})" class="text-[10px] bg-primary/10 text-primary border border-primary/25 px-2.5 py-1.5 rounded-lg">${t("common.checkNow")}</button>`:''}<button type="button" onclick="manualPriceUpdate(${s.id})" class="text-[10px] bg-bgMain text-textSec border border-borderCol px-2.5 py-1.5 rounded-lg">${t("priceMonitor.updatePrice")}</button></div></div>`).join(''):`<div class="text-center py-8 text-xs text-textSec">${t("priceMonitor.noSourcesYet")}</div>`);
+                const addSourceBar = included ? `<div class="flex justify-end mb-2"><button type="button" onclick="openPriceSourceModal()" class="bg-primary hover:bg-primaryHover text-white px-3 py-2 rounded-xl text-[11px] font-semibold"><i class="fa-solid fa-plus mr-1"></i>${t("priceMonitor.addPriceSource")}</button></div>` : '';
+                const sourceActions = s => !included ? '' : `<div class="flex justify-end gap-2 mt-2">${s.source_type==='website'?`<button type="button" onclick="checkPriceSource(${s.id})" class="text-[10px] bg-primary/10 text-primary border border-primary/25 px-2.5 py-1.5 rounded-lg">${t("common.checkNow")}</button>`:''}<button type="button" onclick="manualPriceUpdate(${s.id})" class="text-[10px] bg-bgMain text-textSec border border-borderCol px-2.5 py-1.5 rounded-lg">${t("priceMonitor.updatePrice")}</button></div>`;
+                container.innerHTML=addSourceBar+(sources.length?sources.map(s=>`<div class="bg-bgMain border border-borderCol rounded-xl p-3"><div class="flex items-start justify-between gap-3"><div><div class="font-bold text-xs">${escapeHtml(s.product_name)} <span class="text-textSec font-mono text-[10px]">(${escapeHtml(s.sku)})</span></div><div class="text-[10px] text-textSec mt-0.5">${escapeHtml(s.supplier_name)} · ${s.source_type==='website'?t("priceMonitor.sourceTypeWebsite"):s.source_type==='price_list'?t("priceMonitor.sourceTypePriceList"):t("priceMonitor.sourceTypeManual")}</div></div><div class="text-right"><div class="font-mono font-semibold text-textMain">${s.last_price!==null?formatCurrency(s.last_price):t("priceMonitor.noPriceYet")}</div>${s.change_percent!==null?`<div class="text-[10px] ${s.change_percent>0?'text-danger':'text-success'}">${s.change_percent>0?'+':''}${s.change_percent}%</div>`:''}</div></div>${sourceActions(s)}</div>`).join(''):`<div class="text-center py-8 text-xs text-textSec">${t("priceMonitor.noSourcesYet")}</div>`);
             }catch(e){lastPriceMonitorSources=[];const msg=String(e.message||''); const professional=msg.toLowerCase().includes('not found')||msg.includes('404')?t("priceMonitor.noSourcesSetup"):friendlyErrorMessage(msg,t("priceMonitor.monitoringUnavailable")); container.innerHTML=`<div class="p-4 rounded-xl bg-bgMain border border-borderCol text-center text-xs text-textSec"><div class="font-semibold text-textMain mb-1">${t("priceMonitor.monitoringReady")}</div><div>${professional}</div></div>`;}
         }
 

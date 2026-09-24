@@ -2096,6 +2096,63 @@ def plan_label_for(plan_id) -> str:
     return PLAN_CONFIG.get((plan_id or "").strip().lower(), {}).get("label") or (plan_id or "—")
 
 
+# Plan features that are either in a plan or not (PLAN-007). A limit of 0 means
+# the capability is not part of that plan at all, which is how the plan cards
+# already present it ("omitted", never "0 sources"); None means unlimited.
+PLAN_FEATURE_KEYS = {"ai": "included_ai_credits", "price_monitor": "price_monitor"}
+PLAN_FEATURE_NAMES = {"ai": "AI features", "price_monitor": "Price Monitor"}
+
+def plan_includes_feature(plan_id: Optional[str], feature: str) -> bool:
+    cfg = PLAN_CONFIG.get((plan_id or "").strip().lower(), PLAN_CONFIG["starter"])
+    value = cfg.get(PLAN_FEATURE_KEYS[feature])
+    return value is None or int(value) > 0
+
+def minimum_plan_label_for(feature: str) -> str:
+    """Public label of the cheapest plan that includes a feature — what an
+    upgrade prompt must name (PLAN-001), never the internal plan id."""
+    for pid in sorted(PLAN_CONFIG, key=lambda p: PLAN_RANK.get(p, 99)):
+        if plan_includes_feature(pid, feature):
+            return PLAN_CONFIG[pid]["label"]
+    return PLAN_CONFIG["enterprise"]["label"]
+
+def require_plan_feature(db: Session, user: "User", feature: str) -> None:
+    """Server-side plan gate for a feature a plan either includes or not.
+    Reads stay available elsewhere so a business never loses sight of records
+    it created while on a plan that included the feature."""
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    plan_id = (get_or_create_subscription(db, business).plan or "starter").strip().lower()
+    if not plan_includes_feature(plan_id, feature):
+        raise HTTPException(status_code=403, detail=(
+            f"{PLAN_FEATURE_NAMES[feature]} is not included in your {plan_label_for(plan_id)} plan. "
+            f"Upgrade to {minimum_plan_label_for(feature)} to use it. Records you already have stay available to view."))
+
+SUBSCRIPTION_BLOCKED_MESSAGES = {
+    "pending_payment_method": "Add a payment method to start your 14-day free trial or subscribe to a plan.",
+    "expired": "Your 14-day trial has ended. Subscribe to continue using Cauldra.",
+    "cancelled": "Your subscription has been cancelled. Subscribe to continue using Cauldra.",
+}
+SUBSCRIPTION_BLOCKED_FALLBACK = "Your subscription is not currently active. Choose a plan or subscribe to continue."
+
+def subscription_access_state(sub: Optional["BusinessSubscription"], now: Optional[datetime] = None) -> tuple:
+    """Read-only mirror of require_subscription_access(): (effective status,
+    blocking message or None). Never writes — it runs on the auth/snapshot
+    serializer path — so it applies the same date rules as
+    refresh_subscription_status() without committing them."""
+    if sub is None:
+        return None, None
+    now = now or datetime.utcnow()
+    status = sub.status
+    if status == "trialing" and sub.trial_end_at and now >= sub.trial_end_at:
+        status = "expired"
+    elif status == "active" and sub.current_period_end and now >= sub.current_period_end:
+        status = "cancelled" if sub.cancel_at_period_end else "past_due"
+    elif status == "past_due" and sub.grace_period_ends_at and now >= sub.grace_period_ends_at:
+        status = "expired"
+    if status in {"trialing", "active", "past_due"}:
+        return status, None
+    return status, SUBSCRIPTION_BLOCKED_MESSAGES.get(status, SUBSCRIPTION_BLOCKED_FALLBACK)
+
+
 # Strict plan ordering used ONLY to decide whether a requested plan change is
 # a genuine upgrade (see /subscription/upgrade-quote). A billing-interval
 # change on the SAME plan (e.g. Business Monthly -> Business Annual) is
@@ -2232,6 +2289,19 @@ def refresh_subscription_status(db: Session, subscription: Optional[BusinessSubs
             deep_link="subscription", dedup_key=f"sub_expired:{subscription.business_id}",
         )
         db.commit()
+    elif (subscription.status == "active" and subscription.cancel_at_period_end
+          and subscription.current_period_end and now >= subscription.current_period_end):
+        # The customer cancelled and the period they paid for is over. That is
+        # the end of the subscription, not a missed payment: no grace period
+        # and no "payment failed" notice for a charge that was never due.
+        subscription.status = "cancelled"
+        subscription.cancelled_at = subscription.cancelled_at or now
+        create_notification(
+            db, business_id=subscription.business_id, category="subscription", severity="critical", type="SUBSCRIPTION_ENDED",
+            title="Subscription ended", message="Your cancelled Cauldra subscription has ended. Your business data is kept. Subscribe to a plan to continue using Cauldra.",
+            deep_link="subscription", dedup_key=f"sub_ended:{subscription.business_id}",
+        )
+        db.commit()
     elif subscription.status == "active" and subscription.current_period_end and now >= subscription.current_period_end:
         # A renewal charge should have arrived via webhook before this point. If it
         # hasn't, treat it as a failed/missed payment and start the grace period
@@ -2267,12 +2337,7 @@ def require_subscription_access(db: Session, user: User):
         # Grace period: access continues while we wait for the retried/resolved charge.
         return subscription
     if subscription.status not in {"trialing", "active"}:
-        messages = {
-            "pending_payment_method": "Add a payment method to start your 14-day free trial or subscribe to a plan.",
-            "expired": "Your 14-day trial has ended. Subscribe to continue using Cauldra.",
-            "cancelled": "Your subscription has been cancelled. Subscribe to continue using Cauldra.",
-        }
-        raise HTTPException(status_code=402, detail=messages.get(subscription.status, "Your subscription is not currently active. Choose a plan or subscribe to continue."))
+        raise HTTPException(status_code=402, detail=SUBSCRIPTION_BLOCKED_MESSAGES.get(subscription.status, SUBSCRIPTION_BLOCKED_FALLBACK))
     return subscription
 
 def billing_period_for(db: Session, business: BusinessProfile, now: Optional[datetime] = None) -> tuple[datetime, datetime, str]:
@@ -2436,7 +2501,8 @@ def entitlement_capacity_snapshot(db: Session, business: BusinessProfile, plan_i
         maximum = None if configured_limit is None else (int(configured_limit) * 1024 ** 3 if resource == "storage_gb" else int(configured_limit))
         status_value = "UNLIMITED" if maximum is None else ("OVER_LIMIT" if current > maximum else ("AT_LIMIT" if current == maximum else "WITHIN_LIMIT"))
         rows.append({
-            "resource": resource, "plan_config_key": resource, "limit_type": "capacity",
+            "resource": resource, "label": ENTITLEMENT_RESOURCE_LABELS.get(resource, resource.replace("_", " ")),
+            "plan_config_key": resource, "limit_type": "capacity",
             "current": current, "limit": maximum, "configured_limit": configured_limit,
             "unit": "bytes" if resource == "storage_gb" else "count", "status": status_value,
             "existing_data_preserved": True,
@@ -2473,6 +2539,66 @@ def record_ai_usage(db: Session, user: User, operation_type: str, success: bool,
                          input_tokens=metadata.get("input_tokens"), output_tokens=metadata.get("output_tokens"), estimated_provider_cost=metadata.get("estimated_provider_cost")))
     return credits
 
+# Audit actions that change a subscription's plan in the middle of a billing
+# period. Each carries {"from_plan", "to_plan"} in metadata_json (older rows may
+# not), which is how AI use is attributed to the plan in force when it happened.
+PLAN_CHANGE_AUDIT_ACTIONS = ("SUBSCRIPTION_PLAN_CHANGED", "SUBSCRIPTION_UPGRADED")
+
+def ai_overage_credits(db: Session, business: BusinessProfile, current_plan_id: str,
+                       period_start: datetime, period_end: datetime, used: int) -> int:
+    """PLAN-008: credits consumed inside the allowance of the plan in force at
+    the time stay included. A later plan change never re-prices them.
+
+    Each successful ledger row is measured against the allowance of the plan
+    that was active when it was recorded (from the plan-change audit trail).
+    A change recorded without plan metadata (before this fix) is treated as
+    "the earlier plan is unknown", and usage before it is never counted as
+    overage. The result is also capped at the plain current-plan figure, so a
+    change never produces MORE overage than the old calculation did (an
+    upgrade still absorbs earlier overage, as before)."""
+    current_included = int(PLAN_CONFIG.get(current_plan_id, PLAN_CONFIG["starter"])["included_ai_credits"] or 0)
+    plain = max(0, int(used) - current_included)
+    if not plain:
+        return 0
+    changes = (db.query(AuditLog.created_at, AuditLog.metadata_json)
+               .filter(AuditLog.business_id == business.id, AuditLog.action.in_(PLAN_CHANGE_AUDIT_ACTIONS),
+                       AuditLog.created_at >= period_start, AuditLog.created_at < period_end)
+               .order_by(AuditLog.created_at.asc(), AuditLog.id.asc()).all())
+    if not changes:
+        return plain
+    segments = []  # (starts_at, plan id or None when unknown)
+    for created_at, raw in changes:
+        try:
+            meta = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            meta = {}
+        segments.append((created_at, meta.get("from_plan"), meta.get("to_plan")))
+    def allowance_at(ts):
+        plan_id = segments[0][1]
+        for starts_at, _from, to_plan in segments:
+            if ts >= starts_at:
+                plan_id = to_plan
+            else:
+                break
+        if not plan_id or plan_id not in PLAN_CONFIG:
+            return None  # unknown plan: never re-priced as overage
+        return int(PLAN_CONFIG[plan_id]["included_ai_credits"] or 0)
+    rows = (db.query(AIUsageLedger.created_at, AIUsageLedger.credits_consumed)
+            .filter(AIUsageLedger.business_id == business.id, AIUsageLedger.created_at >= period_start,
+                    AIUsageLedger.created_at < period_end, AIUsageLedger.success == True)
+            .order_by(AIUsageLedger.created_at.asc(), AIUsageLedger.id.asc()).all())
+    cumulative = 0; attributed = 0
+    for created_at, credits in rows:
+        before, cumulative = cumulative, cumulative + int(credits or 0)
+        allowance = allowance_at(created_at)
+        if allowance is None:
+            continue
+        attributed += max(0, cumulative - allowance) - max(0, before - allowance)
+    return min(attributed, plain)
+
+def plan_change_metadata(from_plan: Optional[str], to_plan: Optional[str]) -> dict:
+    return {"from_plan": (from_plan or "").strip().lower() or None, "to_plan": (to_plan or "").strip().lower() or None}
+
 def usage_summary(db: Session, business: BusinessProfile) -> dict:
     sub = get_or_create_subscription(db, business)
     plan = subscription_for(db, business); period_start, period_end, period = billing_period_for(db, business)
@@ -2480,8 +2606,17 @@ def usage_summary(db: Session, business: BusinessProfile) -> dict:
         AIUsageLedger.business_id == business.id, AIUsageLedger.created_at >= period_start,
         AIUsageLedger.created_at < period_end, AIUsageLedger.success == True,
     ).scalar() or 0
-    included = plan["included_ai_credits"]; overage = max(0, int(used) - included)
+    included = plan["included_ai_credits"]
+    overage = ai_overage_credits(db, business, (sub.plan or "starter").strip().lower(), period_start, period_end, int(used))
     overage_charge = ((overage + plan["ai_overage_unit"] - 1) // plan["ai_overage_unit"]) * plan["ai_overage_price"] if overage else 0
+    # PLAN-002: a percentage of a zero allowance is meaningless — the 80%
+    # warning exists only on plans that include AI credits.
+    if overage:
+        ai_warning = "overage"
+    elif included and used >= included * .8:
+        ai_warning = "warning"
+    else:
+        ai_warning = None
     trial_end = sub.trial_end_at or (datetime.utcnow() + timedelta(days=plan["trial_days"]))
     current_price = plan["annual_price" if (sub.billing_interval or "monthly") == "annual" else "monthly_price"]
     return {"plan": (sub.plan or "starter").lower(), "plan_label": plan["label"], "billing_interval": sub.billing_interval or "monthly",
@@ -2490,7 +2625,11 @@ def usage_summary(db: Session, business: BusinessProfile) -> dict:
             "trial_start_at": to_utc_iso(sub.trial_start_at),
             "trial_days_remaining": max(0, (trial_end - datetime.utcnow()).days) if sub.status == "trialing" else 0,
             "included_ai_credits": included, "used_ai_credits": int(used), "remaining_ai_credits": max(0, included-int(used)),
-            "overage_credits": overage, "estimated_overage_charge": overage_charge, "ai_warning": "overage" if overage else ("warning" if used >= included * .8 else None),
+            "overage_credits": overage, "estimated_overage_charge": overage_charge, "ai_warning": ai_warning,
+            "ai_included": bool(included),
+            # Credits used this period beyond the current allowance that were
+            # included by the plan in force when they were used (PLAN-008).
+            "included_by_earlier_plan_credits": max(0, int(used) - int(included or 0) - overage),
             # Server-authoritative billing/subscription-management fields — the
             # frontend only ever displays these, it never decides them.
             "current_price_naira": current_price, "currency": "NGN",
@@ -4197,7 +4336,7 @@ PERMISSIONS = {
     # RESERVED/FUTURE: no PATCH /suppliers/{id} edit endpoint exists today —
     # this code is registered (for the permissions UI/report) but is not
     # enforced anywhere because there is nothing to enforce it on yet.
-    "supplier.edit":             {"category": "SUPPLIERS", "label": "Edit Suppliers",         "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True, "reserved": True},
+    "supplier.edit":             {"category": "SUPPLIERS", "label": "Edit Suppliers",         "admin": True, "manager": True, "staff": False, "staff_grantable": True,  "manager_can_grant": True},
     "supplier.deactivate":       {"category": "SUPPLIERS", "label": "Remove/Deactivate Suppliers", "admin": True, "manager": True, "staff": False, "staff_grantable": False, "manager_can_grant": False},
     # --- SALES ---------------------------------------------------------------
     "sales.create":               {"category": "SALES", "label": "Make Sales",              "admin": True, "manager": True, "staff": True,  "staff_grantable": True,  "manager_can_grant": True},
@@ -4720,6 +4859,17 @@ def serialize_business(b: BusinessProfile, db: Optional[Session] = None) -> dict
         sub = get_subscription(db, b.id)
         plan_id = ((sub.plan if sub and sub.plan else b.subscription_plan) or "starter").strip().lower()
         payload["ai_included"] = bool(PLAN_CONFIG.get(plan_id, PLAN_CONFIG["starter"]).get("included_ai_credits"))
+        # PLAN-001 / PLAN-007: the plan-feature gates name the plan that
+        # actually unlocks a feature, by its public label, and know whether
+        # Price Monitor is in this plan — the same rule the server enforces.
+        payload["price_monitor_included"] = plan_includes_feature(plan_id, "price_monitor")
+        payload["feature_min_plan_labels"] = {
+            "ai": minimum_plan_label_for("ai"), "price_monitor": minimum_plan_label_for("price_monitor"),
+        }
+        # SUB-002 / SUB-004: every role learns on sign-in whether the
+        # subscription currently allows use, so a cancelled or expired business
+        # is told so once, instead of each module guessing from a failed call.
+        payload["subscription_status"], payload["subscription_blocked_message"] = subscription_access_state(sub)
     return payload
 
 # =============================================================================
@@ -7811,6 +7961,10 @@ def list_account_action_request_history(limit: int = Query(50, ge=1, le=200), of
 @app.post("/account-action-requests/{request_id}/{resolution}")
 def resolve_account_action_request(request_id: int, resolution: str, actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if actor.role != "admin": raise HTTPException(status_code=403, detail="Only Admins can resolve approval requests.")
+    # ACCT-001: only the two real decisions are accepted. Anything else used to
+    # fall through to "reject", recording a decision nobody made.
+    if resolution not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="Choose Approve or Decline for this request.")
     row = db.query(AccountActionRequest).filter(AccountActionRequest.id == request_id, AccountActionRequest.business_id == actor.business_id, AccountActionRequest.status == "PENDING").first()
     if not row: raise HTTPException(status_code=404, detail="Approval request is no longer pending.")
     target = db.query(User).filter(User.id == row.target_user_id, User.business_id == actor.business_id).first() if row.target_user_id else None
@@ -10726,6 +10880,47 @@ def create_supplier(data: SupplierCreate, user: User = Depends(get_current_user)
     db.add(s); db.flush(); add_audit(db, user, "SUPPLIER_CREATED", f"Added supplier {s.name}.", action_category="SUPPLIERS", resource_type="supplier", resource_id=s.id); db.commit(); db.refresh(s)
     return {"id": s.id, "message": "Supplier added successfully."}
 
+class SupplierUpdate(BaseModel):
+    name: Optional[str] = None
+    contact_email: Optional[str] = None
+    phone: Optional[str] = None
+    lead_time_days: Optional[int] = None
+
+SUPPLIER_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+@app.patch("/suppliers/{supplier_id}")
+def update_supplier(supplier_id: int, data: SupplierUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Edit a supplier's details. Governed by supplier.edit, which previously
+    existed in the permission editor but had nothing to govern."""
+    require_permission(user, "supplier.edit")
+    s = db.query(Supplier).filter(Supplier.id == supplier_id, Supplier.business_id == user.business_id).first()
+    if not s: raise HTTPException(status_code=404, detail="The supplier could not be found.")
+    changes = data.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="Change at least one supplier detail.")
+    if "name" in changes:
+        name = (changes["name"] or "").strip()
+        if len(name) < 2:
+            raise HTTPException(status_code=400, detail="Supplier name must contain at least 2 characters.")
+        s.name = name
+    if "contact_email" in changes:
+        email = (changes["contact_email"] or "").strip()
+        if email and not SUPPLIER_EMAIL_PATTERN.match(email):
+            raise HTTPException(status_code=400, detail="Enter a valid supplier email address, or leave it blank.")
+        s.contact_email = email or None
+    if "phone" in changes:
+        phone = (changes["phone"] or "").strip()
+        if not phone:
+            raise HTTPException(status_code=400, detail="A supplier phone number is required.")
+        s.phone = phone
+    if "lead_time_days" in changes and changes["lead_time_days"] is not None:
+        if not 0 <= int(changes["lead_time_days"]) <= 365:
+            raise HTTPException(status_code=400, detail="Lead time must be between 0 and 365 days.")
+        s.lead_time_days = int(changes["lead_time_days"])
+    add_audit(db, user, "SUPPLIER_UPDATED", f"Updated supplier {s.name}.", action_category="SUPPLIERS", resource_type="supplier", resource_id=s.id)
+    db.commit(); db.refresh(s)
+    return {"id": s.id, "name": s.name, "contact_email": s.contact_email, "phone": s.phone, "lead_time_days": s.lead_time_days}
+
 @app.delete("/suppliers/{supplier_id}")
 def delete_supplier(supplier_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "supplier.deactivate")
@@ -11758,10 +11953,9 @@ def list_sale_transactions(
 ):
     """Individual completed transactions (grouped sale rows), the entry
     point for locating a sale to refund from — never used to auto-open a
-    Business Day (read-only, see section 6 of the refund spec). Staff can
-    read this (unlike the day-level /sales/history) because staff are
-    explicitly authorized to create refunds and need a way to find what
-    they're refunding."""
+    Business Day (read-only, see section 6 of the refund spec). Readable by
+    whoever holds sales.refund — Admin and Manager by default, and Staff only
+    when an Admin grants it (X4: Staff do NOT refund by default)."""
     require_permission(user, "sales.refund")
     if business_day_id is not None:
         day = db.query(BusinessDay).filter(BusinessDay.id == business_day_id, BusinessDay.business_id == user.business_id).first()
@@ -13080,6 +13274,11 @@ def unsubscribe_from_push(payload: PushUnsubscribeRequest, user: User = Depends(
 def price_monitor(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "procurement.price_monitor")
     rows = db.query(PriceMonitorSource).filter(PriceMonitorSource.business_id == user.business_id).order_by(PriceMonitorSource.id.desc()).all()
+    # PLAN-007: reading stays open on every plan so records created on a plan
+    # that included Price Monitor never disappear; every action is plan-gated.
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    plan_id = (get_or_create_subscription(db, business).plan or "starter").strip().lower()
+    included = plan_includes_feature(plan_id, "price_monitor")
     sources=[]
     for s in rows:
         product = db.query(Product).filter(Product.id == s.product_id).first() if s.product_id else None
@@ -13089,7 +13288,8 @@ def price_monitor(user: User = Depends(get_current_user), db: Session = Depends(
         if len(hist) >= 2 and hist[-2].price:
             change = round(((hist[-1].price - hist[-2].price)/hist[-2].price)*100, 2)
         sources.append({"id": s.id, "product_name": product.name if product else "Unknown product", "sku": product.sku if product else "", "supplier_name": supplier.name if supplier else "General Vendor", "source_type": s.source_type, "is_active": bool(s.is_active), "last_price": s.last_price, "change_percent": change, "history": [{"price": h.price, "recorded_at": to_utc_iso(h.recorded_at)} for h in hist]})
-    return {"sources": sources}
+    return {"sources": sources, "included": included, "plan_label": plan_label_for(plan_id),
+            "upgrade_plan_label": minimum_plan_label_for("price_monitor")}
 
 @app.post("/price-monitor/sources")
 def create_price_source(payload: PriceSourceCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -13097,6 +13297,7 @@ def create_price_source(payload: PriceSourceCreate, user: User = Depends(get_cur
     supplier_id = payload.supplier_id; product_id = payload.product_id; source_type = payload.source_type
     if not db.query(Supplier).filter(Supplier.id == supplier_id, Supplier.business_id == user.business_id).first(): raise HTTPException(status_code=404, detail="Supplier is unavailable.")
     if not db.query(Product).filter(Product.id == product_id, Product.business_id == user.business_id).first(): raise HTTPException(status_code=404, detail="Product is unavailable.")
+    require_plan_feature(db, user, "price_monitor")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     check_capacity_limit(db, business, "price_monitor")
     s=PriceMonitorSource(business_id=user.business_id, supplier_id=supplier_id, product_id=product_id, source_type=source_type, source_url=payload.source_url, is_active=True, last_price=payload.initial_price)
@@ -13111,6 +13312,7 @@ def update_price_source_status(source_id: int, payload: PriceSourceStatusUpdate,
     if not source:
         raise HTTPException(status_code=404, detail="Price source is unavailable.")
     if payload.is_active and not source.is_active:
+        require_plan_feature(db, user, "price_monitor")
         business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
         check_capacity_limit(db, business, "price_monitor")
     source.is_active = bool(payload.is_active)
@@ -13131,6 +13333,7 @@ def manual_price_update(source_id: int, payload: ManualPriceUpdate, user: User =
     s=db.query(PriceMonitorSource).filter(PriceMonitorSource.id == source_id, PriceMonitorSource.business_id == user.business_id).first()
     if not s: raise HTTPException(status_code=404, detail="Price source is unavailable.")
     if not s.is_active: raise HTTPException(status_code=409, detail="Reactivate this price source before recording a new price.")
+    require_plan_feature(db, user, "price_monitor")
     old_price = s.last_price
     price=payload.price; s.last_price=price; s.last_checked_at=datetime.utcnow(); db.add(PriceHistory(source_id=s.id, price=price))
     check_price_change_notification(db, s, old_price, price)
@@ -13142,6 +13345,7 @@ def check_price_source(source_id: int, user: User = Depends(get_current_user), d
     s=db.query(PriceMonitorSource).filter(PriceMonitorSource.id == source_id, PriceMonitorSource.business_id == user.business_id).first()
     if not s: raise HTTPException(status_code=404, detail="Price source is unavailable.")
     if not s.is_active: raise HTTPException(status_code=409, detail="Reactivate this price source before checking it.")
+    require_plan_feature(db, user, "price_monitor")
     if s.source_type != "website": raise HTTPException(status_code=400, detail="Only website monitoring sources can be checked automatically.")
     # Safe behavior until a real website scraper/parser is configured: retain the last price.
     if s.last_price is None: raise HTTPException(status_code=422, detail="No supplier price has been recorded for this source yet.")
@@ -13190,6 +13394,7 @@ def upload_price_list(payload: PriceListUploadRequest, user: User = Depends(get_
         raise HTTPException(status_code=404, detail="Supplier is unavailable.")
     if product_id and not db.query(Product).filter(Product.id == product_id, Product.business_id == user.business_id).first():
         raise HTTPException(status_code=404, detail="Product is unavailable.")
+    require_plan_feature(db, user, "price_monitor")
     file_name = safe_upload_name(payload.file_name, "price-list.csv")
     if Path(file_name).suffix.lower() != ".csv":
         raise HTTPException(status_code=422, detail="Please upload a CSV price list.")
@@ -13520,11 +13725,33 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
         {"operation": op, "label": AI_FEATURE_LABELS.get(op, op.replace("_", " ").title()), "credits_consumed": int(credits), "calls": int(calls), "credit_cost_per_call": AI_CREDIT_WEIGHTS.get(op)}
         for op, credits, calls in feature_rows
     ]
+    summary["over_limit_resources"] = over_limit_resources(db, business)
+    summary["price_monitor_included"] = plan_includes_feature(summary["plan"], "price_monitor")
+    summary["feature_min_plan_labels"] = {"ai": minimum_plan_label_for("ai"), "price_monitor": minimum_plan_label_for("price_monitor")}
     return redact_billing_for_role(user, summary)
 
 class ChangePlanRequest(BaseModel):
     plan: str
     billing_interval: Optional[str] = None
+    # UX-005: the price the Admin confirmed on screen. Optional so older
+    # clients keep working; when sent, a mismatch with the server's price is
+    # refused rather than applied.
+    expected_amount_naira: Optional[int] = None
+
+def over_limit_resources(db: Session, business: BusinessProfile, plan_id: Optional[str] = None) -> list:
+    """PLAN-005: capacity the business is currently above on a plan. Nothing
+    is removed or disabled; the list tells the Admin why adding is blocked."""
+    rows = []
+    for row in entitlement_capacity_snapshot(db, business, plan_id):
+        if row["status"] != "OVER_LIMIT":
+            continue
+        resource = row["resource"]
+        rows.append({
+            "resource": resource, "label": ENTITLEMENT_RESOURCE_LABELS.get(resource, resource.replace("_", " ")),
+            "current": round(row["current"] / 1024 ** 3, 3) if resource == "storage_gb" else row["current"],
+            "limit": row["configured_limit"], "unit": "GB" if resource == "storage_gb" else None,
+        })
+    return rows
 
 @app.get("/subscription/downgrade-impact")
 def downgrade_impact(plan: str, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
@@ -13562,6 +13789,8 @@ def change_plan(data: ChangePlanRequest, request: Request, user: User = Depends(
     sub = get_or_create_subscription(db, business)
     if interval not in ("monthly", "annual"):
         interval = sub.billing_interval or "monthly"
+    if data.expected_amount_naira is not None and int(data.expected_amount_naira) != plan_amount_naira(plan, interval):
+        raise HTTPException(status_code=409, detail="The price of this plan has changed since you reviewed it. Review the plan again before switching.")
 
     # SECURITY: this endpoint must never be usable to grant paid entitlements for
     # free. While a business is still on its unpaid trial, switching plans just
@@ -13597,7 +13826,8 @@ def change_plan(data: ChangePlanRequest, request: Request, user: User = Depends(
     sub.plan = plan; sub.billing_interval = interval
     business.subscription_plan = plan; business.billing_interval = interval
     clear_pending_downgrade(sub)
-    add_audit(db, user, "SUBSCRIPTION_PLAN_CHANGED", f"Subscription changed to {new_limits['label']} ({interval}).")
+    add_audit(db, user, "SUBSCRIPTION_PLAN_CHANGED", f"Subscription changed to {new_limits['label']} ({interval}).",
+              metadata=plan_change_metadata(current_plan_id, plan))
     db.commit()
     summary = usage_summary(db, business)
     summary["downgrade_impact"] = {
@@ -15468,7 +15698,8 @@ def reconcile_upgrade_payment(db, record, tx):
     clear_pending_downgrade(sub); safe_payment_method(sub, tx)
     business.subscription_plan = sub.plan; business.billing_interval = sub.billing_interval
     quote.status = 'paid'; quote.consumed_at = record.paid_at
-    add_audit(db, None, 'SUBSCRIPTION_UPGRADED', 'Paystack verified the upgrade. Existing billing period preserved.', business_id=business.id)
+    add_audit(db, None, 'SUBSCRIPTION_UPGRADED', 'Paystack verified the upgrade. Existing billing period preserved.', business_id=business.id,
+              metadata=plan_change_metadata(quote.from_plan, quote.to_plan))
     db.flush()
     return {'status': 'success'}
 
@@ -15881,10 +16112,26 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
         if not sub and subscription_code:
             sub = db.query(BusinessSubscription).filter(BusinessSubscription.paystack_subscription_code == subscription_code).first()
         if sub and subscription_code == sub.paystack_subscription_code and sub.status not in ("cancelled",):
-            sub.status = "cancelled"
-            sub.cancelled_at = sub.cancelled_at or now
-            add_audit(db, None, "SUBSCRIPTION_CANCELLED", f"Paystack reported the recurring subscription ended ({event_type}).", business_id=sub.business_id)
-            db.flush()
+            if sub.pending_downgrade_plan:
+                # Scheduling a downgrade disables the current recurring
+                # subscription on purpose (see schedule_downgrade); Paystack's
+                # resulting event is not a cancellation of the business.
+                pass
+            elif sub.current_period_end and now < sub.current_period_end and sub.status in ("active", "past_due", "trialing"):
+                # SUB-005: "will not renew" ends the subscription at the end of
+                # the period already paid for — Cauldra's own cancel promises
+                # exactly that — so access continues until then and
+                # refresh_subscription_status() closes it at the boundary.
+                if not sub.cancel_at_period_end:
+                    sub.cancel_at_period_end = True
+                    sub.cancelled_at = sub.cancelled_at or now
+                    add_audit(db, None, "SUBSCRIPTION_CANCELLED", f"Paystack reported the recurring subscription will not renew ({event_type}). Access continues until {to_utc_iso(sub.current_period_end)}.", business_id=sub.business_id)
+                db.flush()
+            else:
+                sub.status = "cancelled"
+                sub.cancelled_at = sub.cancelled_at or now
+                add_audit(db, None, "SUBSCRIPTION_CANCELLED", f"Paystack reported the recurring subscription ended ({event_type}).", business_id=sub.business_id)
+                db.flush()
 
     elif event_type == "invoice.payment_failed":
         sub = find_subscription_by_customer_code(db, (data.get("customer") or {}).get("customer_code", ""))
