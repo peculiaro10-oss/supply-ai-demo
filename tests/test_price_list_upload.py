@@ -211,7 +211,10 @@ class PriceListUploadTests(unittest.TestCase):
         self.db.commit()
         self.assertEqual(main.get_plan_limit(self.db, self.business, 'price_monitor'), 0)
         r = self.upload(f'barcode,price\n{EAN},41000\n')
-        self.assertIn(r.status_code, (402, 409), r.text)
+        # Batch C / PLAN-007: refused by the plan-feature gate (Price Monitor is
+        # not part of Starter), before the capacity check.
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertIn('not included in your Starter plan', r.json()['detail'])
 
     def test_the_plan_capacity_limit_still_applies(self):
         limit = main.get_plan_limit(self.db, self.business, 'price_monitor')
