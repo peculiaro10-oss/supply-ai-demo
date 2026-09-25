@@ -31,8 +31,18 @@ def run(code, env):
     return subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=_with_backend_on_path(env), text=True, capture_output=True)
 
 
+# Deployed environments refuse container-local upload storage (QA-STORAGE-001);
+# production-style imports here carry a fake durable configuration (no network).
+DURABLE_STORAGE_TEST_ENV = {
+    "SUPPLY_AI_STORAGE_BACKEND": "supabase",
+    "SUPABASE_URL": "https://unit-test-project.supabase.co",
+    "SUPABASE_SECRET_KEY": "sb_secret_UNITTESTONLY0123456789abcdefghijklmnop",
+    "SUPABASE_STORAGE_BUCKET": "cauldra-private",
+}
+
+
 def base_env(**overrides):
-    env = os.environ | {
+    env = os.environ | DURABLE_STORAGE_TEST_ENV | {
         "DATABASE_URL": "postgresql+psycopg://baduser:badpass@127.0.0.1:5432/nonexistent",
         "SUPPLY_AI_SECRET_KEY": SECRET,
         "SUPPLY_AI_SKIP_DB_STARTUP_CHECK": "true",

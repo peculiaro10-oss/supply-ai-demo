@@ -45,6 +45,7 @@ import jwt
 from jwt.exceptions import InvalidTokenError as JWTError
 from openpyxl import Workbook
 from supabase_client import get_supabase_client, SupabaseConfigurationError
+from storage import build_storage_provider, enforce_durable_upload_storage, StorageObjectNotFound
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
@@ -1996,7 +1997,42 @@ class NotificationPreference(Base):
     category = Column(String, nullable=False)
     enabled = Column(Boolean, nullable=False, default=True)
 
-UPLOAD_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+# Customer upload bytes (invoice, price_list, avatar) go through the private
+# provider layer in storage.py. Deployed environments must use a durable
+# provider (private Supabase bucket): container disk is discarded on every
+# deploy, which is how QA lost every retained file (QA-STORAGE-001).
+UPLOAD_STORAGE = build_storage_provider(UPLOAD_STORAGE_DIR)
+enforce_durable_upload_storage(UPLOAD_STORAGE, ENVIRONMENT)
+if not SKIP_DB_STARTUP_CHECK:
+    UPLOAD_STORAGE.verify()
+print(f"[startup] Upload storage provider: {UPLOAD_STORAGE.name}")
+
+
+@event.listens_for(Session, "after_commit")
+def _settle_committed_uploads(session: Session) -> None:
+    """A committed row now owns each new object; objects of rows deleted in
+    the same commit (replaced/removed files) can now go."""
+    session.info.pop("pending_upload_storage_keys", None)
+    for key in session.info.pop("pending_upload_deletions", []):
+        try:
+            UPLOAD_STORAGE.delete(key)
+        except Exception as exc:
+            print(f"[upload-cleanup-failed] provider={UPLOAD_STORAGE.name} exception_type={type(exc).__name__}")
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _remove_uncommitted_uploads(session: Session, transaction) -> None:
+    """Best-effort cleanup when the object was stored but the transaction that
+    would have recorded it rolled back or was abandoned. Deletions queued for
+    rows that were never actually removed are dropped with it."""
+    if transaction.parent is not None:
+        return
+    session.info.pop("pending_upload_deletions", None)
+    for key in session.info.pop("pending_upload_storage_keys", []):
+        try:
+            UPLOAD_STORAGE.delete(key)
+        except Exception as exc:
+            print(f"[upload-cleanup-failed] provider={UPLOAD_STORAGE.name} exception_type={type(exc).__name__}")
 
 # Schema creation, ad-hoc ALTER/CREATE INDEX statements, and one-time legacy
 # data backfills used to live here, gated behind AUTO_CREATE_SCHEMA. All of
@@ -3359,6 +3395,8 @@ def persist_upload(db: Session, user: User, kind: str, original_name: str, conte
         ).scalar() or 0)
     check_storage_limit(db, business, len(raw), reclaimed_bytes=reclaimed_bytes)
     suffix = Path(original_name).suffix.lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
+        suffix = ""
     row = StoredUpload(
         business_id=user.business_id,
         uploaded_by_id=user.id,
@@ -3372,19 +3410,28 @@ def persist_upload(db: Session, user: User, kind: str, original_name: str, conte
     db.add(row)
     db.flush()
     key = f"{user.business_id}/{row.id}-{secrets.token_urlsafe(18)}{suffix}"
-    target = (UPLOAD_STORAGE_DIR / key).resolve()
-    if UPLOAD_STORAGE_DIR not in target.parents:
-        raise HTTPException(status_code=500, detail="The upload storage location is invalid.")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
     try:
-        temporary.write_bytes(raw)
-        os.replace(temporary, target)
-    except OSError as exc:
-        temporary.unlink(missing_ok=True)
+        UPLOAD_STORAGE.put_bytes(key, raw, content_type)
+    except Exception as exc:
+        print(f"[upload-store-failed] provider={UPLOAD_STORAGE.name} kind={kind} exception_type={type(exc).__name__}")
         raise HTTPException(status_code=503, detail="The server could not securely store the uploaded file.") from exc
+    db.info.setdefault("pending_upload_storage_keys", []).append(key)
     row.storage_key = key
     return row
+
+
+def read_stored_upload(row: StoredUpload, missing_detail: str) -> bytes:
+    """Bytes of an already-authorized row. A row whose object is gone answers
+    the same controlled 404 as before and is logged (id/kind only, never the
+    key or content); a provider outage is a 503, not a false "missing"."""
+    try:
+        return UPLOAD_STORAGE.read_bytes(row.storage_key)
+    except (StorageObjectNotFound, ValueError):
+        print(f"[upload-missing] id={row.id} kind={row.kind} provider={UPLOAD_STORAGE.name}")
+        raise HTTPException(status_code=404, detail=missing_detail)
+    except Exception as exc:
+        print(f"[upload-read-failed] id={row.id} provider={UPLOAD_STORAGE.name} exception_type={type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="Stored files are temporarily unavailable. Please try again.")
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
@@ -7267,10 +7314,10 @@ def delete_business_profile(response: Response, user: User = Depends(get_current
     established convention for every table in this app) to be correctly
     swept up here with no code change.
 
-    The ONE thing a database cascade cannot do is delete files on disk —
-    StoredUpload rows disappear with everything else, but the physical
-    files under UPLOAD_STORAGE_DIR do not, so those paths are captured
-    before deletion and removed after commit succeeds."""
+    The ONE thing a database cascade cannot do is delete stored objects —
+    StoredUpload rows disappear with everything else, but the objects in
+    UPLOAD_STORAGE do not, so their keys are captured before deletion and
+    removed after commit succeeds."""
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Only the business Admin can delete the business profile.")
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
@@ -7279,7 +7326,7 @@ def delete_business_profile(response: Response, user: User = Depends(get_current
 
     business_id, business_code = biz.id, biz.business_code
     upload_rows = db.query(StoredUpload).filter(StoredUpload.business_id == business_id).all()
-    upload_paths = [(UPLOAD_STORAGE_DIR / row.storage_key).resolve() for row in upload_rows]
+    upload_keys = [row.storage_key for row in upload_rows]
 
     # No audit_logs entry is written for this action: audit_logs.business_id
     # is itself part of the cascade (by design — the whole business's audit
@@ -7297,9 +7344,14 @@ def delete_business_profile(response: Response, user: User = Depends(get_current
         db.rollback()
         raise HTTPException(status_code=500, detail="The business could not be deleted. Please try again.")
 
-    for path in upload_paths:
-        if UPLOAD_STORAGE_DIR in path.parents:
-            path.unlink(missing_ok=True)
+    for key in upload_keys:
+        try:
+            UPLOAD_STORAGE.delete(key)
+        except Exception as exc:
+            print(
+                f"[business-upload-cleanup-failed] business_id={business_id} "
+                f"provider={UPLOAD_STORAGE.name} exception_type={type(exc).__name__}"
+            )
     clear_refresh_cookie(response)
     return {"message": "Business profile deleted successfully."}
 
@@ -7449,10 +7501,8 @@ def get_my_avatar(user: User = Depends(get_authenticated_user), db: Session = De
     ).first()
     if not row:
         raise HTTPException(status_code=404, detail="No profile photo set.")
-    path = (UPLOAD_STORAGE_DIR / row.storage_key).resolve()
-    if UPLOAD_STORAGE_DIR not in path.parents or not path.is_file():
-        raise HTTPException(status_code=404, detail="No profile photo set.")
-    return FileResponse(str(path), media_type=row.content_type, content_disposition_type="inline")
+    content = read_stored_upload(row, "No profile photo set.")
+    return Response(content=content, media_type=row.content_type, headers={"Content-Disposition": "inline"})
 
 
 def _delete_stored_upload(db: Session, user: User, upload_id: int) -> None:
@@ -7461,12 +7511,9 @@ def _delete_stored_upload(db: Session, user: User, upload_id: int) -> None:
     ).first()
     if not row:
         return
-    try:
-        path = (UPLOAD_STORAGE_DIR / row.storage_key).resolve()
-        if UPLOAD_STORAGE_DIR in path.parents and path.is_file():
-            path.unlink()
-    except Exception:
-        pass          # metadata row still goes; a stray blob is not worth a 500
+    # The object is removed only after this transaction commits, so a failed
+    # replace/delete never leaves a surviving row without its bytes.
+    db.info.setdefault("pending_upload_deletions", []).append(row.storage_key)
     db.delete(row)
 
 
@@ -16298,12 +16345,14 @@ def download_upload(upload_id: int, user: User = Depends(get_current_user), db: 
         # Same answer for "another business's file", "no such file" and "a
         # file you may not see" — the id space is never an oracle.
         raise HTTPException(status_code=404, detail="Uploaded file is unavailable.")
-    path = (UPLOAD_STORAGE_DIR / row.storage_key).resolve()
-    if UPLOAD_STORAGE_DIR not in path.parents or not path.is_file():
-        raise HTTPException(status_code=404, detail="Uploaded file is unavailable.")
+    content = read_stored_upload(row, "Uploaded file is unavailable.")
     add_audit(db, user, "UPLOADED_FILE_DOWNLOADED", f"Downloaded retained {row.kind} file {row.original_name}.")
     db.commit()
-    return FileResponse(str(path), media_type=row.content_type, filename=row.original_name, content_disposition_type="attachment")
+    return Response(
+        content=content,
+        media_type=row.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{row.original_name}"'},
+    )
 
 @app.get("/ai/insights")
 def ai_insights(user: User = Depends(require_ai_access), db: Session = Depends(get_db)):

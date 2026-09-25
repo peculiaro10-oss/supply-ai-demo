@@ -28,9 +28,20 @@ FAKE_KEY = "re_FAKEKEYfortestsONLY0123456789"
 RECIPIENT = "recipient.person@example.org"
 CODE = "482915"
 
+# Deployed environments (staging/production) refuse container-local upload
+# storage at import (QA-STORAGE-001), so a deployed-style test environment
+# carries a durable-storage configuration too. No network: the bucket check is
+# skipped with SUPPLY_AI_SKIP_DB_STARTUP_CHECK, and the key is a fake.
+DURABLE_STORAGE_TEST_ENV = {
+    "SUPPLY_AI_STORAGE_BACKEND": "supabase",
+    "SUPABASE_URL": "https://unit-test-project.supabase.co",
+    "SUPABASE_SECRET_KEY": "sb_secret_UNITTESTONLY0123456789abcdefghijklmnop",
+    "SUPABASE_STORAGE_BUCKET": "cauldra-private",
+}
+
 
 def base_env(**overrides):
-    env = os.environ | {
+    env = os.environ | DURABLE_STORAGE_TEST_ENV | {
         "DATABASE_URL": "postgresql+psycopg://baduser:badpass@127.0.0.1:5432/nonexistent",
         "SUPPLY_AI_SECRET_KEY": SECRET,
         "SUPPLY_AI_SKIP_DB_STARTUP_CHECK": "true",

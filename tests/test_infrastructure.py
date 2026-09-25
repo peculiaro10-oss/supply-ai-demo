@@ -14,6 +14,17 @@ from postgres_test_support import ADMIN_URL, create_postgres_test_schema, drop_p
 ROOT = Path(__file__).resolve().parents[1]
 SECRET = "test-secret-0123456789abcdef0123456789abcdef0123456789abcdef"
 
+# Deployed environments (staging/production) refuse container-local upload
+# storage at import (QA-STORAGE-001), so a deployed-style test environment
+# carries a durable-storage configuration too. No network: the bucket check is
+# skipped with SUPPLY_AI_SKIP_DB_STARTUP_CHECK, and the key is a fake.
+DURABLE_STORAGE_TEST_ENV = {
+    "SUPPLY_AI_STORAGE_BACKEND": "supabase",
+    "SUPABASE_URL": "https://unit-test-project.supabase.co",
+    "SUPABASE_SECRET_KEY": "sb_secret_UNITTESTONLY0123456789abcdefghijklmnop",
+    "SUPABASE_STORAGE_BUCKET": "cauldra-private",
+}
+
 
 def _with_backend_on_path(env):
     """backend/ (where main.py now lives) must be importable in child
@@ -55,7 +66,7 @@ class InfrastructureTests(unittest.TestCase):
         self.assertIn("DATABASE_URL must be a PostgreSQL connection string", result.stderr)
 
     def test_production_postgres_url_selects_pinned_psycopg_driver(self):
-        env = os.environ | {
+        env = os.environ | DURABLE_STORAGE_TEST_ENV | {
             "SUPPLY_AI_ENV": "production",
             "DATABASE_URL": "postgresql+psycopg://user:password@127.0.0.1:5432/cauldra",
             "SUPPLY_AI_SECRET_KEY": SECRET,

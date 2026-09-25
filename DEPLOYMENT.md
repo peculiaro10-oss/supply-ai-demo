@@ -72,7 +72,12 @@ resolves (see the `Dockerfile` CMD and `.claude/launch.json`).
    legacy `SUPABASE_SERVICE_ROLE_KEY`), `SUPABASE_STORAGE_BUCKET`, and
    `SUPPLY_AI_STORAGE_BACKEND=supabase`. Local `/data/uploads` remains suitable
    only for offline/single-instance development. Never expose the server key in
-   the frontend or make retained business documents public.
+   the frontend or make retained business documents public. Set these
+   variables before deploying: any `SUPPLY_AI_ENV` other than
+   `development`/`test` refuses to start on local upload storage, and a
+   Supabase bucket that is missing or public stops startup (container disk is
+   discarded on every deploy — see QA-STORAGE-001). Schedule
+   `scripts/backup_storage.py` alongside the database backup.
 7. Terminate TLS at a trusted reverse proxy (for example Caddy, Nginx, or your
    platform's HTTPS service) and forward traffic to port 8000. The public site
    must be HTTPS because production refresh cookies are marked `Secure`.

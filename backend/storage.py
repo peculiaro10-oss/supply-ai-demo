@@ -13,6 +13,17 @@ from typing import Any, Callable, Optional
 from supabase_client import get_supabase_client, get_supabase_settings
 
 
+# Environments in which bytes on the container's own disk are acceptable. Every
+# other SUPPLY_AI_ENV value (staging, production, anything unexpected) is a
+# deployed environment whose containers are replaced on each deploy, so local
+# upload storage there would silently lose customer files (QA-STORAGE-001).
+LOCAL_STORAGE_ENVIRONMENTS = frozenset({"development", "dev", "local", "test", "testing"})
+
+
+class StorageObjectNotFound(Exception):
+    """The metadata row exists but the provider holds no bytes for its key."""
+
+
 def _validate_object_key(key: str) -> str:
     """Accept only relative, traversal-free object keys on every provider."""
     raw = str(key or "")
@@ -27,6 +38,10 @@ def _validate_object_key(key: str) -> str:
 
 class StorageProvider:
     name = "unknown"
+    durable = False
+
+    def verify(self) -> None:
+        """Startup check of the provider's own configuration; no-op by default."""
 
     def put_bytes(self, key: str, data: bytes, content_type: str) -> None:
         raise NotImplementedError
@@ -70,7 +85,10 @@ class LocalStorage(StorageProvider):
         return path if path.is_file() else None
 
     def read_bytes(self, key: str) -> bytes:
-        return self._path(key).read_bytes()
+        try:
+            return self._path(key).read_bytes()
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as exc:
+            raise StorageObjectNotFound(key) from exc
 
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
@@ -79,6 +97,7 @@ class LocalStorage(StorageProvider):
 class S3CompatibleStorage(StorageProvider):
     """Private S3-compatible storage, enabled only through explicit config."""
     name = "s3"
+    durable = True
 
     def __init__(self, bucket: str, prefix: str = "", endpoint_url: Optional[str] = None, region: Optional[str] = None):
         try:
@@ -99,7 +118,13 @@ class S3CompatibleStorage(StorageProvider):
         self.client.put_object(Bucket=self.bucket, Key=self._object_key(key), Body=data, ContentType=content_type)
 
     def read_bytes(self, key: str) -> bytes:
-        return self.client.get_object(Bucket=self.bucket, Key=self._object_key(key))["Body"].read()
+        try:
+            return self.client.get_object(Bucket=self.bucket, Key=self._object_key(key))["Body"].read()
+        except Exception as exc:
+            code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+            if code in {"NoSuchKey", "404", "NotFound"}:
+                raise StorageObjectNotFound(key) from exc
+            raise
 
     def delete(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=self._object_key(key))
@@ -108,6 +133,7 @@ class S3CompatibleStorage(StorageProvider):
 class SupabaseStorage(StorageProvider):
     """Private Supabase Storage accessed only with the backend secret key."""
     name = "supabase"
+    durable = True
 
     def __init__(self, bucket: str, client_factory: Callable[[], Any] = get_supabase_client):
         if not bucket:
@@ -118,6 +144,14 @@ class SupabaseStorage(StorageProvider):
     def _bucket_client(self):
         return self._client_factory().storage.from_(self.bucket)
 
+    def verify(self) -> None:
+        """The bucket must exist and must be private: customer files are only
+        ever served through the authenticated, tenant-checked backend."""
+        bucket = self._client_factory().storage.get_bucket(self.bucket)
+        public = bucket.get("public") if isinstance(bucket, dict) else getattr(bucket, "public", None)
+        if public is not False:
+            raise RuntimeError("The Supabase upload bucket must exist and be private (public = false).")
+
     def put_bytes(self, key: str, data: bytes, content_type: str) -> None:
         self._bucket_client().upload(
             path=_validate_object_key(key),
@@ -126,7 +160,15 @@ class SupabaseStorage(StorageProvider):
         )
 
     def read_bytes(self, key: str) -> bytes:
-        data = self._bucket_client().download(_validate_object_key(key))
+        try:
+            data = self._bucket_client().download(_validate_object_key(key))
+        except Exception as exc:
+            status = str(getattr(exc, "status", "") or "")
+            code = str(getattr(exc, "code", "") or "").lower()
+            message = str(getattr(exc, "message", "") or "").lower()
+            if status == "404" or code in {"not_found", "nosuchkey"} or "not found" in message:
+                raise StorageObjectNotFound(key) from exc
+            raise
         if not isinstance(data, (bytes, bytearray)):
             raise RuntimeError("Supabase Storage returned an invalid download payload.")
         return bytes(data)
@@ -150,3 +192,19 @@ def build_storage_provider(root: Path) -> StorageProvider:
         settings = get_supabase_settings(required=True)
         return SupabaseStorage(settings.storage_bucket or "")
     raise RuntimeError("SUPPLY_AI_STORAGE_BACKEND must be local, s3, or supabase.")
+
+
+def enforce_durable_upload_storage(provider: StorageProvider, environment: str) -> None:
+    """Refuse to run a deployed environment on disposable container disk.
+
+    Local storage stays available where SUPPLY_AI_ENV explicitly names a
+    development/test environment; everywhere else startup fails loudly instead
+    of accepting customer files that the next deploy would delete."""
+    env = (environment or "").strip().lower()
+    if not provider.durable and env not in LOCAL_STORAGE_ENVIRONMENTS:
+        raise RuntimeError(
+            f"SUPPLY_AI_ENV={env or '(empty)'} requires durable upload storage, but the "
+            f"'{provider.name}' provider keeps files on the container's disk, which every "
+            "deploy discards. Set SUPPLY_AI_STORAGE_BACKEND=supabase with a private "
+            "SUPABASE_STORAGE_BUCKET (see DEPLOYMENT.md)."
+        )
