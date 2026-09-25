@@ -1628,7 +1628,7 @@
                 warehouses: {
                     title: "Warehouses & Stock Routing", subtitle: "Manage storage locations and transfer stock",
                     addNewLocation: "Add New Storage Location", branchStorePlaceholder: "Branch Store", activeLocations: "Active Locations",
-                    skuCount: "{count} SKUs", deleteWarehouse: "Delete warehouse", noneAvailable: "No warehouses available.", qty: "Qty: {qty}",
+                    skuCount: { one: "{count} SKU", other: "{count} SKUs" }, deleteWarehouse: "Delete warehouse", noneAvailable: "No warehouses available.", qty: "Qty: {qty}",
                     createFailed: "The warehouse could not be created.", addedSuccess: "Warehouse added successfully!",
                     deleteWarning: "Products already assigned to \"{name}\" will keep their records, but you won't be able to select this location for new stock going forward.",
                     deleteConfirmTitle: "Delete \"{name}\"?",
@@ -1844,6 +1844,14 @@
                     supplierLabel: "Supplier:", detectedVendor: "Detected Vendor", itemsExtractedLabel: "Items Extracted:",
                     lineItemsParsed: { one: "{count} line item parsed.", other: "{count} line items parsed." },
                     itemsParsed: { one: "{count} item parsed.", other: "{count} items parsed." },
+                    invoiceFileTypes: "Upload a photo or image of the invoice: JPEG, PNG or WebP.",
+                    invoiceTypeNotSupported: "The invoice scanner reads JPEG, PNG or WebP images. Please choose an image of the invoice.",
+                    removeSource: "Remove", removeSourceConfirm: "Stop monitoring this supplier price? Its price history is kept.",
+                    removeSourceTitle: "Remove price source", sourceRemoved: "Price source removed. Its price history is kept.",
+                    sourceRemoveFailed: "We couldn't remove that price source. Please try again.",
+                    sourceRestored: "Price source restored with its price history.",
+                    removedSourcesNote: { one: "{count} removed source kept for its price history.", other: "{count} removed sources kept for their price history." },
+                    invalidPriceRows: { one: "{count} row was skipped because its price was not greater than zero.", other: "{count} rows were skipped because their price was not greater than zero." },
                     statusLabel: "Status:", detailsExtracted: "Invoice details extracted for review.",
                     invoiceAnalyzedSnap: "Invoice analyzed. Review the extracted details before applying changes.",
                     snapProcessFailed: "We couldn't reach the server to process this snapshot. Please check your connection and try again.",
@@ -16377,8 +16385,10 @@
         function tPlural(key, count, vars) {
             let rule;
             try { rule = new Intl.PluralRules(currentLanguage).select(count); } catch (_) { rule = count === 1 ? "one" : "other"; }
+            const plain = resolveTranslationValue(currentLanguage, key);
             const resolved = resolveTranslationValue(currentLanguage, `${key}.${rule}`)
                 ?? resolveTranslationValue(currentLanguage, `${key}.other`)
+                ?? (typeof plain === "string" ? plain : undefined)
                 ?? resolveTranslationValue(DEFAULT_LANGUAGE, `${key}.${rule}`)
                 ?? resolveTranslationValue(DEFAULT_LANGUAGE, `${key}.other`)
                 ?? key;
@@ -23671,7 +23681,8 @@
             const container = document.getElementById("pos-cart-items");
             const countEl = document.getElementById("cart-count");
             const totalEl = document.getElementById("pos-cart-total");
-            countEl.innerText = `${posCart.reduce((sum, i) => sum + i.qty, 0)} items`;
+            const cartUnits = posCart.reduce((sum, i) => sum + i.qty, 0);
+            countEl.innerText = `${cartUnits} ${cartUnits === 1 ? "item" : "items"}`;
 
             if (!posCart.length) {
                 container.innerHTML = `<div class="text-center py-6 text-textSec text-xs">Cart is empty. Scan barcodes to start checkout.</div>`;
@@ -26722,14 +26733,14 @@
             let list = Array.isArray(globalProducts) ? [...globalProducts] : [];
             if (warehouse !== "ALL") list = list.filter(p => (p.warehouse || "Main Central Warehouse") === warehouse);
             if (inventoryStatusFilter === "low") list = list.filter(p => p.quantity > 0 && p.quantity <= p.min_stock_level);
-            else if (inventoryStatusFilter === "out") list = list.filter(p => p.quantity === 0);
+            else if (inventoryStatusFilter === "out") list = list.filter(p => p.quantity <= 0);
             else if (inventoryStatusFilter === "healthy") list = list.filter(p => p.quantity > p.min_stock_level);
             if (searchTerm) list = list.filter(p => `${p.name || ""} ${p.sku || ""} ${p.category || ""}`.toLowerCase().includes(searchTerm));
             inventoryViewProducts = list;
             inventoryStatusCounts = {
                 healthy: list.filter(p => p.quantity > p.min_stock_level).length,
                 low: list.filter(p => p.quantity > 0 && p.quantity <= p.min_stock_level).length,
-                out: list.filter(p => p.quantity === 0).length,
+                out: list.filter(p => p.quantity <= 0).length,
             };
             renderInventoryTable(inventoryViewProducts);
             updateInventoryStatusUI();
@@ -28029,7 +28040,7 @@
             }
 
             tbody.innerHTML = productsToRender.map(product => {
-                const isOut = product.quantity === 0;
+                const isOut = product.quantity <= 0;
                 const isLow = product.quantity <= product.min_stock_level && !isOut;
                 
                 let dotColor = "bg-success";
@@ -28088,7 +28099,7 @@
                 sku: p.sku, name: p.name, category: p.category,
                 warehouse: p.warehouse || "Main Central Warehouse",
                 quantity: p.quantity, min_stock_level: p.min_stock_level,
-                status: p.quantity === 0 ? "Out of Stock" : (p.quantity <= p.min_stock_level ? "Low Stock" : "Healthy"),
+                status: p.quantity <= 0 ? "Out of Stock" : (p.quantity <= p.min_stock_level ? "Low Stock" : "Healthy"),
                 cost_price: p.cost_price, wholesale_price: p.wholesale_price, retail_price: p.retail_price,
                 stock_value: Math.round((p.quantity || 0) * (p.cost_price || 0) * 100) / 100,
                 expiry_date: p.expiry_date || null,
@@ -29178,7 +29189,10 @@
             try{
                 const res=await fetch(`${API_URL}/price-monitor`,{headers:{"Authorization":`Bearer ${authToken}`}}); const data=await res.json();
                 if(!res.ok) throw new Error(showApiError(res,data,t("priceMonitor.loadFailed")));
-                const sources=data.sources||[]; lastPriceMonitorSources=sources; document.getElementById('price-monitor-status').innerText=tPlural("priceMonitor.sourcesMonitored", sources.length);
+                // PM-002: "monitored" means ACTIVE — the same number Billing counts.
+                // A removed source keeps its history but is not listed as monitored.
+                const allSources=data.sources||[]; const sources=allSources.filter(s=>s.is_active!==false); const removedCount=allSources.length-sources.length;
+                lastPriceMonitorSources=sources; document.getElementById('price-monitor-status').innerText=tPlural("priceMonitor.sourcesMonitored", sources.length);
                 // PLAN-007: on a plan without Price Monitor the records stay
                 // visible (never hidden by a downgrade) but nothing can be
                 // added, recorded or checked; the server refuses those too.
@@ -29195,8 +29209,8 @@
                 const summary=document.getElementById('price-monitor-summary'); summary.innerHTML=[[t("priceMonitor.monitoring"),sources.length],[t("priceMonitor.priceChanges"),sources.filter(s=>s.change_percent!==null&&Math.abs(s.change_percent)>0.01).length],[t("priceMonitor.websiteSources"),sources.filter(s=>s.source_type==='website').length],[t("priceMonitor.manualList"),sources.filter(s=>s.source_type!=='website').length]].map(x=>`<div class="p-2.5 rounded-xl bg-cardBg border border-borderCol"><div class="text-[9px] text-textSec">${x[0]}</div><div class="font-bold text-sm mt-0.5">${x[1]}</div></div>`).join('');
                 if(allHistory.length){ const max=Math.max(...allHistory.map(x=>x.price),1), min=Math.min(...allHistory.map(x=>x.price)); document.getElementById('price-monitor-chart').innerHTML=`<div class="flex items-end gap-1 h-[140px] px-2">${allHistory.slice(-20).map(x=>`<div class="flex-1 bg-primary/65 rounded-t" style="height:${Math.max(5,((x.price-min)/Math.max(1,max-min))*100)}%" title="${formatCurrency(x.price)} · ${formatBusinessDate(x.recorded_at)}"></div>`).join('')}</div><div class="flex justify-between text-[9px] text-textSec mt-2"><span>${formatCurrency(min)}</span><span>${t("priceMonitor.recordedSupplierPrices")}</span><span>${formatCurrency(max)}</span></div>`; } else document.getElementById('price-monitor-chart').innerText=t("priceMonitor.noHistoryAddSource");
                 const addSourceBar = included ? `<div class="flex justify-end mb-2"><button type="button" onclick="openPriceSourceModal()" class="bg-primary hover:bg-primaryHover text-white px-3 py-2 rounded-xl text-[11px] font-semibold"><i class="fa-solid fa-plus mr-1"></i>${t("priceMonitor.addPriceSource")}</button></div>` : '';
-                const sourceActions = s => !included ? '' : `<div class="flex justify-end gap-2 mt-2">${s.source_type==='website'?`<button type="button" onclick="checkPriceSource(${s.id})" class="text-[10px] bg-primary/10 text-primary border border-primary/25 px-2.5 py-1.5 rounded-lg">${t("common.checkNow")}</button>`:''}<button type="button" onclick="manualPriceUpdate(${s.id})" class="text-[10px] bg-bgMain text-textSec border border-borderCol px-2.5 py-1.5 rounded-lg">${t("priceMonitor.updatePrice")}</button></div>`;
-                container.innerHTML=addSourceBar+(sources.length?sources.map(s=>`<div class="bg-bgMain border border-borderCol rounded-xl p-3"><div class="flex items-start justify-between gap-3"><div><div class="font-bold text-xs">${escapeHtml(s.product_name)} <span class="text-textSec font-mono text-[10px]">(${escapeHtml(s.sku)})</span></div><div class="text-[10px] text-textSec mt-0.5">${escapeHtml(s.supplier_name)} · ${s.source_type==='website'?t("priceMonitor.sourceTypeWebsite"):s.source_type==='price_list'?t("priceMonitor.sourceTypePriceList"):t("priceMonitor.sourceTypeManual")}</div></div><div class="text-right"><div class="font-mono font-semibold text-textMain">${s.last_price!==null?formatCurrency(s.last_price):t("priceMonitor.noPriceYet")}</div>${s.change_percent!==null?`<div class="text-[10px] ${s.change_percent>0?'text-danger':'text-success'}">${s.change_percent>0?'+':''}${s.change_percent}%</div>`:''}</div></div>${sourceActions(s)}</div>`).join(''):`<div class="text-center py-8 text-xs text-textSec">${t("priceMonitor.noSourcesYet")}</div>`);
+                const sourceActions = s => !included ? '' : `<div class="flex justify-end gap-2 mt-2"><button type="button" onclick="removePriceSource(${s.id})" class="text-[10px] bg-bgMain text-danger border border-borderCol px-2.5 py-1.5 rounded-lg">${t("priceMonitor.removeSource")}</button>${s.source_type==='website'?`<button type="button" onclick="checkPriceSource(${s.id})" class="text-[10px] bg-primary/10 text-primary border border-primary/25 px-2.5 py-1.5 rounded-lg">${t("common.checkNow")}</button>`:''}<button type="button" onclick="manualPriceUpdate(${s.id})" class="text-[10px] bg-bgMain text-textSec border border-borderCol px-2.5 py-1.5 rounded-lg">${t("priceMonitor.updatePrice")}</button></div>`;
+                container.innerHTML=addSourceBar+(sources.length?sources.map(s=>`<div class="bg-bgMain border border-borderCol rounded-xl p-3"><div class="flex items-start justify-between gap-3"><div><div class="font-bold text-xs">${escapeHtml(s.product_name)} <span class="text-textSec font-mono text-[10px]">(${escapeHtml(s.sku)})</span></div><div class="text-[10px] text-textSec mt-0.5">${escapeHtml(s.supplier_name)} · ${s.source_type==='website'?t("priceMonitor.sourceTypeWebsite"):s.source_type==='price_list'?t("priceMonitor.sourceTypePriceList"):t("priceMonitor.sourceTypeManual")}</div></div><div class="text-right"><div class="font-mono font-semibold text-textMain">${s.last_price!==null?formatCurrency(s.last_price):t("priceMonitor.noPriceYet")}</div>${s.change_percent!==null?`<div class="text-[10px] ${s.change_percent>0?'text-danger':'text-success'}">${s.change_percent>0?'+':''}${s.change_percent}%</div>`:''}</div></div>${sourceActions(s)}</div>`).join(''):`<div class="text-center py-8 text-xs text-textSec">${t("priceMonitor.noSourcesYet")}</div>`)+(removedCount?`<div class="text-center text-[10px] text-textSec mt-2">${tPlural("priceMonitor.removedSourcesNote", removedCount)}</div>`:'');
             }catch(e){lastPriceMonitorSources=[];const msg=String(e.message||''); const professional=msg.toLowerCase().includes('not found')||msg.includes('404')?t("priceMonitor.noSourcesSetup"):friendlyErrorMessage(msg,t("priceMonitor.monitoringUnavailable")); container.innerHTML=`<div class="p-4 rounded-xl bg-bgMain border border-borderCol text-center text-xs text-textSec"><div class="font-semibold text-textMain mb-1">${t("priceMonitor.monitoringReady")}</div><div>${professional}</div></div>`;}
         }
 
@@ -29226,9 +29240,10 @@
         function closePriceSourceModal(){document.getElementById('price-source-modal').classList.add('hidden');}
         function togglePriceListUpload(){ const type=document.querySelector('input[name="price-source-type"]:checked')?.value; document.getElementById('price-list-file-wrap')?.classList.toggle('hidden',type!=='price_list'); }
         async function uploadSelectedPriceList(file,supplierId,productId){ return new Promise((resolve,reject)=>{ const reader=new FileReader(); reader.onload=async ev=>{ try{ const r=await fetch(`${API_URL}/price-monitor/upload-price-list`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`},body:JSON.stringify({supplier_id:+supplierId,product_id:productId?+productId:null,file_name:file.name,file_data:ev.target.result})}); const d=await r.json(); if(!r.ok) throw new Error(showApiError(r,d,t("priceMonitor.priceListProcessFailed"))); resolve(d);}catch(err){reject(err);} }; reader.onerror=()=>reject(new Error(t("priceMonitor.priceListReadFailed"))); reader.readAsDataURL(file); }); }
-        async function createPriceSource(e){e.preventDefault();const supplierId=document.getElementById('price-source-supplier').value,productId=document.getElementById('price-source-product').value,type=document.querySelector('input[name="price-source-type"]:checked').value,file=document.getElementById('price-source-file')?.files?.[0]||null;try{if(type==='price_list'&&file){const d=await uploadSelectedPriceList(file,supplierId,productId);closePriceSourceModal();showToast(tPlural("priceMonitor.priceListParsed", d.count||0),'success');loadPriceMonitor();renderAlerts();return;}const body={supplier_id:+supplierId,product_id:+productId,source_type:type,source_url:document.getElementById('price-source-url').value.trim()||null,initial_price:parseFloat(document.getElementById('price-source-initial').value)||null};const r=await fetch(`${API_URL}/price-monitor/sources`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(showApiError(r,d,t("priceMonitor.sourceAddFailed")));closePriceSourceModal();showToast(t("priceMonitor.sourceAdded"),'success');loadPriceMonitor();}catch(err){showToast(friendlyErrorMessage(err.message,t("priceMonitor.sourceAddFailed")),'error');}}
+        async function createPriceSource(e){e.preventDefault();const supplierId=document.getElementById('price-source-supplier').value,productId=document.getElementById('price-source-product').value,type=document.querySelector('input[name="price-source-type"]:checked').value,file=document.getElementById('price-source-file')?.files?.[0]||null;try{if(type==='price_list'&&file){const d=await uploadSelectedPriceList(file,supplierId,productId);closePriceSourceModal();showToast(tPlural("priceMonitor.priceListParsed", d.count||0)+(d.invalid_price_rows?' '+tPlural("priceMonitor.invalidPriceRows", d.invalid_price_rows):''),'success');loadPriceMonitor();renderAlerts();return;}const body={supplier_id:+supplierId,product_id:+productId,source_type:type,source_url:document.getElementById('price-source-url').value.trim()||null,initial_price:parseFloat(document.getElementById('price-source-initial').value)||null};const r=await fetch(`${API_URL}/price-monitor/sources`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(showApiError(r,d,t("priceMonitor.sourceAddFailed")));closePriceSourceModal();showToast(d.reactivated?t("priceMonitor.sourceRestored"):t("priceMonitor.sourceAdded"),'success');loadPriceMonitor();}catch(err){showToast(friendlyErrorMessage(err.message,t("priceMonitor.sourceAddFailed")),'error');}}
+        async function removePriceSource(id){const ok=await showCustomConfirm(t("priceMonitor.removeSourceConfirm"), t("priceMonitor.removeSourceTitle"));if(!ok)return;try{const r=await fetch(`${API_URL}/price-monitor/sources/${id}`,{method:'DELETE',headers:{'Authorization':`Bearer ${authToken}`}});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(showApiError(r,d,t("priceMonitor.sourceRemoveFailed")));showToast(t("priceMonitor.sourceRemoved"),'success');loadPriceMonitor();}catch(e){showToast(friendlyErrorMessage(e.message,t("priceMonitor.sourceRemoveFailed")),'error');}}
         async function checkPriceSource(id){try{const r=await fetch(`${API_URL}/price-monitor/${id}/check`,{method:'POST',headers:{'Authorization':`Bearer ${authToken}`}});const d=await r.json();if(!r.ok)throw new Error(showApiError(r,d,t("priceMonitor.priceCheckFailed")));showToast(d.message||t("priceMonitor.priceChecked"),'success');loadPriceMonitor();renderAlerts();}catch(e){showToast(friendlyErrorMessage(e.message,t("priceMonitor.priceCheckFailed")),'error');}}
-        async function manualPriceUpdate(id){const value=await showCustomPrompt(t("priceMonitor.updatePricePrompt"), t("priceMonitor.updatePriceTitle"), t("priceMonitor.updatePriceField"), 'number', false, '');if(value===null)return;const price=parseFloat(value);if(!Number.isFinite(price)||price<0){showToast(t("priceMonitor.invalidPrice"),'error');return;}try{const r=await fetch(`${API_URL}/price-monitor/${id}/price`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`},body:JSON.stringify({price})});const d=await r.json();if(!r.ok)throw new Error(showApiError(r,d,t("priceMonitor.priceUpdateFailed")));showToast(t("priceMonitor.priceRecorded"),'success');loadPriceMonitor();renderAlerts();}catch(e){showToast(friendlyErrorMessage(e.message,t("priceMonitor.priceUpdateFailed")),'error');}}
+        async function manualPriceUpdate(id){const value=await showCustomPrompt(t("priceMonitor.updatePricePrompt"), t("priceMonitor.updatePriceTitle"), t("priceMonitor.updatePriceField"), 'number', false, '');if(value===null)return;const price=parseFloat(value);if(!Number.isFinite(price)||price<=0){showToast(t("priceMonitor.invalidPrice"),'error');return;}try{const r=await fetch(`${API_URL}/price-monitor/${id}/price`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`},body:JSON.stringify({price})});const d=await r.json();if(!r.ok)throw new Error(showApiError(r,d,t("priceMonitor.priceUpdateFailed")));showToast(t("priceMonitor.priceRecorded"),'success');loadPriceMonitor();renderAlerts();}catch(e){showToast(friendlyErrorMessage(e.message,t("priceMonitor.priceUpdateFailed")),'error');}}
 
         function openDirectCameraSnapModal() {
             document.getElementById("direct-camera-snap-box").classList.remove("hidden");
@@ -29291,9 +29306,15 @@
             }
         }
 
+        const INVOICE_SCAN_TYPES = ["image/jpeg", "image/png", "image/webp"];  // exactly what /ai/scan-invoice accepts
         async function handleGlobalBulkInvoiceUpload(event) {
             const file = event.target.files[0];
             if (!file) return;
+            if (!INVOICE_SCAN_TYPES.includes((file.type || "").toLowerCase())) {
+                event.target.value = "";
+                showToast(t("priceMonitor.invoiceTypeNotSupported"), "error");
+                return;
+            }
 
             const resultsBox = document.getElementById("global-invoice-results-box");
             const resultsText = document.getElementById("global-invoice-results-text");
@@ -29531,7 +29552,7 @@
                         ${showLocationBadge ? `<span class="ml-1.5 text-[9px] text-textSec font-normal"><i class="fa-solid fa-location-dot mr-0.5"></i>${escapeEmployeeHtml(w.location_name || 'Unassigned')}</span>` : ''}
                     </span>
                     <span class="flex items-center gap-2 shrink-0">
-                        <span class="text-[10px] text-textSec font-mono">${t('warehouses.skuCount', { count: w.sku_count ?? 0 })}</span>
+                        <span class="text-[10px] text-textSec font-mono">${tPlural('warehouses.skuCount', w.sku_count ?? 0)}</span>
                         ${canDeactivateWarehouse ? `<button type="button" onclick="handleDeleteWarehouse(${w.id}, '${escapeEmployeeHtml(w.name).replace(/'/g, "\\'")}')" class="text-textSec hover:text-danger transition cursor-pointer" title="${t('warehouses.deleteWarehouse')}"><i class="fa-solid fa-trash-can text-[11px]"></i></button>` : ''}
                     </span>
                 </div>
@@ -30103,7 +30124,7 @@
             }
 
             if (lowerQuery.includes("out of stock") || lowerQuery.includes("depleted")) {
-                const outOfStockItems = globalProducts.filter(p => p.quantity === 0);
+                const outOfStockItems = globalProducts.filter(p => p.quantity <= 0);
                 setTimeout(() => {
                     let replyText = "";
                     if (outOfStockItems.length === 0) {

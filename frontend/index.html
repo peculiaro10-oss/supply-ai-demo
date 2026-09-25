@@ -2036,7 +2036,7 @@
                 <div class="grid grid-cols-2 gap-2">
                     <div>
                         <label class="block font-medium text-textSec mb-1" data-i18n="products.initialQty">Initial Qty</label>
-                        <input type="number" id="p-qty" required value="10" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
+                        <input type="number" id="p-qty" required value="10" min="0" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
                     </div>
                     <div>
                         <label class="block font-medium text-textSec mb-1" data-i18n="products.minLevel">Min Level</label>
@@ -2050,16 +2050,16 @@
                 </div>
                 <div>
                     <label class="block font-medium text-textSec mb-1" id="label-p-cost" data-i18n="products.costPrice">Cost Price</label>
-                    <input type="number" id="p-cost" oninput="runProductAiMarginAdvice()" required placeholder="0.00" step="0.01" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain placeholder-textSec focus:outline-none focus:border-primary">
+                    <input type="number" id="p-cost" oninput="runProductAiMarginAdvice()" required placeholder="0.00" step="0.01" min="0" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain placeholder-textSec focus:outline-none focus:border-primary">
                 </div>
                 <div class="grid grid-cols-2 gap-2 sm:col-span-2">
                     <div>
                         <label class="block font-medium text-textSec mb-1" id="label-p-wholesale" data-i18n="dashboard.wholesalePrice">Wholesale</label>
-                        <input type="number" id="p-wholesale" placeholder="0.00" step="0.01" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain placeholder-textSec focus:outline-none focus:border-primary">
+                        <input type="number" id="p-wholesale" placeholder="0.00" step="0.01" min="0" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain placeholder-textSec focus:outline-none focus:border-primary">
                     </div>
                     <div>
                         <label class="block font-medium text-textSec mb-1" id="label-p-retail" data-i18n="dashboard.retailPrice">Retail</label>
-                        <input type="number" id="p-retail" oninput="runProductAiMarginAdvice()" required placeholder="0.00" step="0.01" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain placeholder-textSec focus:outline-none focus:border-primary">
+                        <input type="number" id="p-retail" oninput="runProductAiMarginAdvice()" required placeholder="0.00" step="0.01" min="0" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain placeholder-textSec focus:outline-none focus:border-primary">
                     </div>
                 </div>
 
@@ -2200,15 +2200,15 @@
                 <div class="grid grid-cols-3 gap-2">
                     <div>
                         <label class="block font-medium text-textSec mb-1" id="label-edit-p-cost">Cost Price</label>
-                        <input type="number" id="edit-p-cost" oninput="runEditAiMarginAdvice()" required step="0.01" class="w-full bg-bgMain border border-borderCol rounded-xl px-2.5 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                        <input type="number" id="edit-p-cost" oninput="runEditAiMarginAdvice()" required step="0.01" min="0" class="w-full bg-bgMain border border-borderCol rounded-xl px-2.5 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
                     </div>
                     <div>
                         <label class="block font-medium text-textSec mb-1" id="label-edit-p-wholesale">Wholesale</label>
-                        <input type="number" id="edit-p-wholesale" step="0.01" class="w-full bg-bgMain border border-borderCol rounded-xl px-2.5 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                        <input type="number" id="edit-p-wholesale" step="0.01" min="0" class="w-full bg-bgMain border border-borderCol rounded-xl px-2.5 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
                     </div>
                     <div>
                         <label class="block font-medium text-textSec mb-1" id="label-edit-p-retail">Retail</label>
-                        <input type="number" id="edit-p-retail" oninput="runEditAiMarginAdvice()" required step="0.01" class="w-full bg-bgMain border border-borderCol rounded-xl px-2.5 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                        <input type="number" id="edit-p-retail" oninput="runEditAiMarginAdvice()" required step="0.01" min="0" class="w-full bg-bgMain border border-borderCol rounded-xl px-2.5 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
                     </div>
                 </div>
                 <div class="pt-2 border-t border-borderCol flex justify-end gap-2">
@@ -2506,6 +2506,7 @@
                     <div>
                         <h4 class="text-xs font-bold text-textMain" data-i18n="priceMonitor.ocrScannerTitle">Smart Invoice OCR Scanner</h4>
                         <p class="text-[11px] text-textSec" data-i18n="priceMonitor.ocrScannerDesc">High-Contrast parsing enabled for handwritten scribbles & digital receipts.</p>
+                        <p class="text-[10px] text-textSec mt-0.5" data-i18n="priceMonitor.invoiceFileTypes">Upload a photo or image of the invoice: JPEG, PNG or WebP.</p>
                     </div>
                 </div>
 
@@ -2516,7 +2517,7 @@
 
                     <label class="flex-1 sm:flex-initial bg-primary hover:bg-primaryHover text-white px-3.5 py-2 rounded-xl text-xs font-semibold transition cursor-pointer flex items-center justify-center gap-2 shadow-md shadow-primary/20">
                         <i class="fa-solid fa-cloud-arrow-up"></i> <span data-i18n="priceMonitor.uploadInvoice">Upload Invoice</span>
-                        <input type="file" id="global-upload-invoice-input" onchange="handleGlobalBulkInvoiceUpload(event)" accept="image/*,.pdf,.doc,.docx" class="hidden">
+                        <input type="file" id="global-upload-invoice-input" onchange="handleGlobalBulkInvoiceUpload(event)" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" class="hidden">
                     </label>
                 </div>
             </div>
@@ -3262,7 +3263,7 @@
                 <div class="grid grid-cols-3 gap-2"><label class="cursor-pointer"><input type="radio" name="price-source-type" value="website" class="mr-1" checked onchange="togglePriceListUpload()"> Website</label><label class="cursor-pointer"><input type="radio" name="price-source-type" value="price_list" class="mr-1" onchange="togglePriceListUpload()"> Price List</label><label class="cursor-pointer"><input type="radio" name="price-source-type" value="manual" class="mr-1" onchange="togglePriceListUpload()"> Manual</label></div>
                 <input id="price-source-url" type="url" placeholder="Supplier website / online store URL (optional for manual/price list)" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain">
                 <div id="price-list-file-wrap" class="hidden"><label class="block text-[10px] text-textSec mb-1">Supplier price list (CSV: product SKU, barcode or name, then price)</label><input id="price-source-file" type="file" accept=".csv,text/csv" class="w-full text-[11px] text-textSec"></div>
-                <input id="price-source-initial" type="number" step="0.01" min="0" placeholder="Current supplier price (optional)" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain">
+                <input id="price-source-initial" type="number" step="0.01" min="0.01" placeholder="Current supplier price (optional)" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain">
                 <div class="flex justify-end gap-2 pt-1"><button type="button" onclick="closePriceSourceModal()" class="bg-bgMain border border-borderCol text-textSec px-3.5 py-2 rounded-xl font-semibold">Cancel</button><button type="submit" class="bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-semibold">Start Monitoring</button></div>
             </form>
         </div>

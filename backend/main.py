@@ -1710,7 +1710,9 @@ class GeneralCatalog(Base):
     barcode = Column(String, unique=True, nullable=True, index=True)
     catalog_key = Column(String, unique=True, index=True, nullable=False, default="legacy")
     product_name = Column(String, nullable=False)
-    category = Column(String, nullable=False, default="General")  # deprecated — see class docstring
+    # Retired (GC-F1): never written by current code. Nullable since migration
+    # 0041; historical "General" values are left untouched.
+    category = Column(String, nullable=True)
     brand = Column(String, nullable=True)
     size = Column(String, nullable=True)
     # "business_submission" (from auto_upsert_general_catalog, any business
@@ -5154,7 +5156,7 @@ def _general_catalog_atomic_get_or_create(db: Session, *, key: str, barcode: Opt
     conflict_column = "barcode" if barcode else "catalog_key"
     stmt = pg_insert(GeneralCatalog.__table__).values(
         barcode=barcode, catalog_key=key, product_name=product_name,
-        brand=brand, size=size, source=source, category="General",
+        brand=brand, size=size, source=source,
         created_at=now, updated_at=now,
     ).on_conflict_do_nothing(index_elements=[conflict_column])
     db.execute(stmt)
@@ -6095,6 +6097,55 @@ class LocationUpdate(BaseModel):
     address: Optional[str] = None
     is_active: Optional[bool] = None
 
+def require_valid_amount(label: str, value, *, allow_zero: bool = True) -> None:
+    """Server-side rule for a quantity or money value that cannot be negative
+    (DATA-001, PM-001). Bad input is refused with a readable 400 — never
+    clamped to zero, which would hide it. None means "not supplied"."""
+    if value is None:
+        return
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{label} must be a number.")
+    if not math.isfinite(number):
+        raise HTTPException(status_code=400, detail=f"{label} must be a real number.")
+    if number < 0:
+        raise HTTPException(status_code=400, detail=f"{label} cannot be negative.")
+    if number == 0 and not allow_zero:
+        raise HTTPException(status_code=400, detail=f"{label} must be greater than zero.")
+
+
+PRODUCT_AMOUNT_LABELS = (
+    ("quantity", "Quantity"), ("min_stock_level", "Minimum stock level"), ("cost_price", "Cost price"),
+    ("wholesale_price", "Wholesale price"), ("retail_price", "Retail price"),
+)
+
+
+def require_non_negative_product_values(values: dict) -> None:
+    """One rule for product create AND edit. Stock can still go DOWN only
+    through the explicit stock-adjustment path, which refuses a negative result."""
+    for key, label in PRODUCT_AMOUNT_LABELS:
+        if key in values:
+            require_valid_amount(label, values[key])
+
+
+def units_label(count, singular: str = "unit", plural: str = "units") -> str:
+    """'1 unit' / '2 units' — for text a business sends to suppliers (COPY-001)."""
+    try:
+        is_one = float(count) == 1
+    except (TypeError, ValueError):
+        is_one = False
+    return f"{count} {singular if is_one else plural}"
+
+
+def reorder_quantity(min_stock_level, on_hand) -> int:
+    """Restock quantity for a low-stock line (PROC-001): top the item up to the
+    existing target of twice its minimum level, counting what is already on
+    the shelf — never fewer than 1. A deficit (negative on-hand) is added back."""
+    target = max(int(min_stock_level or 0), 0) * 2
+    return max(target - int(on_hand or 0), 1)
+
+
 class ProductCreate(BaseModel):
     barcode: Optional[str] = None
     sku: Optional[str] = None
@@ -6125,11 +6176,13 @@ class ProductUpdate(BaseModel):
     sku: Optional[str] = None
     category: Optional[str] = None
     size: Optional[str] = None
-    quantity: Optional[int] = Field(default=None, ge=0)
-    min_stock_level: Optional[int] = Field(default=None, ge=0)
-    cost_price: Optional[float] = Field(default=None, ge=0)
-    wholesale_price: Optional[float] = Field(default=None, ge=0)
-    retail_price: Optional[float] = Field(default=None, ge=0)
+    # Negative values are refused by require_non_negative_product_values()
+    # with a readable message (a Field(ge=0) answered with a raw 422 list).
+    quantity: Optional[int] = None
+    min_stock_level: Optional[int] = None
+    cost_price: Optional[float] = None
+    wholesale_price: Optional[float] = None
+    retail_price: Optional[float] = None
     warehouse: Optional[str] = None
     expiry_date: Optional[datetime] = None
     client_ref: Optional[str] = None
@@ -6148,6 +6201,20 @@ class StockTransfer(BaseModel):
     from_warehouse: str
     to_warehouse: str
     quantity: int = Field(ge=1)
+
+def normalize_supplier_email(value: Optional[str]) -> Optional[str]:
+    """SUP-001: the one supplier email rule (create, edit, send). Blank means
+    "no email"; anything else must be a syntactically valid address (no DNS
+    lookup), stored in its normalized form."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    from email_validator import validate_email, EmailNotValidError
+    try:
+        return validate_email(raw, check_deliverability=False).normalized
+    except EmailNotValidError:
+        raise HTTPException(status_code=400, detail="Enter a valid supplier email address, or leave it blank.")
+
 
 class SupplierCreate(BaseModel):
     name: str
@@ -8679,7 +8746,7 @@ def inventory_summary(warehouse: Optional[str] = Query(None), location_id: Optio
         "total_products": len(quantities),
         "healthy": sum(1 for qty, minimum in quantities if qty > minimum),
         "low": sum(1 for qty, minimum in quantities if qty > 0 and qty <= minimum),
-        "out": sum(1 for qty, minimum in quantities if qty == 0),
+        "out": sum(1 for qty, minimum in quantities if qty <= 0),
     }
 
 # =============================================================================
@@ -8730,9 +8797,15 @@ def _dup_norm_name(value: Optional[str]) -> str:
 
 
 def _dup_norm_size(value: Optional[str]) -> str:
-    """'200g' == '200 g' == '200G'; '200g' != '500g'. A few obvious spelling
-    variants are unified but NO unit conversion is attempted (the project has
-    no safe size-parsing utility, and 0.2kg vs 200g should stay 'different')."""
+    """'200g' == '200 g' == '200G'; '200g' != '500g'. A recognised metric
+    size is compared by quantity (GC-008) via normalize_catalog_size():
+    50cl == 500ml == 0.5L, 1kg == 1000g. Volume never equals weight, and
+    anything that is not a confident "<number><unit>" (a vague word like
+    "family", free text) falls back to the plain text comparison below.
+    The user's original size text is stored and displayed unchanged."""
+    canonical = normalize_catalog_size(value)
+    if canonical:
+        return canonical
     s = (value or "").strip().casefold()
     s = _DUP_WS_RE.sub("", s).replace(".", "").replace(",", "")
     s = s.replace("litres", "l").replace("litre", "l").replace("liters", "l").replace("liter", "l")
@@ -8986,6 +9059,7 @@ def create_product(data: ProductCreate, request: Request, user: User = Depends(g
     # than a plan-limit error. Edit (update_product), Delete (delete_product)
     # and Transfer (transfer_stock) remain separately permissioned, unchanged.
     require_permission(user, "inventory.add_product")
+    require_non_negative_product_values(data.model_dump(include={k for k, _ in PRODUCT_AMOUNT_LABELS}))
     client_ref = (data.client_ref or "").strip()[:100] or None
     claim, replay = claim_idempotent_mutation(
         db, user.business_id, "product_create", client_ref,
@@ -9042,6 +9116,7 @@ def update_product(product_id: int, data: ProductUpdate, request: Request, user:
     enforce_offline_replay_identity(request, user)
     require_permission(user, "inventory.edit_product")
     changes = data.model_dump(exclude_unset=True)
+    require_non_negative_product_values(changes)
     client_ref = str(changes.pop("client_ref", "") or "").strip()[:100] or None
     _dup_override_id = changes.pop("duplicate_override_candidate_id", None)
     base_updated_at = changes.pop("base_updated_at", None)
@@ -9280,7 +9355,7 @@ def transfer_stock(product_id: int, data: StockTransfer, user: User = Depends(ge
         else: raise HTTPException(status_code=400, detail="There is no stock recorded in the selected source warehouse.")
     elif source.warehouse_id is None:
         source.warehouse_id = from_warehouse_row.id  # opportunistic legacy backfill
-    if source.quantity<data.quantity: raise HTTPException(status_code=400, detail=f"Only {source.quantity} units are recorded in {data.from_warehouse}.")
+    if source.quantity<data.quantity: raise HTTPException(status_code=400, detail=f"Only {units_label(source.quantity)} are recorded in {data.from_warehouse}.")
     target=db.query(WarehouseStock).filter(WarehouseStock.product_id==p.id,WarehouseStock.warehouse==data.to_warehouse).first()
     if not target: target=WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=data.to_warehouse,warehouse_id=to_warehouse_row.id,quantity=0); db.add(target); db.flush()
     elif target.warehouse_id is None:
@@ -9303,7 +9378,7 @@ def transfer_stock(product_id: int, data: StockTransfer, user: User = Depends(ge
         cross_location_note = f" (cross-branch: {from_location.name} → {to_location.name})"
     add_audit(
         db, user, "STOCK_TRANSFER",
-        f"Transferred {data.quantity} units of {p.name} from {data.from_warehouse} to {data.to_warehouse}{cross_location_note}.",
+        f"Transferred {units_label(data.quantity)} of {p.name} from {data.from_warehouse} to {data.to_warehouse}{cross_location_note}.",
         action_category="INVENTORY", resource_type="product", resource_id=p.id,
         metadata={
             "product_id": p.id, "product_name": p.name, "quantity": data.quantity,
@@ -10219,9 +10294,9 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
                 fingerprint = f"low-stock:{product.id}:{fp_key}"
                 title = f"Review stock for {product.name} at {warehouse_label}" if warehouse_label else f"Review stock for {product.name}"
                 summary = (
-                    f"Current stock at {warehouse_label} is {stock.quantity} units, at or below this product's minimum level of {product.min_stock_level}."
+                    f"Current stock at {warehouse_label} is {units_label(stock.quantity)}, at or below this product's minimum level of {product.min_stock_level}."
                     if warehouse_label else
-                    f"Current stock is {stock.quantity} units, at or below this product's minimum level of {product.min_stock_level}."
+                    f"Current stock is {units_label(stock.quantity)}, at or below this product's minimum level of {product.min_stock_level}."
                 )
                 _upsert_brain_recommendation(db, business_id, product.id, fingerprint, "stock_review", "critical", title, summary, {
                     "current_stock": stock.quantity, "minimum_stock": product.min_stock_level, "source": "warehouse_stock",
@@ -10242,7 +10317,7 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
             # every real per-warehouse row now does.
             fingerprint = f"low-stock:{product.id}:legacy"
             loc_id, loc_name = primary_locations.get(product.id, (None, None))
-            _upsert_brain_recommendation(db, business_id, product.id, fingerprint, "stock_review", "critical", f"Review stock for {product.name}", f"Current stock is {product.quantity} units, at or below this product's minimum level of {product.min_stock_level}.", {"current_stock": product.quantity, "minimum_stock": product.min_stock_level, "source": "current_inventory", "location_id": loc_id, "location_name": loc_name})
+            _upsert_brain_recommendation(db, business_id, product.id, fingerprint, "stock_review", "critical", f"Review stock for {product.name}", f"Current stock is {units_label(product.quantity)}, at or below this product's minimum level of {product.min_stock_level}.", {"current_stock": product.quantity, "minimum_stock": product.min_stock_level, "source": "current_inventory", "location_id": loc_id, "location_name": loc_name})
             affirmed.add(fingerprint)
         if history_days < BUSINESS_BRAIN_HISTORY_DAYS: continue
         total_sold = total_sold_map.get(product.id, 0)
@@ -10922,8 +10997,9 @@ def list_suppliers(limit: int = Query(200, ge=1, le=500), offset: int = Query(0,
 def create_supplier(data: SupplierCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "supplier.create")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    contact_email = normalize_supplier_email(data.contact_email)
     check_plan_limit(db, business, "supplier", db.query(Supplier).filter(Supplier.business_id == user.business_id).count())
-    s = Supplier(name=data.name, contact_email=data.contact_email, phone=data.phone, lead_time_days=data.lead_time_days or 3, business_id=user.business_id)
+    s = Supplier(name=data.name, contact_email=contact_email, phone=data.phone, lead_time_days=data.lead_time_days or 3, business_id=user.business_id)
     db.add(s); db.flush(); add_audit(db, user, "SUPPLIER_CREATED", f"Added supplier {s.name}.", action_category="SUPPLIERS", resource_type="supplier", resource_id=s.id); db.commit(); db.refresh(s)
     return {"id": s.id, "message": "Supplier added successfully."}
 
@@ -10932,8 +11008,6 @@ class SupplierUpdate(BaseModel):
     contact_email: Optional[str] = None
     phone: Optional[str] = None
     lead_time_days: Optional[int] = None
-
-SUPPLIER_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 @app.patch("/suppliers/{supplier_id}")
 def update_supplier(supplier_id: int, data: SupplierUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -10951,10 +11025,7 @@ def update_supplier(supplier_id: int, data: SupplierUpdate, user: User = Depends
             raise HTTPException(status_code=400, detail="Supplier name must contain at least 2 characters.")
         s.name = name
     if "contact_email" in changes:
-        email = (changes["contact_email"] or "").strip()
-        if email and not SUPPLIER_EMAIL_PATTERN.match(email):
-            raise HTTPException(status_code=400, detail="Enter a valid supplier email address, or leave it blank.")
-        s.contact_email = email or None
+        s.contact_email = normalize_supplier_email(changes["contact_email"])
     if "phone" in changes:
         phone = (changes["phone"] or "").strip()
         if not phone:
@@ -11150,18 +11221,18 @@ def generate_po(user: User = Depends(get_current_user), db: Session = Depends(ge
     created_pos: List[PurchaseOrder] = []
     for location_id, items_in_group in groups.items():
         location = location_names.get(location_id)
-        total_cost = sum(p.cost_price * max(p.min_stock_level * 2, 1) for p, _, _ in items_in_group)
+        total_cost = sum((p.cost_price or 0) * reorder_quantity(p.min_stock_level, on_hand) for p, _, on_hand in items_in_group)
         # Warehouse name shown per line whenever this Location's PO covers
         # more than one warehouse, so two independent shortages of the SAME
         # product (different warehouses, same branch) are never visually
         # collapsed into one ambiguous line (section 58).
         multi_warehouse_po = len({wid for _, wid, _ in items_in_group}) > 1
-        def _item_label(p, wid):
-            qty_needed = max(p.min_stock_level * 2, 1)
+        def _item_label(p, wid, on_hand):
+            qty_needed = reorder_quantity(p.min_stock_level, on_hand)
             wh = warehouse_rows.get(wid)
             suffix = f" [{wh.name}]" if multi_warehouse_po and wh else ""
-            return f"{p.name} ({qty_needed} units){suffix}"
-        items = ", ".join(_item_label(p, wid) for p, wid, _ in items_in_group)
+            return f"{p.name} ({units_label(qty_needed)}){suffix}"
+        items = ", ".join(_item_label(p, wid, on_hand) for p, wid, on_hand in items_in_group)
         # Branch context in the message itself (section 19) — never internal
         # database IDs, and never the business's generic address for a PO
         # that belongs to one specific branch.
@@ -11370,6 +11441,12 @@ def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Se
     supplier = db.query(Supplier).filter(Supplier.id == po.supplier_id, Supplier.business_id == user.business_id).first()
     if not supplier: raise HTTPException(status_code=404, detail="Supplier is unavailable.")
     if not supplier.contact_email: raise HTTPException(status_code=400, detail="This supplier has no contact email on file.")
+    try:
+        normalize_supplier_email(supplier.contact_email)
+    except HTTPException:
+        # A stored address saved before validation existed: a permanent,
+        # fixable problem — never reported as a temporary sending failure.
+        raise HTTPException(status_code=400, detail="This supplier's email address is not valid. Correct it in Suppliers, then send again.")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     # Enforced at SEND time, not at generation time — see generate_po(). Checked
     # BEFORE calling the email provider so a plan that's already at its limit
@@ -13317,6 +13394,23 @@ def unsubscribe_from_push(payload: PushUnsubscribeRequest, user: User = Depends(
 # -----------------------------------------------------------------------------
 # PRICE MONITOR
 # -----------------------------------------------------------------------------
+def price_change_percent(previous, latest) -> Optional[float]:
+    """Change between two recorded supplier prices, or None when either is not
+    a real price (> 0) — a zero or negative base would make the percentage
+    meaningless or flip its sign (PM-001: -50 -> 100 was shown as -300%)."""
+    try:
+        previous, latest = float(previous), float(latest)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(previous) and math.isfinite(latest)) or previous <= 0 or latest <= 0:
+        return None
+    return round(((latest - previous) / previous) * 100, 2)
+
+
+def _price_source_url_key(url: Optional[str]) -> str:
+    return (url or "").strip().rstrip("/").casefold()
+
+
 @app.get("/price-monitor")
 def price_monitor(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "procurement.price_monitor")
@@ -13331,11 +13425,14 @@ def price_monitor(user: User = Depends(get_current_user), db: Session = Depends(
         product = db.query(Product).filter(Product.id == s.product_id).first() if s.product_id else None
         supplier = db.query(Supplier).filter(Supplier.id == s.supplier_id).first() if s.supplier_id else None
         hist = db.query(PriceHistory).filter(PriceHistory.source_id == s.id).order_by(PriceHistory.recorded_at.asc()).all()
-        change = None
-        if len(hist) >= 2 and hist[-2].price:
-            change = round(((hist[-1].price - hist[-2].price)/hist[-2].price)*100, 2)
+        change = price_change_percent(hist[-2].price, hist[-1].price) if len(hist) >= 2 else None
         sources.append({"id": s.id, "product_name": product.name if product else "Unknown product", "sku": product.sku if product else "", "supplier_name": supplier.name if supplier else "General Vendor", "source_type": s.source_type, "is_active": bool(s.is_active), "last_price": s.last_price, "change_percent": change, "history": [{"price": h.price, "recorded_at": to_utc_iso(h.recorded_at)} for h in hist]})
-    return {"sources": sources, "included": included, "plan_label": plan_label_for(plan_id),
+    # One definition of "how many sources": ACTIVE ones — the same number
+    # Billing counts against the plan (get_current_entitlement_usage). A
+    # removed (deactivated) source keeps its history but is not monitored.
+    active_count = sum(1 for s in sources if s["is_active"])
+    return {"sources": sources, "active_count": active_count, "removed_count": len(sources) - active_count,
+            "included": included, "plan_label": plan_label_for(plan_id),
             "upgrade_plan_label": minimum_plan_label_for("price_monitor")}
 
 @app.post("/price-monitor/sources")
@@ -13345,9 +13442,30 @@ def create_price_source(payload: PriceSourceCreate, user: User = Depends(get_cur
     if not db.query(Supplier).filter(Supplier.id == supplier_id, Supplier.business_id == user.business_id).first(): raise HTTPException(status_code=404, detail="Supplier is unavailable.")
     if not db.query(Product).filter(Product.id == product_id, Product.business_id == user.business_id).first(): raise HTTPException(status_code=404, detail="Product is unavailable.")
     require_plan_feature(db, user, "price_monitor")
+    require_valid_amount("Starting price", payload.initial_price, allow_zero=False)
+    source_url = (payload.source_url or "").strip() or None
+    # PM-003: one source per supplier/product/source relationship. An active
+    # match is refused; a removed (deactivated) match is brought back with its
+    # price history instead of creating a second row.
+    existing = [
+        row for row in db.query(PriceMonitorSource).filter(
+            PriceMonitorSource.business_id == user.business_id, PriceMonitorSource.supplier_id == supplier_id,
+            PriceMonitorSource.product_id == product_id, PriceMonitorSource.source_type == source_type,
+        ).order_by(PriceMonitorSource.id.asc()).all()
+        if _price_source_url_key(row.source_url) == _price_source_url_key(source_url)
+    ]
+    if any(row.is_active for row in existing):
+        raise HTTPException(status_code=409, detail="This supplier is already monitored for this product.")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     check_capacity_limit(db, business, "price_monitor")
-    s=PriceMonitorSource(business_id=user.business_id, supplier_id=supplier_id, product_id=product_id, source_type=source_type, source_url=payload.source_url, is_active=True, last_price=payload.initial_price)
+    if existing:
+        s = existing[0]
+        s.is_active = True
+        if payload.initial_price is not None:
+            s.last_price = payload.initial_price
+        add_audit(db, user, "PRICE_MONITOR_SOURCE_REACTIVATED", "Reactivated a price monitor source.", action_category="PURCHASE_ORDERS", resource_type="price_monitor_source", resource_id=s.id)
+        db.commit(); return {"id": s.id, "reactivated": True, "message": "Price source restored with its price history."}
+    s=PriceMonitorSource(business_id=user.business_id, supplier_id=supplier_id, product_id=product_id, source_type=source_type, source_url=source_url, is_active=True, last_price=payload.initial_price)
     db.add(s); db.flush()
     add_audit(db, user, "PRICE_MONITOR_SOURCE_ADDED", "Added a price monitor source.", action_category="PURCHASE_ORDERS", resource_type="price_monitor_source", resource_id=s.id)
     db.commit(); return {"id": s.id, "message": "Price source added."}
@@ -13371,8 +13489,11 @@ def update_price_source_status(source_id: int, payload: PriceSourceStatusUpdate,
 
 @app.delete("/price-monitor/sources/{source_id}")
 def deactivate_price_source(source_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Free capacity without deleting the source or its PriceHistory rows."""
-    return update_price_source_status(source_id, PriceSourceStatusUpdate(is_active=False), user, db)
+    """Remove a source from monitoring (PM-002): it is deactivated — freeing
+    plan capacity and leaving every recorded PriceHistory row intact — and
+    no longer listed or counted as monitored."""
+    result = update_price_source_status(source_id, PriceSourceStatusUpdate(is_active=False), user, db)
+    return {**result, "message": "Price source removed. Its price history is kept."}
 
 @app.post("/price-monitor/{source_id}/price")
 def manual_price_update(source_id: int, payload: ManualPriceUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -13381,6 +13502,7 @@ def manual_price_update(source_id: int, payload: ManualPriceUpdate, user: User =
     if not s: raise HTTPException(status_code=404, detail="Price source is unavailable.")
     if not s.is_active: raise HTTPException(status_code=409, detail="Reactivate this price source before recording a new price.")
     require_plan_feature(db, user, "price_monitor")
+    require_valid_amount("Supplier price", payload.price, allow_zero=False)
     old_price = s.last_price
     price=payload.price; s.last_price=price; s.last_checked_at=datetime.utcnow(); db.add(PriceHistory(source_id=s.id, price=price))
     check_price_change_notification(db, s, old_price, price)
@@ -13452,16 +13574,22 @@ def upload_price_list(payload: PriceListUploadRequest, user: User = Depends(get_
         raise HTTPException(status_code=422, detail="The price list could not be read.") from exc
     parsed_rows = {}
     unmatched = 0
+    invalid_prices = 0
     for parts in csv.reader(io.StringIO(raw)):
         parts=[p.strip() for p in parts]
         if len(parts) < 2: continue
         try: price=float(parts[-1].replace(",", ""))
         except ValueError: continue  # a header row, or a line without a price
+        if not math.isfinite(price) or price <= 0:
+            invalid_prices += 1  # PM-001: never recorded as a supplier price
+            continue
         pid = int(product_id) if product_id else resolve_price_list_product(db, user.business_id, parts[0])
         if not pid:
             unmatched += 1
             continue
         parsed_rows[pid] = price
+    if not parsed_rows and invalid_prices:
+        raise HTTPException(status_code=400, detail="Prices in a price list must be greater than zero.")
     if not parsed_rows:
         raise HTTPException(status_code=422, detail="No rows in this CSV matched a product in your inventory. "
                                                    "The first column should be a product SKU, barcode or name, and the last column the price.")
@@ -13486,7 +13614,7 @@ def upload_price_list(payload: PriceListUploadRequest, user: User = Depends(get_
         s.last_price=price; s.last_checked_at=datetime.utcnow(); db.add(PriceHistory(source_id=s.id, price=price)); count += 1
     upload = persist_upload(db, user, "price_list", file_name, content_type, raw_bytes)
     add_audit(db, user, "PRICE_LIST_UPLOADED", f"Uploaded and processed price list {upload.original_name}.")
-    db.commit(); return {"count": count, "unmatched_rows": unmatched, "upload_id": upload.id}
+    db.commit(); return {"count": count, "unmatched_rows": unmatched, "invalid_price_rows": invalid_prices, "upload_id": upload.id}
 
 # -----------------------------------------------------------------------------
 # GENERAL CATALOG + BARCODE

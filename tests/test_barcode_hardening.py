@@ -281,7 +281,9 @@ class BarcodeHardeningTests(unittest.TestCase):
             body = self.lookup(EAN_C).json()
         self.assertEqual(set(body), {'found', 'source', 'barcode', 'product_name', 'brand', 'size'})
         cached = self.db.query(main.GeneralCatalog).filter(main.GeneralCatalog.barcode == EAN_C).one()
-        self.assertEqual(cached.category, 'General', 'the provider category is never imported')
+        # GC-F1: the retired category column is no longer written at all (it
+        # used to hold the "General" placeholder) — the provider's is never imported.
+        self.assertIsNone(cached.category, 'the provider category is never imported')
 
 
 if __name__ == '__main__':
