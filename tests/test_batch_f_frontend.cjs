@@ -199,6 +199,55 @@ test('PLAN-003 billing loads one at a time and every attempt restores the spinne
   assert.match(once, /escapeHtml\(message\)/);
 });
 
+// --- AUD-001: the app does not re-save an unchanged language on every load ---
+test('AUD-001 the signed-in profile keeps preferred_language from every auth payload', () => {
+  const builds = appSource.match(/auth_version: data\.auth_version \?\? null[^\n]*/g) || [];
+  assert.equal(builds.length, 4, 'sign-in, registration, refresh and /auth/me build the profile');
+  for (const line of builds) assert.match(line, /preferred_language: data\.preferred_language \|\| null/);
+  assert.match(extract('persistPreferredLanguage'), /\(currentUserProfile\.preferred_language \|\| ""\) === lang\) return;/);
+});
+
+// --- AUDIT-UI-001: Clear filters resets Location too -------------------------
+test('AUDIT-UI-001 Clear filters resets the Location filter the list and export read', () => {
+  const values = { 'audit-log-location-filter': '7', 'audit-log-search-input': 'x', 'audit-log-from-day': '1' };
+  const els = {};
+  for (const id of Object.keys(values)) els[id] = { value: values[id] };
+  let rendered = 0;
+  const ctx = { document: { getElementById: id => els[id] || null }, auditLogAppliedDateRange: { from: '2026-01-01', to: '' },
+    hideAuditLogDateError() {}, updateAuditLogActiveRangeLabel() {}, markAuditLogDatePreset() {}, closeAuditLogCustomPanel() {}, renderAuditLog() { rendered++; } };
+  vm.createContext(ctx);
+  vm.runInContext(`${extract('clearAuditLogFilters')}\nthis.clear = clearAuditLogFilters;`, ctx);
+  ctx.clear();
+  assert.equal(els['audit-log-location-filter'].value, '', 'All Locations');
+  assert.equal(els['audit-log-search-input'].value, '');
+  assert.equal(rendered, 1);
+  assert.match(extract('getAuditLogFilterParams'), /audit-log-location-filter/, 'the export uses the same filters');
+});
+
+// --- SALE-001: one sale's amount is not "Today's total" ---------------------
+test('SALE-001 the checkout confirmation labels the amount as this sale\'s total', () => {
+  assert.doesNotMatch(appSource, /t\("sales\.saleCompletedToday"/, 'the "Today\'s total" message is no longer used');
+  assert.match(appSource, /t\("sales\.saleCompletedTotal", \{total: formatCurrency\(data\.daily_total\)\}\)/);
+  const en = appSource.match(/saleCompletedTotal: "([^"]+)"/);
+  assert.equal(en[1], 'Sale completed. Sale total: {total}');
+  for (const text of ['Total de la vente', 'Total de la venta', 'Total da venda', 'إجمالي البيع']) assert.ok(appSource.includes(text), `launch language: ${text}`);
+});
+
+// --- EXP-001: a guest's Export is not a dead control --------------------------
+test('EXP-001 a guest pressing Export is sent to Sign In instead of nothing', () => {
+  const calls = [];
+  const ctx = { hasAuthenticatedBusinessContext: () => false, closeExportMenus: () => calls.push('close'), featureDisplayName: () => 'Inventory',
+    t: (k, v) => `${k}:${v.feature}`, showToast: (m, type) => calls.push(`toast ${type} ${m}`), openBusinessAuthModal: () => calls.push('signin') };
+  vm.createContext(ctx);
+  vm.runInContext(`let openExportMenu = null;\n${extract('toggleExportMenu')}\nthis.toggle = toggleExportMenu;`, ctx);
+  ctx.toggle({ nextElementSibling: { classList: { contains: () => true, remove: () => calls.push('opened') } }, setAttribute() {} });
+  assert.deepEqual(calls, ['close', 'toast info common.signInToUseFeature:Inventory', 'signin']);
+  ctx.hasAuthenticatedBusinessContext = () => true;
+  calls.length = 0;
+  ctx.toggle({ nextElementSibling: { classList: { contains: () => true, remove: () => calls.push('opened') } }, setAttribute() {} });
+  assert.deepEqual(calls, ['close', 'opened'], 'signed-in users still get the menu');
+});
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of tests) {

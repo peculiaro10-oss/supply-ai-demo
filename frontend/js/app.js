@@ -1653,7 +1653,7 @@
                     endBusinessDayConfirmTitle: "End Business Day", businessDayCloseFailed: "The business day could not be closed.",
                     businessDayClosedSuccess: "Business day closed and recorded.",
                     itemOutOfStock: "Item {name} is out of stock!", onlyUnitsLeft: "Only {count} units left in stock!",
-                    onlyUnitsAvailable: "Only {count} units available!", saleCompletedToday: "Sale completed. Today's total: {total}",
+                    onlyUnitsAvailable: "Only {count} units available!", saleCompletedToday: "Sale completed. Today's total: {total}", saleCompletedTotal: "Sale completed. Sale total: {total}",
                     saleFailed: "Unable to complete the sale right now.",
                 },
                 expenses: { expenseHistory: "Expense History", recordExpense: "Record Expense", allCategories: "All categories", allUsers: "All users",
@@ -2178,7 +2178,7 @@
                     endBusinessDayConfirmTitle: "Clôturer la journée commerciale", businessDayCloseFailed: "La journée commerciale n'a pas pu être clôturée.",
                     businessDayClosedSuccess: "Journée commerciale clôturée et enregistrée.",
                     itemOutOfStock: "L'article {name} est en rupture de stock !", onlyUnitsLeft: "Il ne reste que {count} unités en stock !",
-                    onlyUnitsAvailable: "Seulement {count} unités disponibles !", saleCompletedToday: "Vente terminée. Total du jour : {total}",
+                    onlyUnitsAvailable: "Seulement {count} unités disponibles !", saleCompletedToday: "Vente terminée. Total du jour : {total}", saleCompletedTotal: "Vente terminée. Total de la vente : {total}",
                     saleFailed: "Impossible de finaliser la vente pour le moment.",
                 },
                 expensesExtra: {
@@ -2590,7 +2590,7 @@
                     endBusinessDayConfirmTitle: "Cerrar día comercial", businessDayCloseFailed: "No se pudo cerrar el día comercial.",
                     businessDayClosedSuccess: "Día comercial cerrado y registrado.",
                     itemOutOfStock: "¡El artículo {name} está agotado!", onlyUnitsLeft: "¡Solo quedan {count} unidades en existencia!",
-                    onlyUnitsAvailable: "¡Solo {count} unidades disponibles!", saleCompletedToday: "Venta completada. Total de hoy: {total}",
+                    onlyUnitsAvailable: "¡Solo {count} unidades disponibles!", saleCompletedToday: "Venta completada. Total de hoy: {total}", saleCompletedTotal: "Venta completada. Total de la venta: {total}",
                     saleFailed: "No se puede completar la venta en este momento.",
                 },
                 expensesExtra: {
@@ -3412,7 +3412,7 @@
                     endBusinessDayConfirmTitle: "إنهاء يوم العمل", businessDayCloseFailed: "تعذر إغلاق يوم العمل.",
                     businessDayClosedSuccess: "تم إغلاق يوم العمل وتسجيله.",
                     itemOutOfStock: "العنصر {name} غير متوفر في المخزون!", onlyUnitsLeft: "تبقى {count} وحدة فقط في المخزون!",
-                    onlyUnitsAvailable: "تتوفر {count} وحدة فقط!", saleCompletedToday: "تم إتمام البيع. إجمالي اليوم: {total}",
+                    onlyUnitsAvailable: "تتوفر {count} وحدة فقط!", saleCompletedToday: "تم إتمام البيع. إجمالي اليوم: {total}", saleCompletedTotal: "تم إتمام البيع. إجمالي البيع: {total}",
                     saleFailed: "تعذر إتمام عملية البيع الآن.",
                 },
                 expensesExtra: {
@@ -3824,7 +3824,7 @@
                     endBusinessDayConfirmTitle: "Encerrar dia comercial", businessDayCloseFailed: "Não foi possível encerrar o dia comercial.",
                     businessDayClosedSuccess: "Dia comercial encerrado e registrado.",
                     itemOutOfStock: "O item {name} está sem estoque!", onlyUnitsLeft: "Restam apenas {count} unidades em estoque!",
-                    onlyUnitsAvailable: "Apenas {count} unidades disponíveis!", saleCompletedToday: "Venda concluída. Total de hoje: {total}",
+                    onlyUnitsAvailable: "Apenas {count} unidades disponíveis!", saleCompletedToday: "Venda concluída. Total de hoje: {total}", saleCompletedTotal: "Venda concluída. Total da venda: {total}",
                     saleFailed: "Não foi possível concluir a venda agora.",
                 },
                 expensesExtra: {
@@ -17359,6 +17359,16 @@
         // ---------------------------------------------------------------------
         let openExportMenu = null;
         function toggleExportMenu(toggleBtn) {
+            // EXP-001: a guest has no business data to export, and the CSV /
+            // Excel items did nothing useful. Export now behaves like the
+            // guest's other business actions (Add Product, New Sale): it says
+            // what is needed and opens Sign In.
+            if (!hasAuthenticatedBusinessContext()) {
+                closeExportMenus();
+                showToast(t("common.signInToUseFeature", {feature: featureDisplayName('inventory')}), 'info');
+                openBusinessAuthModal();
+                return;
+            }
             const panel = toggleBtn.nextElementSibling;
             const wasOpen = panel && !panel.classList.contains("hidden");
             closeExportMenus();
@@ -19724,7 +19734,7 @@
                         phone: data.phone,
                         email: data.email,
                         must_change_password: data.must_change_password,
-                        auth_version: data.auth_version ?? null
+                        auth_version: data.auth_version ?? null, preferred_language: data.preferred_language || null
                     };
                     businessProfile = {
                         id: data.business_id || null,
@@ -19974,7 +19984,7 @@
                     phone: data.phone,
                     email: data.email,
                     must_change_password: !!data.must_change_password,
-                    auth_version: data.auth_version ?? null
+                    auth_version: data.auth_version ?? null, preferred_language: data.preferred_language || null
                 };
                 businessProfile = {
                     id: data.business_id || verifiedSignInBusiness.id,
@@ -21890,7 +21900,11 @@
         }
 
         function clearAuditLogFilters() {
+            // AUDIT-UI-001: Location is a filter too. Leaving it set made the
+            // list — and the export, which reads the same filters — silently
+            // keep one location's records (13 of 501 in the audit).
             ['audit-log-search-input', 'audit-log-actor-input', 'audit-log-action-input',
+             'audit-log-location-filter',
              'audit-log-from-day', 'audit-log-from-month', 'audit-log-from-year',
              'audit-log-to-day', 'audit-log-to-month', 'audit-log-to-year'].forEach(id => {
                 const el = document.getElementById(id);
@@ -23968,7 +23982,10 @@
                     throw new Error(showApiError(res,data,t("sales.saleFailed")));
                 }
                 posCheckoutClientRef = null;
-                showToast(t("sales.saleCompletedToday", {total: formatCurrency(data.daily_total)}),"success"); posCart=[]; renderPOSCart(); closeSaleModal();
+                // SALE-001: the checkout response's daily_total is THIS sale's total
+                // (sales_checkout sums only the lines just sold), so it is labelled
+                // as the sale's total, not "Today's total".
+                showToast(t("sales.saleCompletedTotal", {total: formatCurrency(data.daily_total)}),"success"); posCart=[]; renderPOSCart(); closeSaleModal();
                 // Targeted update — patch local product quantities from the
                 // server's authoritative post-sale state and refresh only
                 // the specifically affected areas (inventory, dashboard
@@ -26056,7 +26073,7 @@
                         id: data.id, username: data.username, role: String(data.role || '').toLowerCase(),
                         firstname: data.firstname, lastname: data.lastname, position: data.position,
                         phone: data.phone, email: data.email, must_change_password: !!data.must_change_password,
-                        auth_version: data.auth_version ?? null
+                        auth_version: data.auth_version ?? null, preferred_language: data.preferred_language || null
                     };
                     businessProfile = {
                         id: data.business_id, business_id: data.business_id, business_code: data.business_code,
@@ -26461,7 +26478,7 @@
                     id: data.id, username: data.username, role: String(data.role || '').toLowerCase(),
                     firstname: data.firstname, lastname: data.lastname, position: data.position,
                     phone: data.phone, email: data.email, must_change_password: !!data.must_change_password,
-                    auth_version: data.auth_version ?? null
+                    auth_version: data.auth_version ?? null, preferred_language: data.preferred_language || null
                 };
                 businessProfile = {
                     id: data.business_id, business_id: data.business_id, business_code: data.business_code,

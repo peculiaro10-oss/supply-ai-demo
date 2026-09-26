@@ -7609,27 +7609,30 @@ def update_my_profile(data: UserProfileUpdate, user: User = Depends(get_authenti
     no field to send."""
     changes = data.model_dump(exclude_unset=True)
     touched = []
+    # AUD-001: only a value that actually changes is written and recorded. The
+    # app re-sends the current language on every load; that used to add two
+    # false "Updated own profile" activity entries each time.
+    def apply(attr, value, label):
+        if getattr(user, attr) != value:
+            setattr(user, attr, value)
+            touched.append(label)
 
     if "firstname" in changes:
-        user.firstname = (changes["firstname"] or "").strip()[:80] or None
-        touched.append("first name")
+        apply("firstname", (changes["firstname"] or "").strip()[:80] or None, "first name")
     if "lastname" in changes:
-        user.lastname = (changes["lastname"] or "").strip()[:80] or None
-        touched.append("last name")
+        apply("lastname", (changes["lastname"] or "").strip()[:80] or None, "last name")
     if "phone" in changes:
         raw_phone = (changes["phone"] or "").strip()
         if raw_phone:
             biz = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
             if not biz or not biz.country_code:
                 raise HTTPException(status_code=400, detail="Your business country is not set. Please set it before adding a phone number.")
-            user.phone = to_e164(raw_phone, biz.country_code)
+            apply("phone", to_e164(raw_phone, biz.country_code), "phone number")
         else:
-            user.phone = ""
-        touched.append("phone number")
+            apply("phone", "", "phone number")
     if "preferred_language" in changes:
         lang = str(changes["preferred_language"] or "").strip().lower()
-        user.preferred_language = (lang[:12] or None)
-        touched.append("preferred language")
+        apply("preferred_language", lang[:12] or None, "preferred language")
 
     if touched:
         add_audit(db, user, "USER_PROFILE_UPDATED", "Updated own profile: " + ", ".join(touched) + ".")
