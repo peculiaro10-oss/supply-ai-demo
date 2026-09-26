@@ -768,6 +768,13 @@
         // is invalid" so a temporary connectivity hiccup during page load
         // never gets treated the same as a real logout.
         let refreshAccessTokenWasNetworkUnreachable = false;
+        // SESS-001: why the most recent refreshAccessToken() did not succeed —
+        // "no-session" only when the backend itself said there is no valid
+        // refresh session (204, or 401), which is the one outcome that means
+        // the signed-in session has really ended. "error" (another HTTP
+        // failure), "unreachable" (no response) and "skipped" (sign-out or
+        // deletion in progress) never end a session.
+        let refreshAccessTokenLastOutcome = "ok";
         let currentUserProfile = null;
         // Effective permissions for the CURRENT signed-in user, as computed by
         // the backend's get_effective_permissions() and returned alongside the
@@ -903,6 +910,19 @@
         function hubRoleLabel(role) {
             const key = { admin: "navigation.adminHub", manager: "navigation.managerHub", staff: "navigation.staffHub" }[role];
             return key ? t(key) : t("navigation.guestHub");
+        }
+        // UI-001: the sidebar and drawer role labels are derived from the
+        // signed-in role only. They used to carry a static
+        // data-i18n="navigation.guestHub", so the language pass that runs right
+        // after sign-in (syncLanguageFromProfile -> setLanguage ->
+        // applyStaticTranslations) re-stamped "Guest Hub" over "Admin Hub"
+        // until the next header render. Language changes re-derive them here.
+        function syncRoleHubLabels() {
+            const label = hubRoleLabel(getCurrentRole());
+            const sidebar = document.getElementById("role-badge-title");
+            const drawer = document.getElementById("mobile-role-title");
+            if (sidebar) sidebar.textContent = label;
+            if (drawer) drawer.textContent = label;
         }
 
         const countryTimezoneMap = {
@@ -16479,6 +16499,7 @@
                 document.documentElement.dir = RTL_LANGUAGES.includes(resolved) ? "rtl" : "ltr";
             }
             applyStaticTranslations();
+            syncRoleHubLabels();
             populateLanguageSelects(resolved);
             refreshVisibleDynamicText();
             // Persist as the signed-in person's OWN preference so it follows them to
@@ -18684,6 +18705,7 @@
             // session validation) from re-establishing a session while this
             // runs — see refreshAccessToken()/validateAuthenticationSession().
             signOutInProgress = true;
+            forgetSignedInSession();
             quiesceAuthenticatedActivity();
 
             if (!options.skipServerLogout) {
@@ -18901,6 +18923,9 @@
             if (redirectAuthenticatedBusinessToDashboard()) return false;
             ensureCountrySelectorReady();
             switchBizAuthView('landing');
+            // A session-ended reason is shown only by showSessionEndedNotice(),
+            // which sets it right after opening; an ordinary open starts clean.
+            document.getElementById("auth-session-message")?.classList.add("hidden");
             document.getElementById("business-auth-modal").classList.remove("hidden");
             return true;
         }
@@ -19688,7 +19713,7 @@
                 });
                 const data = await response.json();
                 if (response.ok) {
-                    authToken = data.access_token;
+                    authToken = data.access_token; rememberSignedInSession();
                     currentUserProfile = {
                         id: data.id || null,
                         username: username,
@@ -19937,7 +19962,7 @@
                 return;
             }
             if (!data.access_token) { showAuthError("The sign-in response was incomplete. Please try again."); return; }
-            authToken = data.access_token;
+            authToken = data.access_token; rememberSignedInSession();
             try {
                 currentUserProfile = {
                     id: data.id || null,
@@ -20016,28 +20041,46 @@
                 return;
             }
 
+            let res, data;
             try {
-                const res = await fetch(`${API_URL}/auth/change-password`, {
+                res = await fetch(`${API_URL}/auth/change-password`, {
                     method: "POST",
                     credentials: "include",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
                     body: JSON.stringify({ current_password, new_password })
                 });
-                const data = await res.json().catch(() => ({}));
-                if (res.ok) {
-                    if (data.access_token) authToken = data.access_token;
-                    if (currentUserProfile) currentUserProfile.must_change_password = false;
-
-                    document.getElementById("password-change-modal").classList.add("hidden");
-                    document.getElementById("pw-change-cancel-btn")?.classList.add("hidden");
-                    showToast(t("auth.passwordUpdatedSuccess"), "success");
-                    await loadData();
-                } else {
-                    setMandatoryPasswordMessage(data.detail || t("settings.passwordUpdateFailed"));
-                }
+                data = await res.json().catch(() => ({}));
             } catch (err) {
                 setMandatoryPasswordMessage("We could not reach the server. Please try again.");
+                return;
             }
+            if (!res.ok) {
+                setMandatoryPasswordMessage(res.status === 400 ? friendlyErrorMessage(data, t("settings.passwordUpdateFailed")) : showApiError(res, data, t("settings.passwordUpdateFailed")));
+                return;
+            }
+            if (data.access_token) authToken = data.access_token;
+            if (currentUserProfile) currentUserProfile.must_change_password = false;
+            // PLAN-006: the mandatory path opens this dialog with an inline
+            // display:flex, which the "hidden" class alone cannot override, so a
+            // successful change left the dialog on screen. Close it fully and
+            // clear what was typed.
+            closePasswordChangeDialog();
+            showToast(t("auth.passwordUpdatedSuccess"), "success");
+            // The password is already changed. A data reload that fails
+            // afterwards is not a password failure and must not be reported
+            // inside the (now closed) password dialog.
+            try { await loadData(); }
+            catch (_) { showToast("Your password was changed, but some data could not load. Please reload Cauldra.", "warning"); }
+        }
+
+        function closePasswordChangeDialog() {
+            const modal = document.getElementById("password-change-modal");
+            if (modal) { modal.classList.add("hidden"); modal.style.display = ""; }
+            ["pw-change-current", "pw-change-new", "pw-change-confirm"].forEach(id => {
+                const el = document.getElementById(id); if (el) el.value = "";
+            });
+            document.getElementById("password-change-message")?.classList.add("hidden");
+            document.getElementById("pw-change-cancel-btn")?.classList.add("hidden");
         }
 
         // The Settings sidebar group covers three independent destinations —
@@ -20446,8 +20489,23 @@
             catch (e) { return '—'; }
         }
 
-        async function loadBillingPanel() {
-            document.getElementById("billing-panel-loading")?.classList.remove("hidden");
+        // PLAN-003: the failure state replaced the loading element's spinner
+        // with "Couldn't load… Retry", so pressing Retry showed no progress at
+        // all (the old error text simply stayed), repeated presses overlapped,
+        // and an expired session looked like a load failure that Retry could
+        // never fix. Each attempt now restores the spinner, only one runs at a
+        // time, and the failure says why (session, access, plan, server).
+        const BILLING_LOADING_HTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i> Loading subscription…`;
+        let billingPanelLoadInFlight = null;
+        function loadBillingPanel() {
+            if (billingPanelLoadInFlight) return billingPanelLoadInFlight;
+            billingPanelLoadInFlight = loadBillingPanelOnce().finally(() => { billingPanelLoadInFlight = null; });
+            return billingPanelLoadInFlight;
+        }
+        async function loadBillingPanelOnce() {
+            const loadingEl = document.getElementById("billing-panel-loading");
+            if (loadingEl) { loadingEl.innerHTML = BILLING_LOADING_HTML; loadingEl.setAttribute("aria-busy", "true"); }
+            loadingEl?.classList.remove("hidden");
             document.getElementById("billing-panel-content")?.classList.add("hidden");
             try {
                 const [usageRes, paymentsRes] = await Promise.all([
@@ -20456,11 +20514,17 @@
                         ? fetch(`${API_URL}/subscription/payments`, { headers: { "Authorization": `Bearer ${authToken}` } })
                         : Promise.resolve(null)
                 ]);
-                if (!usageRes.ok) throw new Error('usage_failed');
+                if (!usageRes.ok) {
+                    const detail = await usageRes.json().catch(() => ({}));
+                    const error = new Error(showApiError(usageRes, detail, "Couldn't load your subscription right now."));
+                    error.status = usageRes.status;
+                    throw error;
+                }
                 billingUsageCache = await usageRes.json();
                 billingIntervalChoice = billingUsageCache.billing_interval === 'annual' ? 'annual' : 'monthly';
                 const payments = paymentsRes?.ok ? await paymentsRes.json() : [];
-                document.getElementById("billing-panel-loading")?.classList.add("hidden");
+                loadingEl?.removeAttribute("aria-busy");
+                loadingEl?.classList.add("hidden");
                 document.getElementById("billing-panel-content")?.classList.remove("hidden");
                 renderBillingStatus(billingUsageCache);
                 renderBillingAiUsage(billingUsageCache);
@@ -20469,9 +20533,18 @@
                 renderPaymentHistory(payments);
             } catch (e) {
                 console.error("Failed to load subscription/billing data:", e);
-                document.getElementById("billing-panel-loading").innerHTML = `
-                    <p class="text-danger mb-2">Couldn't load your subscription right now.</p>
-                    <button type="button" onclick="loadBillingPanel()" class="text-primary underline cursor-pointer">Retry</button>`;
+                if (!loadingEl) return;
+                loadingEl.removeAttribute("aria-busy");
+                if (e.status === 401) {
+                    // The session-expiry handler takes over (notice + Sign In);
+                    // a Retry here could never succeed.
+                    loadingEl.innerHTML = `<p class="text-danger mb-2">${escapeHtml(SESSION_EXPIRED_MESSAGE)}</p>`;
+                    return;
+                }
+                const message = e.status ? friendlyErrorMessage(e.message, "Couldn't load your subscription right now.") : "Couldn't load your subscription right now. Check your connection and try again.";
+                loadingEl.innerHTML = `
+                    <p class="text-danger mb-2" role="alert">${escapeHtml(message)}</p>
+                    <button type="button" onclick="loadBillingPanel()" class="min-h-[44px] px-4 text-primary underline cursor-pointer">Retry</button>`;
             }
         }
 
@@ -25962,19 +26035,22 @@
             // validateAuthenticationSession()'s own 401 recovery, and
             // loadData()'s guest-reload path) funnels through, so guarding it
             // here protects all of them at once without touching each one.
-            if (signOutInProgress) return false;
+            if (signOutInProgress) { refreshAccessTokenLastOutcome = "skipped"; return false; }
             // Same chokepoint, same reasoning, for a business deletion in
             // flight — see businessDeletionInProgress's declaration.
-            if (businessDeletionInProgress) return false;
+            if (businessDeletionInProgress) { refreshAccessTokenLastOutcome = "skipped"; return false; }
             if (authRefreshInFlight) return authRefreshInFlight;
             authRefreshInFlight = (async () => {
                 refreshAccessTokenWasNetworkUnreachable = false;
+                refreshAccessTokenLastOutcome = "error";
                 try {
                     const res = await fetchWithTimeout(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include", headers: { "Accept": "application/json" } }, 6500);
-                    if (res.status === 204) return false;
+                    if (res.status === 204 || res.status === 401) { refreshAccessTokenLastOutcome = "no-session"; return false; }
                     if (!res.ok) return false;
                     const data = await res.json();
                     if (!data.access_token) return false;
+                    refreshAccessTokenLastOutcome = "ok";
+                    rememberSignedInSession();
                     authToken = data.access_token;
                     currentUserProfile = {
                         id: data.id, username: data.username, role: String(data.role || '').toLowerCase(),
@@ -26013,6 +26089,7 @@
                     // offline, etc.). This is a reachability problem, not the
                     // backend telling us the refresh session is invalid.
                     refreshAccessTokenWasNetworkUnreachable = true;
+                    refreshAccessTokenLastOutcome = "unreachable";
                     return false;
                 }
                 finally {
@@ -26192,7 +26269,7 @@
             if (authRefreshTimer) clearInterval(authRefreshTimer);
             if (!authToken) return;
             authRefreshTimer = setInterval(() => {
-                if (authToken && !businessDeletionInProgress) refreshAccessToken();
+                if (authToken && !businessDeletionInProgress) refreshSessionOrEnd();
             }, 10 * 60 * 1000);
         }
 
@@ -26202,12 +26279,18 @@
         }
 
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden && authToken) refreshAccessToken();
+            if (!document.hidden && authToken) refreshSessionOrEnd();
             if (!document.hidden && authToken) scheduleSyncSoon();
         });
 
         function handleAuthenticationFailure(message = "") {
+            // SESS-001 / UX-004: losing a real signed-in session is never
+            // silent any more. Only a session that existed gets the notice; a
+            // guest page load that simply has no session gets none.
+            const hadSession = !!authToken;
             stopAuthRefreshHeartbeat();
+            if (hadSession) quiesceAuthenticatedActivity();
+            forgetSignedInSession();
             authToken = "";
             offlineWorkspaceUnlocked = false;
             window.CauldraOffline?.lock();
@@ -26252,11 +26335,113 @@
             renderBusinessInsights();
             renderAuthButton();
             updateGuestHeaderState();
-            if (message) {
+            if (hadSession) showSessionEndedNotice(message || SESSION_EXPIRED_MESSAGE);
+            else if (message) {
                 const authMsg = document.getElementById("auth-session-message");
                 if (authMsg) { authMsg.textContent = message; authMsg.classList.remove("hidden"); }
             }
         }
+
+        // --- SESS-001 / UX-004 / SUSP-001: session expiry is visible --------
+        // Before: an expired session left the screen looking signed in while
+        // every request failed with 401 (a destructive action "did nothing"),
+        // and the later drop to the guest app was silent — the only message
+        // went into the sign-in dialog, which nobody opened. Now:
+        //  * any API request made with the current token that comes back 401
+        //    triggers one session re-check (installSessionExpiryDetector);
+        //  * the 10-minute heartbeat and returning to the tab do the same;
+        //  * when the backend confirms there is no session, the app says so
+        //    and opens Sign In with the reason, instead of silently becoming
+        //    the guest app;
+        //  * a reload after the session ended elsewhere says so once too.
+        const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
+        const SESSION_ENDED_ON_RELOAD_MESSAGE = "You were signed out because your session ended. Please sign in again.";
+        const SIGNED_IN_MARKER_KEY = "cauldra.signedInSession";
+        function rememberSignedInSession() {
+            try { localStorage.setItem(SIGNED_IN_MARKER_KEY, "1"); } catch (_) {}
+        }
+        function forgetSignedInSession() {
+            try { localStorage.removeItem(SIGNED_IN_MARKER_KEY); } catch (_) {}
+        }
+        function hadSignedInSessionBefore() {
+            try { return localStorage.getItem(SIGNED_IN_MARKER_KEY) === "1"; } catch (_) { return false; }
+        }
+
+        function showSessionEndedNotice(message) {
+            // Nothing the ended session was showing stays on screen behind
+            // the notice: close every open app dialog first.
+            document.querySelectorAll('.fixed[id$="-modal"]:not(.hidden)').forEach(modal => {
+                if (modal.id === "business-auth-modal") return;
+                modal.classList.add("hidden");
+                modal.style.display = "";
+            });
+            closeMobileNavIfOpen();
+            if (openBusinessAuthModal()) switchBizAuthView("signin");
+            const authMsg = document.getElementById("auth-session-message");
+            if (authMsg) { authMsg.textContent = message; authMsg.classList.remove("hidden"); }
+            showToast(message, "warning");
+        }
+        function closeMobileNavIfOpen() {
+            try { if (typeof closeMobileNav === "function") closeMobileNav(); } catch (_) {}
+        }
+
+        // The heartbeat / return-to-tab path: a refresh the backend refuses
+        // ends the session visibly; any other failure leaves it alone.
+        async function refreshSessionOrEnd() {
+            const ok = await refreshAccessToken();
+            if (!ok && refreshAccessTokenLastOutcome === "no-session" && authToken && !signOutInProgress && !businessDeletionInProgress) {
+                handleAuthenticationFailure(SESSION_EXPIRED_MESSAGE);
+            }
+            return ok;
+        }
+
+        let sessionRecheckInFlight = null;
+        function recheckSessionAfterUnauthorized(sentToken, mutating) {
+            if (sessionRecheckInFlight) return sessionRecheckInFlight;
+            sessionRecheckInFlight = (async () => {
+                try {
+                    // Already renewed (or already ended) by someone else.
+                    if (!authToken || authToken !== sentToken || signOutInProgress || businessDeletionInProgress) return;
+                    const ok = await refreshSessionOrEnd();
+                    if (ok && mutating) showToast("Your session was renewed. If that action didn't complete, please try it again.", "info");
+                } finally {
+                    sessionRecheckInFlight = null;
+                }
+            })();
+            return sessionRecheckInFlight;
+        }
+
+        (function installSessionExpiryDetector() {
+            if (typeof window.fetch !== "function" || window.fetch.__cauldraSessionAware) return;
+            const baseFetch = window.fetch;
+            // Credential endpoints answer 401 for a wrong password; that is
+            // not an expired session.
+            const CREDENTIAL_PATHS = /\/auth\/(admin-login|employee-login|verify-business|forgot-password|reset-password|refresh|change-password)\b|\/token\b/;
+            const sessionAwareFetch = function (input, init) {
+                let sentToken = "";
+                let url = "";
+                let method = "GET";
+                try {
+                    url = typeof input === "string" ? input : (input?.url || String(input || ""));
+                    method = String(init?.method || input?.method || "GET").toUpperCase();
+                    const headers = new Headers(init?.headers || (typeof input === "object" && input?.headers) || undefined);
+                    const auth = headers.get("Authorization") || "";
+                    if (auth.startsWith("Bearer ")) sentToken = auth.slice(7);
+                } catch (_) {}
+                const request = Reflect.apply(baseFetch, window, arguments);
+                if (!sentToken) return request;
+                return request.then(response => {
+                    try {
+                        if (response.status === 401 && sentToken === authToken && url.startsWith(API_URL) && !CREDENTIAL_PATHS.test(url)) {
+                            recheckSessionAfterUnauthorized(sentToken, method !== "GET" && method !== "HEAD");
+                        }
+                    } catch (_) {}
+                    return response;
+                });
+            };
+            sessionAwareFetch.__cauldraSessionAware = true;
+            window.fetch = sessionAwareFetch;
+        })();
 
         async function validateAuthenticationSession() {
             if (signOutInProgress) return false; // don't let a mid-flight validation repopulate the profile a sign-out just cleared
@@ -27865,6 +28050,12 @@
                     if (startupOutcome === "unauthenticated" && offlineWorkspaceUnlocked) {
                         await window.CauldraOffline?.quarantineActive("Your account could not be revalidated. Sign in online to review preserved local work.");
                         offlineWorkspaceUnlocked = false;
+                    } else if (startupOutcome === "unauthenticated" && hadSignedInSessionBefore()) {
+                        // SUSP-001: the backend has no session for this browser
+                        // (204) although it was signed in last time. Say so
+                        // instead of silently showing the guest app.
+                        forgetSignedInSession();
+                        showSessionEndedNotice(SESSION_ENDED_ON_RELOAD_MESSAGE);
                     }
                 }
                 if (authToken && !(await validateAuthenticationSession())) {
