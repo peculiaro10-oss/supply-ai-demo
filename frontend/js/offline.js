@@ -838,13 +838,14 @@
         document.body.insertAdjacentHTML("beforeend", `
             <div id="offline-live-region" class="sr-only" role="status" aria-live="polite"></div>
             <dialog id="offline-opt-in-dialog" class="offline-dialog offline-opt-in-dialog" aria-labelledby="offline-opt-in-title">
-                <h2 id="offline-opt-in-title">Keep Cauldra available offline?</h2>
+                <div class="offline-brand"><img src="/assets/cauldra-mark-96.png" alt="" width="34" height="34"> Cauldra</div>
+                <h2 id="offline-opt-in-title"><i class="fa-solid fa-cloud-arrow-down offline-title-icon" aria-hidden="true"></i> Keep Cauldra available offline?</h2>
                 <p>Use Cauldra on this trusted device when your internet connection is unavailable.</p>
                 <div class="offline-dialog-actions"><button type="button" id="offline-opt-in-enable" class="offline-primary">Enable Offline Access</button><button type="button" id="offline-opt-in-not-now">Not Now</button></div>
             </dialog>
             <dialog id="offline-unlock-dialog" class="offline-dialog offline-unlock-dialog" aria-labelledby="offline-unlock-title" data-mandatory="true">
-                <div class="offline-brand" aria-label="Cauldra"><span aria-hidden="true">C</span> Cauldra</div>
-                <div class="offline-state-label"><span aria-hidden="true">●</span> Offline Access</div>
+                <div class="offline-brand"><img src="/assets/cauldra-mark-96.png" alt="" width="34" height="34"> Cauldra</div>
+                <div class="offline-state-label" id="offline-state-label"><span aria-hidden="true">●</span> <span id="offline-state-label-text">Offline Access</span></div>
                 <h2 id="offline-unlock-title">Open your offline workspace</h2>
                 <p id="offline-unlock-copy">Choose a previously verified workspace and enter its offline PIN.</p>
                 <form id="offline-unlock-form">
@@ -980,6 +981,19 @@
         if (status) status.textContent = "";
     }
 
+    // The unlock dialog serves two different situations: the server cannot be
+    // reached and this device has no offline workspace ("connection"), or an
+    // offline workspace exists ("offline"). The label and the emphasis of
+    // "Try again" follow the situation so the one available action stands out.
+    function setUnlockMode(mode) {
+        const dialog = document.getElementById("offline-unlock-dialog");
+        const label = document.getElementById("offline-state-label-text");
+        const retry = document.getElementById("offline-retry-online");
+        if (dialog) dialog.dataset.mode = mode;
+        if (label) label.textContent = mode === "connection" ? "No connection" : "Offline Access";
+        if (retry) retry.classList.toggle("offline-primary", mode === "connection");
+    }
+
     function setRetryStatus(message, busy) {
         const status = document.getElementById("offline-unlock-status");
         const button = document.getElementById("offline-retry-online");
@@ -1050,6 +1064,7 @@
             // No offline workspace exists here, so the only way in is online.
             // The trigger was a failed or slow server check, not proof that
             // the device has no internet, so say exactly that.
+            setUnlockMode("connection");
             title.textContent = "Can’t reach Cauldra right now";
             copy.textContent = "Cauldra couldn’t connect to its server. Check your internet connection, then tap Try again. The first sign-in on this device needs a connection.";
             workspaceFields.hidden = true; pinButton.hidden = true; biometricButton.hidden = true;
@@ -1061,6 +1076,7 @@
         const valid = identities.filter((identity) => !identity.revoked_locally_at && Number(identity.expires_at || 0) > Date.now());
         if (!valid.length) {
             const revoked = identities.some((identity) => identity.revoked_locally_at);
+            setUnlockMode("offline");
             title.textContent = "Offline Access unavailable";
             copy.textContent = revoked
                 ? "Offline Access was disabled on this device. Connect to the internet to enable it again."
@@ -1071,6 +1087,7 @@
             if (!dialog.open) dialog.showModal();
             return false;
         }
+        setUnlockMode("offline");
         title.textContent = "Open your offline workspace";
         copy.textContent = "Choose a previously verified workspace and enter its offline PIN.";
         workspaceFields.hidden = false; pinButton.hidden = false;

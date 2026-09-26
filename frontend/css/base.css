@@ -461,3 +461,34 @@
    size or the header layout around it. */
 .close-btn{position:relative;}
 .close-btn::after{content:"";position:absolute;left:50%;top:50%;width:44px;height:44px;transform:translate(-50%,-50%);}
+
+/* UI-POLISH (launch stage): the floating Chat launcher shares z-50 with the
+   module overlays and sits later in the document, so on phones it painted over
+   dialog fields and footers. It steps aside while any overlay, dialog, the
+   payment hand-off or the mobile menu is open, and returns when it closes. */
+body:has([id$="-modal"]:not(.hidden), dialog[open], #payment-overlay:not([hidden]), #mobile-nav-overlay:not(.hidden)) #chat-launcher-root { display: none; }
+
+/* UI-POLISH: one visible keyboard focus ring for every interactive control.
+   Only :focus-visible, so mouse and touch users see no change. Inputs keep
+   their existing primary-border focus treatment. */
+:where(button, a[href], [role="button"], [role="tab"], summary, select, [tabindex]:not([tabindex="-1"])):focus-visible {
+    outline: 2px solid #436BEE;
+    outline-offset: 2px;
+}
+:where(input, textarea, select):focus-visible { box-shadow: 0 0 0 2px rgba(67, 107, 238, 0.45); }
+
+/* I18N launch stage — Arabic (RTL). The page direction comes from <html dir>,
+   set by the language runtime. Flex rows, text alignment and the desktop
+   sidebar already follow it; these rules mirror the few physical left/right
+   placements and directional icons, and keep data (amounts, codes, SKUs)
+   in its own reading direction. Direction-neutral icons are not mirrored. */
+html[dir="rtl"] #mobile-nav-drawer { left: auto; right: 0; border-right: 0; border-left: 1px solid #172033; }
+html[dir="rtl"] #mobile-nav-drawer.-translate-x-full { --tw-translate-x: 100%; }
+html[dir="rtl"] #chat-launcher-root { right: auto; left: 1.5rem; align-items: flex-start; }
+html[dir="rtl"] :is(.fa-chevron-right, .fa-chevron-left, .fa-arrow-right, .fa-arrow-left, .fa-angle-right, .fa-angle-left, .fa-arrow-right-long, .fa-arrow-left-long, .fa-right-to-bracket, .fa-right-from-bracket, .fa-arrow-right-from-bracket, .business-brief-open-btn > span[aria-hidden="true"]) { display: inline-block; transform: scaleX(-1); }
+html[dir="rtl"] :is(i, svg):is(.mr-0\.5, .mr-1, .mr-1\.5, .mr-2) { margin-right: 0; }
+html[dir="rtl"] :is(i, svg).mr-0\.5 { margin-left: 0.125rem; }
+html[dir="rtl"] :is(i, svg).mr-1 { margin-left: 0.25rem; }
+html[dir="rtl"] :is(i, svg).mr-1\.5 { margin-left: 0.375rem; }
+html[dir="rtl"] :is(i, svg).mr-2 { margin-left: 0.5rem; }
+html[dir="rtl"] :is(.font-mono, input[type="tel"], input[type="email"], input[type="number"]) { unicode-bidi: plaintext; }

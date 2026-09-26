@@ -29,11 +29,15 @@
             color: #7C8BA1;
             font: 600 12px/1.4 Inter, system-ui, -apple-system, sans-serif;
         }
-        html.cauldra-auth-booting #cauldra-auth-boot-screen::before {
+        /* The Cauldra mark above the existing pulse + message line. */
+        html.cauldra-auth-booting #cauldra-auth-boot-screen { flex-direction: column; gap: 18px; }
+        .cauldra-boot-mark { width: 48px; height: 48px; border-radius: 12px; }
+        .cauldra-boot-text { display: inline-flex; align-items: center; gap: 10px; }
+        .cauldra-boot-text::before {
             content: '';
             width: 8px;
             height: 8px;
-            margin-right: 10px;
+            flex-shrink: 0;
             border-radius: 999px;
             background: #436BEE;
             animation: cauldraAuthBootPulse 1s ease-in-out infinite alternate;
@@ -43,7 +47,7 @@
             to { opacity: 1; transform: scale(1); }
         }
         @media (prefers-reduced-motion: reduce) {
-            html.cauldra-auth-booting #cauldra-auth-boot-screen::before { animation: none; }
+            .cauldra-boot-text::before { animation: none; }
         }
     </style>
     <script>
@@ -128,6 +132,10 @@
         }
     </script>
     <link rel="stylesheet" href="/assets/vendor/fontawesome/css/all.min.css">
+    <!-- I18N launch stage: source-text catalog + runtime for the five launch
+         languages. Loaded in <head> so copy is translated as the page is built. -->
+    <script src="/js/i18n-catalog.js"></script>
+    <script src="/js/i18n-runtime.js"></script>
     <script src="/assets/vendor/html5-qrcode-2.3.8.min.js"></script>
 
     <link rel="stylesheet" href="/css/base.css">
@@ -137,7 +145,7 @@
 </head>
 <body class="bg-bgMain text-textMain font-sans antialiased min-h-screen flex selection:bg-primary/35 selection:text-primary" onclick="closeAllActionDropdowns(event)">
 
-    <div id="cauldra-auth-boot-screen" role="status" aria-live="polite" aria-label="Restoring your session">Restoring your session…</div>
+    <div id="cauldra-auth-boot-screen" role="status" aria-live="polite"><img src="/assets/cauldra-mark-96.png" alt="" width="48" height="48" class="cauldra-boot-mark"><span class="cauldra-boot-text">Restoring your session…</span></div>
 
     <div id="toast-container" class="fixed top-20 right-6 z-[100] flex flex-col gap-2.5 pointer-events-none max-w-sm w-[calc(100%-2rem)] sm:w-full"></div>
     <div id="row-action-menu" class="hidden fixed z-[140] bg-cardBg border border-borderCol rounded-xl shadow-2xl py-1 text-xs min-w-[180px]"></div>
@@ -148,7 +156,7 @@
             <!-- SECTION 1: App identity — logo + "CAULDRA" only, on one row.
                  Nothing else ever shares this row. -->
             <div class="flex items-center space-x-2.5 px-1">
-                <img src="/assets/cauldra-logo.png" alt="Cauldra" class="w-8 h-8 rounded-lg object-contain shrink-0 shadow-md">
+                <img src="/assets/cauldra-mark-96.png" alt="Cauldra" width="32" height="32" class="w-8 h-8 rounded-lg object-contain shrink-0 shadow-md">
                 <h1 id="app-brand-title" class="font-extrabold text-sm tracking-wide uppercase text-textMain leading-tight">
                     Cauldra
                 </h1>
@@ -295,7 +303,7 @@
                  Nothing else ever shares this row. -->
             <div class="flex items-center justify-between gap-3">
                 <div class="flex items-center gap-2.5 min-w-0">
-                    <img src="/assets/cauldra-logo.png" alt="Cauldra" class="w-8 h-8 rounded-lg object-contain shrink-0">
+                    <img src="/assets/cauldra-mark-96.png" alt="Cauldra" width="32" height="32" class="w-8 h-8 rounded-lg object-contain shrink-0">
                     <div id="mobile-brand-title" class="font-extrabold text-sm tracking-wide uppercase text-textMain truncate">Cauldra</div>
                 </div>
                 <button type="button" onclick="closeMobileNav()" class="close-btn w-8 h-8 rounded-lg bg-cardBg border border-borderCol text-textSec flex items-center justify-center shrink-0" aria-label="Close menu" data-i18n-aria-label="common.closeMenu"><i class="fa-solid fa-xmark"></i></button>
@@ -365,7 +373,7 @@
                              line with (and wrap away from) the code it copies. -->
                         <p id="welcome-sub-text" class="text-xs text-textSec mt-1">Explore inventory and procurement management. Register a business or sign in to get started.</p>
                         <div id="welcome-code-row" class="hidden items-center gap-1.5 mt-1 flex-wrap">
-                            <span class="text-xs text-textSec">Code:</span>
+                            <span class="text-xs text-textSec">Business ID:</span>
                             <span id="welcome-code-value" class="text-xs font-mono font-bold text-textMain">—</span>
                             <button type="button" id="banner-copy-link-btn" onclick="copyBusinessIdFromWelcomeCard()" class="text-primary hover:text-white text-[11px] font-semibold flex items-center gap-1 bg-primary/15 hover:bg-primary/25 border border-primary/30 px-2.5 py-1 rounded-lg transition cursor-pointer shrink-0" title="Copy Business ID" aria-label="Copy Business ID">
                                 <i class="fa-solid fa-copy text-[10px]"></i>
@@ -725,6 +733,7 @@
             <div id="biz-auth-view-plan" class="space-y-5 text-xs hidden">
                 <div class="flex items-start sm:items-center justify-between gap-3 pb-3 border-b border-borderCol">
                     <div>
+                        <span class="block text-[10px] font-bold uppercase tracking-wider text-primary mb-1">Step 1 of 3</span>
                         <span class="block font-bold text-textMain text-base sm:text-lg">Choose the perfect plan for your business</span>
                         <span class="block text-textSec mt-0.5">Start with a 14-day free trial. You can change plans or cancel anytime.</span>
                     </div>
@@ -772,7 +781,7 @@
             <!-- VIEW 1.75: EMAIL FOR PAYSTACK CARD VERIFICATION (new business only) -->
             <div id="biz-auth-view-payment-email" class="space-y-4 text-xs hidden">
                 <div class="flex items-center justify-between text-xs pb-2 border-b border-borderCol">
-                    <span class="font-bold text-textMain">Verify Your Email</span>
+                    <span class="font-bold text-textMain"><span class="text-primary">Step 2 of 3</span> · Subscription email</span>
                     <button type="button" onclick="changeSelectedPlan()" class="text-primary hover:underline cursor-pointer"><i class="fa-solid fa-arrow-left mr-1"></i> Back</button>
                 </div>
 
@@ -796,7 +805,7 @@
                 <div id="ev-state-2" class="space-y-3 hidden">
                     <div class="rounded-xl border border-borderCol bg-bgMain p-4 text-center space-y-2">
                         <i class="fa-solid fa-envelope-open-text text-2xl text-primary"></i>
-                        <p class="text-textMain font-semibold">Verify your email</p>
+                        <p class="text-textMain font-semibold">Check your inbox</p>
                         <p class="text-textSec leading-relaxed">We've sent a verification link to<br><span id="ev-email" class="text-textMain font-semibold break-all"></span></p>
                         <p class="text-textSec leading-relaxed">Open the email and verify your address to continue with your subscription.</p>
                         <p class="text-textSec text-[11px] flex items-center justify-center gap-1.5 pt-1"><i class="fa-solid fa-spinner fa-spin"></i> Waiting for verification&hellip;</p>
@@ -814,7 +823,7 @@
                 <div id="ev-state-3" class="space-y-3 hidden">
                     <div class="rounded-xl border border-success/40 bg-success/10 p-4 text-center space-y-2">
                         <i class="fa-solid fa-circle-check text-2xl text-success"></i>
-                        <p class="text-textMain font-semibold">Email verified <span class="text-success">&check;</span></p>
+                        <p class="text-textMain font-semibold">Email verified</p>
                         <p class="text-textSec">Your email has been verified successfully.<br><span id="ev-email-verified" class="text-textMain font-semibold break-all"></span></p>
                     </div>
                     <p class="text-textSec leading-relaxed">Paystack will temporarily authorize ₦50 to verify your card. This is not your subscription payment; a refund is initiated after successful verification and tracked until Paystack confirms completion. Your selected plan price is billed only after the 14-day free trial.</p>
@@ -848,7 +857,7 @@
             <!-- VIEW 2: REGISTER A BUSINESS & ADMIN -->
             <form id="biz-auth-view-register" onsubmit="handleRegisterBusinessSubmit(event)" class="space-y-3.5 text-xs hidden">
                 <div class="flex items-center justify-between text-xs pb-2 border-b border-borderCol">
-                    <span class="font-bold text-textMain">Create Business & Admin Account</span>
+                    <span class="font-bold text-textMain"><span class="text-primary">Step 3 of 3</span> · Business &amp; Admin details</span>
                     <button type="button" onclick="switchBizAuthView('plan')" class="text-primary hover:underline cursor-pointer"><i class="fa-solid fa-arrow-left mr-1"></i> Back</button>
                 </div>
 
@@ -886,16 +895,16 @@
                         </select>
                         <p class="text-[10px] text-textSec mt-1" data-i18n="auth.languageIndependentNote">Language is independent of country.</p>
                     </div>
-                    <div class="grid grid-cols-2 gap-2">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         <div>
                             <label class="block font-medium text-textSec mb-1">Business Email <span class="text-danger">*</span></label>
                             <input type="email" id="reg-biz-email" required placeholder="contact@business.com" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
                         </div>
                         <div>
-                            <label class="block font-medium text-textSec mb-1"><span id="reg-phone-code-label">Phone Code</span> & Number <span class="text-danger">*</span></label>
+                            <label class="block font-medium text-textSec mb-1"><span id="reg-phone-code-label">Business Phone</span> <span class="text-danger">*</span></label>
                             <div class="flex gap-1.5">
-                                <input type="text" id="reg-biz-phone-prefix" readonly class="w-16 bg-bgMain/75 border border-borderCol rounded-xl px-2 py-2 text-xs text-textSec font-mono text-center cursor-not-allowed">
-                                <input type="tel" id="reg-biz-phone" required placeholder="8000000000" class="flex-1 bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-mono">
+                                <input type="text" id="reg-biz-phone-prefix" readonly aria-label="Country calling code" class="w-16 shrink-0 bg-bgMain/75 border border-borderCol rounded-xl px-2 py-2 text-xs text-textSec font-mono text-center cursor-not-allowed">
+                                <input type="tel" id="reg-biz-phone" required placeholder="8000000000" class="flex-1 min-w-0 bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-mono">
                             </div>
                             <p id="reg-biz-phone-error" class="hidden text-danger text-[10px] mt-1"></p>
                         </div>
@@ -954,7 +963,7 @@
                         </div>
                     </div>
                     <div>
-                        <label class="block font-medium text-textSec mb-1">Business Position / Specific Role <span class="text-danger">*</span></label>
+                        <label class="block font-medium text-textSec mb-1">Your Position / Job Title <span class="text-danger">*</span></label>
                         <input type="text" id="reg-admin-position" required placeholder="e.g. Chief Financial Officer, Managing Director" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
                     </div>
                 </div>
@@ -973,9 +982,9 @@
 
                 <div class="space-y-3">
                     <div>
-                        <label class="block font-medium text-textSec mb-1">Business ID / Code <span class="text-danger">*</span></label>
-                        <input type="text" id="signin-biz-code" placeholder="Enter Business ID (e.g. vx-1234-56)" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-mono tracking-wider font-bold">
-                        <p class="text-[10px] text-textSec mt-1">Hyphens and letter casing are fully optional when typing your ID.</p>
+                        <label class="block font-medium text-textSec mb-1">Business ID <span class="text-danger">*</span></label>
+                        <input type="text" id="signin-biz-code" placeholder="e.g. AB-1234-56" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-mono tracking-wider font-bold">
+                        <p class="text-[10px] text-textSec mt-1">Hyphens and capital letters are optional.</p>
                     </div>
                 </div>
 
@@ -1094,7 +1103,7 @@
             <div id="forgot-password-message" class="hidden mb-3 rounded-xl border px-3 py-2 text-[11px]"></div>
             <form id="forgot-password-request-form" onsubmit="handleForgotPassword(event)" class="space-y-3">
                 <div>
-                    <label class="block font-medium text-textSec mb-1">Business ID / Code <span class="text-danger">*</span></label>
+                    <label class="block font-medium text-textSec mb-1">Business ID <span class="text-danger">*</span></label>
                     <input type="text" id="forgot-business-id" required placeholder="e.g. VL-3160-94" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary font-mono">
                 </div>
                 <div>
@@ -1214,7 +1223,7 @@
 
                 <div class="grid grid-cols-2 gap-2">
                     <div>
-                        <label class="block font-medium text-textSec mb-1">Business ID / Code</label>
+                        <label class="block font-medium text-textSec mb-1">Business ID</label>
                         <input type="text" id="company-code-input" readonly class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textSec font-mono font-bold cursor-not-allowed">
                     </div>
                     <div>
@@ -1621,7 +1630,7 @@
             </div>
             <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 space-y-4 text-xs text-textMain">
                 <div>
-                    <h4 class="font-extrabold text-base text-textMain tracking-tight">CAULDRA</h4>
+                    <h4 class="font-extrabold text-base text-textMain tracking-tight flex items-center gap-2.5"><img src="/assets/cauldra-mark-96.png" alt="" width="36" height="36" class="w-9 h-9 rounded-lg shrink-0"> Cauldra</h4>
                     <p class="text-textSec leading-relaxed mt-1">Cauldra helps businesses manage inventory, sales, suppliers, purchasing, expenses, teams, and daily operations from one workspace. It keeps day-to-day business data organized while surfacing the information that needs attention, helping teams make faster operational decisions.</p>
                 </div>
                 <div>
@@ -2220,7 +2229,7 @@
     </div>
 
     <!-- CUSTOMER SERVICE HEADSET & CHAT BUTTON -->
-    <div class="fixed bottom-6 right-6 z-50 flex flex-col items-end">
+    <div id="chat-launcher-root" class="fixed bottom-6 right-6 z-50 flex flex-col items-end">
         <div id="ai-chat-window" class="hidden bg-cardBg border border-borderCol rounded-2xl shadow-2xl w-[340px] h-[420px] flex flex-col mb-3 overflow-hidden transition-all transform scale-95 opacity-0">
             <div class="flex justify-between items-center p-3.5 border-b border-borderCol bg-cardHover/50">
                 <div class="flex items-center space-x-2">
@@ -2228,7 +2237,7 @@
                         <i class="fa-solid fa-headset"></i>
                     </div>
                     <div>
-                        <h3 class="font-bold text-xs text-textMain">AI Assistant</h3>
+                        <h3 class="font-bold text-xs text-textMain">Cauldra Assistant</h3>
                         <p class="text-[9px] text-success flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-success animate-pulse"></span> Online</p>
                     </div>
                 </div>
@@ -2255,9 +2264,9 @@
             </div>
         </div>
 
-        <button type="button" onclick="toggleAIChatWindow()" class="bg-primary hover:bg-primaryHover text-white font-semibold px-4 py-2.5 rounded-full shadow-2xl transition flex items-center gap-2 text-xs cursor-pointer border border-primary/30 group">
-            <i class="fa-solid fa-headset text-sm"></i>
-            <span class="font-semibold tracking-wide">chat</span>
+        <button type="button" onclick="toggleAIChatWindow()" aria-label="Open Cauldra Assistant" class="relative min-h-[44px] bg-primary hover:bg-primaryHover text-white font-semibold px-4 py-2.5 rounded-full shadow-2xl transition flex items-center gap-2 text-xs cursor-pointer border border-primary/30 group">
+            <i class="fa-solid fa-headset text-sm" aria-hidden="true"></i>
+            <span class="font-semibold tracking-wide">Chat</span>
             <span class="w-2.5 h-2.5 rounded-full bg-success border-2 border-primary animate-ping absolute -top-1 -right-1"></span>
         </button>
     </div>
@@ -3322,15 +3331,15 @@
 
     <div id="payment-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="payment-title" aria-describedby="payment-explanation">
         <section class="payment-dialog">
-            <header class="payment-header"><span class="payment-brand">CAULDRA</span><button id="payment-close" type="button" aria-label="Back to Billing">Back</button></header>
+            <header class="payment-header"><span class="payment-brand"><img src="/assets/cauldra-mark-96.png" alt="" width="30" height="30"> Cauldra</span><button id="payment-close" class="payment-secondary" type="button" aria-label="Back to Billing"><i class="fa-solid fa-arrow-left" aria-hidden="true"></i> Back</button></header>
             <div class="payment-body">
-                <p class="payment-eyebrow">SUBSCRIPTION &amp; BILLING</p>
+                <p class="payment-eyebrow">Subscription &amp; Billing</p>
                 <h2 id="payment-title">Secure payment</h2>
                 <div class="payment-summary"><p id="payment-plan">Your selected plan</p><p id="payment-amount">—</p></div>
                 <p id="payment-explanation">Paystack handles your payment details. Cauldra confirms the payment securely.</p>
                 <div class="payment-state" role="status" aria-live="polite" aria-atomic="true"><span id="payment-spinner" aria-hidden="true" hidden></span><p id="payment-status">Preparing checkout…</p></div>
                 <div class="payment-actions"><button id="payment-check" type="button" hidden>Check payment status</button><button id="payment-resume" type="button" hidden>Resume secure checkout</button><button id="payment-retry-init" type="button" hidden>Retry this attempt</button></div>
-                <p class="payment-security">Secured by Paystack</p>
+                <p class="payment-security"><i class="fa-solid fa-lock" aria-hidden="true"></i> Secured by Paystack</p>
             </div>
         </section>
     </div>

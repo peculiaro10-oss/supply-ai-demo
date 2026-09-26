@@ -1460,8 +1460,19 @@
             { code: "hu", name: "Magyar (Hungarian)" },
         ];
 
+        // Launch languages (I18N launch stage). Only these five are offered in any
+        // language selector and resolved as the active language. Every other bundle
+        // in TRANSLATIONS and every languageDatabase entry is kept intact for later
+        // completion; a stored or business language outside this list falls back
+        // to English (see setLanguage()).
+        const LAUNCH_LANGUAGES = ["en", "fr", "ar", "es", "pt"];
+        const launchLanguageOptions = () => LAUNCH_LANGUAGES.map(code => languageDatabase.find(l => l.code === code)).filter(Boolean);
+        // English country name -> ISO code, so the i18n runtime can show each
+        // country in the reader's language (Intl.DisplayNames) wherever it appears.
+        window.CAULDRA_COUNTRY_ISO = Object.fromEntries(countryDatabase.map(c => [c.name, c.iso2]));
+
         function populateLanguageSelects(selected = "en") {
-            const html = languageDatabase.map(l => `<option value="${l.code}">${l.name}</option>`).join("");
+            const html = launchLanguageOptions().map(l => `<option value="${l.code}">${l.name}</option>`).join("");
             ["reg-biz-language", "company-language-input", "app-language-switcher", "app-language-switcher-mobile"].forEach(id => {
                 const el = document.getElementById(id);
                 if (!el) return;
@@ -1481,7 +1492,7 @@
         // =====================================================================
         const RTL_LANGUAGES = ["ar", "he", "fa", "ur"];
         const DEFAULT_LANGUAGE = "en";
-        const SUPPORTED_LANGUAGES = languageDatabase.map(l => l.code);
+        const SUPPORTED_LANGUAGES = languageDatabase.map(l => l.code).filter(code => LAUNCH_LANGUAGES.includes(code));
         const LANGUAGE_STORAGE_KEY = "cauldra_language";
 
         const TRANSLATIONS = {
@@ -1722,13 +1733,13 @@
                     requestDeletionTitle: "Request Product Deletion", deleteConfirmTitle: "Delete Product",
                     deleteActionFailed: "Unable to complete that action.",
                     deletionRequestSent: "Deletion request sent to Admin.", deletedSuccess: "Product deleted successfully.",
-                    enterCostRetailForAdvice: "Enter cost and retail price to get a Gemini pricing recommendation.",
-                    geminiEvaluating: "Gemini is evaluating this product category and margin...",
-                    geminiUnavailable: "Gemini pricing analysis is unavailable right now.",
-                    geminiAdviceReady: "Gemini pricing advice is ready.",
+                    enterCostRetailForAdvice: "Enter cost and retail price to get an AI pricing recommendation.",
+                    geminiEvaluating: "Cauldra AI is evaluating this product category and margin...",
+                    geminiUnavailable: "AI pricing analysis is unavailable right now.",
+                    geminiAdviceReady: "AI pricing advice is ready.",
                     suggestedPrices: "Suggested wholesale: {wholesale} · Suggested retail: {retail}.",
                     advisorStarterRequired: "AI Margin Advisor is available on {plan} and above.",
-                    geminiTemporarilyUnavailable: "Gemini pricing analysis is temporarily unavailable. You can still enter your price manually.",
+                    geminiTemporarilyUnavailable: "AI pricing analysis is temporarily unavailable. You can still enter your price manually.",
                 },
                 team: {
                     title: "Team Management", subtitle: "Manage the people and accounts in your business.",
@@ -2224,13 +2235,13 @@
                     requestDeletionTitle: "Demande de suppression de produit", deleteConfirmTitle: "Supprimer le produit",
                     deleteActionFailed: "Impossible d'effectuer cette action.",
                     deletionRequestSent: "Demande de suppression envoyée à l'administrateur.", deletedSuccess: "Produit supprimé avec succès.",
-                    enterCostRetailForAdvice: "Saisissez le coût et le prix de détail pour obtenir une recommandation de tarification Gemini.",
-                    geminiEvaluating: "Gemini évalue cette catégorie de produit et cette marge...",
-                    geminiUnavailable: "L'analyse tarifaire Gemini n'est pas disponible pour le moment.",
-                    geminiAdviceReady: "Conseil tarifaire Gemini prêt.",
+                    enterCostRetailForAdvice: "Saisissez le coût et le prix de détail pour obtenir une recommandation de prix par l’IA.",
+                    geminiEvaluating: "L’IA de Cauldra évalue la catégorie et la marge de ce produit…",
+                    geminiUnavailable: "L’analyse de prix par l’IA est indisponible pour le moment.",
+                    geminiAdviceReady: "Les conseils de prix de l’IA sont prêts.",
                     suggestedPrices: "Prix de gros suggéré : {wholesale} · Prix de détail suggéré : {retail}.",
                     advisorStarterRequired: "Le conseiller de marge IA est disponible à partir du forfait {plan}.",
-                    geminiTemporarilyUnavailable: "L'analyse tarifaire Gemini est temporairement indisponible. Vous pouvez toujours saisir votre prix manuellement.",
+                    geminiTemporarilyUnavailable: "L’analyse de prix par l’IA est temporairement indisponible. Vous pouvez saisir votre prix manuellement.",
                 },
                 team: {
                     title: "Gestion d'équipe", subtitle: "Gérez les personnes et les comptes de votre entreprise.",
@@ -2636,13 +2647,13 @@
                     requestDeletionTitle: "Solicitud de eliminación de producto", deleteConfirmTitle: "Eliminar producto",
                     deleteActionFailed: "No se pudo completar esa acción.",
                     deletionRequestSent: "Solicitud de eliminación enviada al administrador.", deletedSuccess: "Producto eliminado con éxito.",
-                    enterCostRetailForAdvice: "Ingrese el costo y el precio de venta para obtener una recomendación de precios de Gemini.",
-                    geminiEvaluating: "Gemini está evaluando esta categoría de producto y margen...",
-                    geminiUnavailable: "El análisis de precios de Gemini no está disponible en este momento.",
-                    geminiAdviceReady: "Consejo de precios de Gemini listo.",
+                    enterCostRetailForAdvice: "Introduce el costo y el precio minorista para obtener una recomendación de precio con IA.",
+                    geminiEvaluating: "La IA de Cauldra está evaluando la categoría y el margen de este producto…",
+                    geminiUnavailable: "El análisis de precios con IA no está disponible ahora.",
+                    geminiAdviceReady: "El consejo de precios con IA está listo.",
                     suggestedPrices: "Precio mayorista sugerido: {wholesale} · Precio minorista sugerido: {retail}.",
                     advisorStarterRequired: "El asesor de márgenes de IA está disponible en el plan {plan} y superiores.",
-                    geminiTemporarilyUnavailable: "El análisis de precios de Gemini no está disponible temporalmente. Aún puede ingresar su precio manualmente.",
+                    geminiTemporarilyUnavailable: "El análisis de precios con IA no está disponible temporalmente. Puedes introducir el precio manualmente.",
                 },
                 team: {
                     title: "Gestión de equipo", subtitle: "Administre las personas y cuentas de su empresa.",
@@ -3458,13 +3469,13 @@
                     requestDeletionTitle: "طلب حذف منتج", deleteConfirmTitle: "حذف المنتج",
                     deleteActionFailed: "تعذر إتمام هذا الإجراء.",
                     deletionRequestSent: "تم إرسال طلب الحذف إلى المسؤول.", deletedSuccess: "تم حذف المنتج بنجاح.",
-                    enterCostRetailForAdvice: "أدخل سعر التكلفة وسعر التجزئة للحصول على توصية تسعير من Gemini.",
-                    geminiEvaluating: "يقوم Gemini بتقييم فئة هذا المنتج وهامش الربح...",
-                    geminiUnavailable: "تحليل التسعير من Gemini غير متاح حاليًا.",
-                    geminiAdviceReady: "نصيحة التسعير من Gemini جاهزة.",
+                    enterCostRetailForAdvice: "أدخل التكلفة وسعر التجزئة للحصول على توصية تسعير بالذكاء الاصطناعي.",
+                    geminiEvaluating: "يقيّم الذكاء الاصطناعي في Cauldra فئة هذا المنتج وهامشه…",
+                    geminiUnavailable: "تحليل التسعير بالذكاء الاصطناعي غير متاح الآن.",
+                    geminiAdviceReady: "نصيحة التسعير بالذكاء الاصطناعي جاهزة.",
                     suggestedPrices: "سعر الجملة المقترح: {wholesale} · سعر التجزئة المقترح: {retail}.",
                     advisorStarterRequired: "مستشار هامش الربح بالذكاء الاصطناعي متاح في باقة {plan} وما فوق.",
-                    geminiTemporarilyUnavailable: "تحليل التسعير من Gemini غير متاح مؤقتًا. يمكنك إدخال سعرك يدويًا.",
+                    geminiTemporarilyUnavailable: "تحليل التسعير بالذكاء الاصطناعي غير متاح مؤقتًا. يمكنك إدخال السعر يدويًا.",
                 },
                 team: {
                     title: "إدارة الفريق", subtitle: "إدارة الأشخاص والحسابات في نشاطك التجاري.",
@@ -3870,13 +3881,13 @@
                     requestDeletionTitle: "Solicitação de exclusão de produto", deleteConfirmTitle: "Excluir produto",
                     deleteActionFailed: "Não foi possível concluir essa ação.",
                     deletionRequestSent: "Solicitação de exclusão enviada ao administrador.", deletedSuccess: "Produto excluído com sucesso.",
-                    enterCostRetailForAdvice: "Insira o custo e o preço de varejo para obter uma recomendação de preços do Gemini.",
-                    geminiEvaluating: "O Gemini está avaliando esta categoria de produto e margem...",
-                    geminiUnavailable: "A análise de preços do Gemini está indisponível no momento.",
-                    geminiAdviceReady: "Recomendação de preços do Gemini pronta.",
+                    enterCostRetailForAdvice: "Digite o custo e o preço de varejo para receber uma recomendação de preço da IA.",
+                    geminiEvaluating: "A IA do Cauldra está avaliando a categoria e a margem deste produto…",
+                    geminiUnavailable: "A análise de preços com IA não está disponível agora.",
+                    geminiAdviceReady: "A recomendação de preço da IA está pronta.",
                     suggestedPrices: "Preço de atacado sugerido: {wholesale} · Preço de varejo sugerido: {retail}.",
                     advisorStarterRequired: "O Consultor de Margem com IA está disponível no plano {plan} e superiores.",
-                    geminiTemporarilyUnavailable: "A análise de preços do Gemini está temporariamente indisponível. Você ainda pode inserir seu preço manualmente.",
+                    geminiTemporarilyUnavailable: "A análise de preços com IA está temporariamente indisponível. Você ainda pode digitar o preço manualmente.",
                 },
                 team: {
                     title: "Gestão de equipe", subtitle: "Gerencie as pessoas e contas da sua empresa.",
@@ -16492,9 +16503,11 @@
         // Language" field (admin) for instant preview — persistence to the
         // business record still only happens through the existing Save flow
         // there, unchanged. Never requires a page refresh.
-        function setLanguage(lang) {
+        function setLanguage(lang, options = {}) {
             const resolved = SUPPORTED_LANGUAGES.includes(lang) ? lang : DEFAULT_LANGUAGE;
             currentLanguage = resolved;
+            // Source-text catalog for copy that is not keyed (js/i18n-runtime.js).
+            try { window.CauldraI18n && window.CauldraI18n.setLanguage(resolved); } catch (_) {}
             storeLanguage(resolved);
             if (businessProfile) {
                 businessProfile.language = resolved;
@@ -16509,7 +16522,9 @@
             refreshVisibleDynamicText();
             // Persist as the signed-in person's OWN preference so it follows them to
             // any device. Guests keep the existing localStorage-only behaviour.
-            try { persistPreferredLanguage(resolved); } catch (_) {}
+            // Automatic resolutions (options.persist === false) never overwrite a
+            // saved preference, e.g. a language that is hidden for launch.
+            if (options.persist !== false) { try { persistPreferredLanguage(resolved); } catch (_) {} }
         }
 
         // Resolves the language to use at page load / whenever a fresh
@@ -16524,10 +16539,10 @@
             // language. Two users in the same business can differ; guests and users
             // who have never chosen keep the previous business/browser/English chain.
             const userLang = String(currentUserProfile?.preferred_language || "").toLowerCase();
-            if (SUPPORTED_LANGUAGES.includes(userLang)) { setLanguage(userLang); return; }
+            if (SUPPORTED_LANGUAGES.includes(userLang)) { setLanguage(userLang, { persist: false }); return; }
             const bizLang = String(profile?.language || "").toLowerCase();
-            if (SUPPORTED_LANGUAGES.includes(bizLang)) { setLanguage(bizLang); return; }
-            setLanguage(currentLanguage);
+            if (SUPPORTED_LANGUAGES.includes(bizLang)) { setLanguage(bizLang, { persist: false }); return; }
+            setLanguage(currentLanguage, { persist: false });
         }
 
         function countryFlagEmoji(iso2) {
@@ -16565,10 +16580,15 @@
             const box = document.getElementById("reg-country-options");
             if (!box || !Array.isArray(countryDatabase)) return;
             const q = String(query || "").trim().toLowerCase();
-            const list = [...countryDatabase].sort((a, b) => a.name.localeCompare(b.name)).filter(c => !q || c.name.toLowerCase().includes(q));
+            let regionNames = null;
+            try { regionNames = currentLanguage !== "en" ? new Intl.DisplayNames([currentLanguage], { type: "region" }) : null; } catch (_) {}
+            const shown = c => { try { return (regionNames && regionNames.of(c.iso2)) || c.name; } catch (_) { return c.name; } };
+            // Search matches the displayed (localized) name and the English one.
+            const list = [...countryDatabase].sort((a, b) => shown(a).localeCompare(shown(b), currentLanguage))
+                .filter(c => !q || shown(c).toLowerCase().includes(q) || c.name.toLowerCase().includes(q));
             box.innerHTML = list.length ? list.map(c => `
                 <button type="button" onclick="selectCountryOption('${c.iso2}')" class="w-full flex items-center justify-between gap-2 px-3 py-2 text-xs hover:bg-cardHover text-textMain cursor-pointer text-left">
-                    <span class="flex items-center gap-2 truncate">${countryFlagImage(c.iso2)}<span class="truncate">${escapeHtml(c.name)}</span></span>
+                    <span class="flex items-center gap-2 truncate">${countryFlagImage(c.iso2)}<span class="truncate">${escapeHtml(shown(c))}</span></span>
                     <span class="text-textSec font-mono text-[10px] shrink-0">${escapeHtml(c.code)}</span>
                 </button>
             `).join("") : `<div class="px-3 py-4 text-xs text-textSec text-center">No matching country or region</div>`;
@@ -16622,7 +16642,7 @@
             document.getElementById("reg-biz-phone-prefix").value = phoneCode;
             document.getElementById("reg-biz-currency").value = currencyInfo.display;
             document.getElementById("reg-biz-currency-display").value = currencyInfo.display;
-            document.getElementById("reg-phone-code-label").innerText = `Code (${phoneCode})`;
+            /* The calling code shows in its own read-only field; the label stays "Business Phone". */
             window.selectedBusinessContext = { country: c.name, country_code: iso, phone_country_code: phoneCode, currency: currencyInfo.display, timezone, locale };
             applyBusinessLocale(window.selectedBusinessContext);
         }
@@ -17810,11 +17830,13 @@
             const bannerEl = document.getElementById("dynamic-welcome-banner");
             if (hasAuthenticatedBusinessContext()) {
                 if (bannerEl) bannerEl.classList.add("signed-in");
-                const userNameUpper = (currentUserProfile.username || "").toUpperCase();
+                // Greets the person by first name; the sign-in username (shown in
+                // capitals before) remains the fallback when no first name is set.
+                const greetingName = String(currentUserProfile.firstname || "").trim() || (currentUserProfile.username || "").toUpperCase();
                 const positionText = currentUserProfile.position || "";
                 const role = (currentUserProfile.role || "").toLowerCase();
 
-                if (headingEl) headingEl.innerText = t("dashboard.welcomeUser", { name: userNameUpper });
+                if (headingEl) headingEl.innerText = t("dashboard.welcomeUser", { name: greetingName });
                 // Company name and Business ID are two separate lines now (see
                 // the welcome-code-row markup) — never combined into one
                 // sentence that wraps unpredictably on narrow screens.
@@ -18158,9 +18180,9 @@
             const langSel = document.getElementById("profile-language");
             if (langSel) {
                 // Labels come from the existing languageDatabase - no second list.
-                langSel.innerHTML = languageDatabase.map(l =>
+                langSel.innerHTML = launchLanguageOptions().map(l =>
                     `<option value="${escapeHtml(l.code)}">${escapeHtml(l.name)}</option>`).join("");
-                langSel.value = u.preferred_language || currentLanguage || DEFAULT_LANGUAGE;
+                langSel.value = SUPPORTED_LANGUAGES.includes(u.preferred_language) ? u.preferred_language : (currentLanguage || DEFAULT_LANGUAGE);
             }
             applyStaticTranslations(document.getElementById("my-profile-modal") || document);
         }
@@ -19022,13 +19044,13 @@
                 renderRegisterPlanBanner();
                 ensureCountrySelectorReady();
                 ensureCountrySelectorReady();
-                titleEl.innerHTML = `<i class="fa-solid fa-building-circle-arrow-right text-primary"></i> Register a Business & Admin`;
+                titleEl.innerHTML = `<i class="fa-solid fa-building-circle-arrow-right text-primary"></i> Create Your Business`;
             } else if (viewName === 'signin') {
                 document.getElementById("biz-auth-view-signin-step1").classList.remove("hidden");
                 titleEl.innerHTML = `<i class="fa-solid fa-right-to-bracket text-primary"></i> Sign in to a Business`;
             } else if (viewName === 'signin-step2') {
                 document.getElementById("biz-auth-view-signin-step2").classList.remove("hidden");
-                titleEl.innerHTML = `<i class="fa-solid fa-user-check text-primary"></i> Employee Authentication`;
+                titleEl.innerHTML = `<i class="fa-solid fa-user-check text-primary"></i> Sign in to a Business`;
             }
         }
 
@@ -20346,7 +20368,12 @@
             const titleEl = document.getElementById("legal-doc-title");
             if (titleEl) titleEl.innerHTML = `<i class="fa-solid fa-scale-balanced text-primary"></i> ${escapeHtml(title)}`;
             const bodyEl = document.getElementById("legal-doc-body");
-            if (bodyEl) bodyEl.innerHTML = bodyHtml;
+            // Legal text needs a professional, reviewed translation, so the
+            // documents stay in English for launch and say so in the reader's language.
+            const englishOnly = currentLanguage !== "en"
+                ? `<p class="rounded-xl border border-borderCol bg-bgMain px-3 py-2 text-textSec text-[11px]"><i class="fa-solid fa-language text-primary mr-1.5" aria-hidden="true"></i>This document is currently available in English only.</p>`
+                : "";
+            if (bodyEl) bodyEl.innerHTML = englishOnly + `<div lang="en" dir="ltr" translate="no" class="space-y-3">${bodyHtml}</div>`;
             document.getElementById("legal-doc-modal")?.classList.remove("hidden");
         }
         function closeLegalDocModal() {

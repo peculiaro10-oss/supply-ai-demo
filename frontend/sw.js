@@ -16,7 +16,7 @@
 // below deletes every cache whose name doesn't match the current one, which
 // is the only thing standing between a fixed startup bug and a browser
 // silently keeping the old broken app.js around after the fix ships.
-const SHELL_CACHE = "cauldra-shell-v11-perm001-enforcement";
+const SHELL_CACHE = "cauldra-shell-v12-launch-i18n-polish";
 
 // Precached at install time. Kept small and static-only — anything dynamic
 // (products, sales, etc.) never belongs in this cache.
@@ -34,6 +34,8 @@ const SHELL_DOCUMENTS = [
     "/css/payments.css",
     "/css/offline.css",
     "/js/heartbeat.js",
+    "/js/i18n-catalog.js",
+    "/js/i18n-runtime.js",
     "/css/base.css",
     "/css/dashboard-fixes.css",
     "/frontend/css/base.css",
@@ -46,6 +48,7 @@ const SHELL_ASSETS = [
     "/assets/apple-touch-icon.png",
     "/assets/icon-192.png",
     "/assets/icon-512.png",
+    "/assets/cauldra-mark-96.png",
     "/assets/vendor/tailwindcss-3.4.17.js",
     "/assets/vendor/fontawesome/css/all.min.css",
     "/assets/vendor/fontawesome/webfonts/fa-solid-900.woff2",

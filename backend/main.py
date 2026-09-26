@@ -5981,7 +5981,8 @@ def gemini_text_response(system_prompt: str, user_prompt: str, usage_out: Option
     cost afterward (see the Platform Owner AI & Costs section). Callers that
     don't need cost tracking simply omit it; behavior is unchanged."""
     if not gemini_client:
-        raise HTTPException(status_code=503, detail="Gemini AI is not configured. Add GEMINI_API_KEY to the server environment.")
+        print("[ai-provider] gemini not configured: GEMINI_API_KEY is empty")
+        raise HTTPException(status_code=503, detail="AI features are temporarily unavailable. Please try again later.")
     try:
         response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=f"{system_prompt}\n\n{user_prompt}")
         text = getattr(response, "text", None) or ""
@@ -5994,13 +5995,14 @@ def gemini_text_response(system_prompt: str, user_prompt: str, usage_out: Option
         return text.strip()
     except Exception as exc:
         log_ai_provider_failure("gemini", "text", exc)
-        raise HTTPException(status_code=502, detail="Gemini could not complete that AI operation right now. Please try again.") from exc
+        raise HTTPException(status_code=502, detail="Cauldra AI could not complete that request right now. Please try again.") from exc
 
 def openai_json_response(prompt: str, image_data: Optional[str] = None, usage_out: Optional[dict] = None) -> dict:
     """usage_out (V31): see gemini_text_response's docstring - same contract,
     populated from OpenAI's own resp.usage."""
     if not openai_client:
-        raise HTTPException(status_code=503, detail="OpenAI integration is not configured. Add OPENAI_API_KEY to the server environment.")
+        print("[ai-provider] openai not configured: OPENAI_API_KEY is empty")
+        raise HTTPException(status_code=503, detail="AI features are temporarily unavailable. Please try again later.")
     content = [{"type": "input_text", "text": prompt}]
     if image_data:
         content.append({"type": "input_image", "image_url": image_data, "detail": "high"})
@@ -7132,9 +7134,9 @@ def send_recovery_email(to_email: str, username: str, code: str):
     except EmailDeliveryError as exc:
         # User-facing text stays generic; the classification is in the log.
         if exc.category == "missing_api_key":
-            raise HTTPException(status_code=503, detail="Email recovery is not configured. Add RESEND_API_KEY to the server environment.") from None
+            raise HTTPException(status_code=503, detail="Email recovery isn't available right now. Please contact support.") from None
         if exc.category == "sender_not_configured":
-            raise HTTPException(status_code=503, detail="Email recovery is not configured. Set RESEND_FROM on the server.") from None
+            raise HTTPException(status_code=503, detail="Email recovery isn't available right now. Please contact support.") from None
         raise HTTPException(status_code=502, detail="We could not send the recovery email right now.") from None
 
 def send_recovery_sms(phone: str, code: str):
@@ -7281,9 +7283,11 @@ def forgot_password(payload: ForgotPasswordRequest, request: Request, background
             raise HTTPException(status_code=400, detail="Please provide your account email.")
         email = str(payload.email).strip()
         if not os.getenv("RESEND_API_KEY", "").strip():
-            raise HTTPException(status_code=503, detail="Email recovery is not configured. Add RESEND_API_KEY to the server environment.")
+            print("[email] password recovery unavailable: RESEND_API_KEY is empty")
+            raise HTTPException(status_code=503, detail="Email recovery isn't available right now. Please contact support.")
         if not RESEND_FROM:
-            raise HTTPException(status_code=503, detail="Email recovery is not configured. Set RESEND_FROM on the server.")
+            print("[email] password recovery unavailable: RESEND_FROM is empty")
+            raise HTTPException(status_code=503, detail="Email recovery isn't available right now. Please contact support.")
     else:
         if not payload.phone or not normalize_phone(payload.phone):
             raise HTTPException(status_code=400, detail="Please provide your phone number.")
@@ -11718,9 +11722,9 @@ def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Se
         # still not counted against the plan's allowance. Only a genuinely
         # provider-accepted send can consume it.
         if exc.category == "missing_api_key":
-            raise HTTPException(status_code=503, detail="Email dispatch is not configured. Add RESEND_API_KEY to the server environment.") from None
+            raise HTTPException(status_code=503, detail="Email sending isn't available right now. Please contact support.") from None
         if exc.category == "sender_not_configured":
-            raise HTTPException(status_code=503, detail="Email dispatch is not configured. Set RESEND_FROM on the server.") from None
+            raise HTTPException(status_code=503, detail="Email sending isn't available right now. Please contact support.") from None
         raise HTTPException(status_code=502, detail="We could not email this purchase order right now.") from None
     po.status = "SENT"; po.sent_at = datetime.utcnow()
     po_location = db.query(Location).filter(Location.id == po.location_id).first() if po.location_id else None
