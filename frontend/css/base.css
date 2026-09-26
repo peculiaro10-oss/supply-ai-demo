@@ -403,9 +403,17 @@
             #dynamic-dashboard-container section{padding-left:22px!important;padding-right:22px!important;}
             #main-layout-container main{padding-left:22px!important;padding-right:22px!important;}
             #dynamic-welcome-banner{padding:22px!important;}
-            .inventory-header-stack{grid-template-columns:1fr auto;gap:12px!important;}
-            .inventory-status-row{grid-column:1/-1;justify-self:start;}
-            .inventory-filter-row{grid-column:2;grid-row:1;}
+            /* RESP-001: beside the 240px sidebar the card can be narrower than
+               the filter row's natural width (select + Export + Add Product),
+               which clipped Add Product under the card's overflow:hidden. A
+               wrapping flex header puts the filter row beside the title when
+               it fits and on its own line when it does not; inside that line
+               the select takes the full width before any button is pushed out. */
+            .inventory-header-stack{display:flex!important;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px!important;}
+            .inventory-main-header{order:1;flex:0 1 auto;min-width:0;}
+            .inventory-filter-row{order:2!important;flex:0 1 auto;min-width:0;max-width:100%;flex-wrap:wrap;justify-content:flex-end;margin-left:auto;}
+            .inventory-filter-row select{flex:1 1 220px;width:220px;min-width:0!important;}
+            .inventory-status-row{order:3!important;flex:1 1 100%;justify-self:auto;}
         }
 
         @media (max-width:767px){
