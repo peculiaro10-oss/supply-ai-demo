@@ -117,6 +117,7 @@ check('Cauldra mark replaces the generic "C" and plain-text brand treatments', (
     assert.equal((offline.match(/cauldra-mark-96\.png/g) || []).length, 2, 'unlock + opt-in dialogs carry the mark');
     assert.match(html, /<header class="payment-header"><span class="payment-brand"><img src="\/assets\/cauldra-mark-96\.png"/);
     assert.match(read('frontend/email-verified.html'), /cauldra-mark-96\.png/);
+    assert.match(read('backend/main.py'), /"Content-Security-Policy":"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self';/, 'the email-return page may load its own (same-origin) images');
     assert.match(html, /id="cauldra-auth-boot-screen"[^>]*><img src="\/assets\/cauldra-mark-96\.png"/);
 });
 check('offline Access action hierarchy markers are intact (verify-native-bundle)', () => {

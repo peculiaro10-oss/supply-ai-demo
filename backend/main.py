@@ -15363,7 +15363,7 @@ def onboarding_email_invalidate(data: OnboardingEmailConfirmRequest, db: Session
 def onboarding_email_callback():
     return FileResponse(FRONTEND_DIR / "email-verified.html", headers={
         "Cache-Control":"no-store", "Referrer-Policy":"no-referrer",
-        "Content-Security-Policy":"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"})
+        "Content-Security-Policy":"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"})
 
 # -----------------------------------------------------------------------------
 # NEW-BUSINESS ONBOARDING: PAY-BEFORE-REGISTER
