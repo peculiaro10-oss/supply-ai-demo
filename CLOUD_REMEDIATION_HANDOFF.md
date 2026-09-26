@@ -667,7 +667,7 @@ Production promotion stays separate and owner-authorized.
 
 ## 14. Transfer buffer — records updates pending for the owner's permanent records
 
-*(Empty at handoff. Each cloud batch appends:)*
+*(Each cloud batch appends:)*
 - date and batch;
 - branch and commits;
 - QA deploy;
@@ -677,6 +677,49 @@ Production promotion stays separate and owner-authorized.
 - retest-log summary;
 - manifest additions (**names only**);
 - owner actions.
+
+### 14.1 Batch F — layout, sessions and UI-state correctness (2026-09-26, cloud session)
+
+**Branch and commits.** Pushed to `remediation/batch-e-ai-forecast-brain`, on top of `2e15735`. This cloud session may push only to that branch, so there is no separate `batch-f` branch. The owner may create `remediation/batch-f-layout-sessions` at `130f3a4` locally if the per-batch convention (§12) should be kept.
+`6d1a8a9` RESP-001 · `046acb7` ERR-001/ERR-003 · `8397ccc` SESS-001/UX-004/PLAN-003/UI-001/PLAN-006 · `7cc7eae` AUD-001/AUDIT-UI-001/SALE-001/EXP-001 · `130f3a4` UX-014/UX-015/OBS-6/OBS-2/OBS-8 · plus this documentation commit.
+
+**QA deploy: NONE.** The cloud environment has no Railway CLI or credentials, and its network policy denies `cauldra-qa.up.railway.app`. All verification ran against a **local** backend (disposable Postgres 16, Alembic head `0042`, disposable business `LOCALF01`) in headless Chromium, plus unit/API tests. Current QA deployment stays `74db9267` (`2aeec3f`). **Owner/local action:** `railway up --service cauldra-qa` from `130f3a4` (or later), then the QA checks below.
+
+**Migrations: none.** Batch F is code only. Head stays `0042`.
+
+**Triage rows (Still needs a fix = 32 before Batch F):**
+
+| Row | Finding | New status |
+|---|---|---|
+| 41 | RESP-001 | FIXED — Web verified locally (768–1440, sidebar visible); QA + Android pending |
+| 8 | ERR-001 | FIXED — tests + local; QA pending |
+| 9 | ERR-003 | FIXED — tests (CORS + security headers on 500); QA + Android pending |
+| 22 | SESS-001, UX-004, PLAN-003 | FIXED — 9 local browser scenarios + billing retry; QA + Android pending. **SUSP-001 root cause still open** (the symptom is now announced, not silent) |
+| 23 | UI-001 | FIXED — local sign-in/reload trace; QA + Android pending |
+| 24 | PLAN-006 | FIXED — mandatory + voluntary change, local; QA pending |
+| 37 | AUD-001 | FIXED — Postgres test + local (0 false entries over sign-in + 3 reloads); QA pending |
+| 38 | AUDIT-UI-001 | FIXED — local browser; QA pending |
+| 39 | SALE-001 | FIXED — label; en/fr/es/pt/ar wording; the 30 non-launch languages fall back to English for this one sentence |
+| 40 | EXP-001 | FIXED — guest Export opens Sign In; QA pending |
+| 65 | UX-014 | FIXED — local browser (menu replaces module); QA + Android pending |
+| 67 | UX-015 | FIXED — all 7 bare "Access denied" 403s now specific (the audit's single endpoint is not identifiable without the missing audit) |
+| 68 | audit OBS-6 | FIXED — 44 px hit area on all close buttons; Android pending |
+| 69 | audit OBS-2 | FIXED (objective part) — inline errors escaped/filtered; owner to confirm against the tracker's original wording |
+| 71 | audit OBS-8 | FIXED — every 429 names the wait |
+| 70 | audit OBS-5 | **NOT FIXED — blocked**: the specific onboarding copy issues were in the missing audit; owner to supply the tracker text |
+
+If the owner accepts local Web verification pending QA, the count becomes **32 → 17**. Otherwise the 15 rows stay open until the QA pass.
+
+**Tracker lines (new):** RESP-001, ERR-001, ERR-003, SESS-001, UX-004, PLAN-003, UI-001, PLAN-006, AUD-001, AUDIT-UI-001, SALE-001, EXP-001, UX-014, UX-015, OBS-6, OBS-2, OBS-8 → `FIXED — awaiting QA deploy verification` (plus Android where noted). OBS-5 → `OPEN — needs owner detail`. SUSP-001 → `OPEN — investigation (symptom now visible)`.
+
+**Retest-log summary.** New tests: `tests/test_resp001_inventory_header_width.cjs` (needs Playwright; skips its browser part otherwise), `tests/test_batch_f_frontend.cjs` (16 checks), `tests/test_batch_f_error_responses.py` (8), `tests/test_batch_f_backend_postgres.py` (needs `TEST_POSTGRES_ADMIN_URL`). Each fails on the pre-fix code. **Sweep:** every Python and Node suite was run at `2e15735` and at `130f3a4` in the same environment, with a local `TEST_POSTGRES_ADMIN_URL`. The exit codes are identical for every pre-existing suite, and the four new suites pass. **Recorded, not fixed (pre-existing, not Batch F):** with a Postgres admin URL present, 9 Postgres-only suites also fail at baseline — `test_business_day`, `test_historical_cogs_postgres` (timeout), `test_mutation_idempotency_postgres`, `test_refund_state_postgres`, `test_registration_atomicity_postgres`, `test_rejected_checkout_state_postgres`, `test_sale_pricing_policy_postgres`, `test_sales_checkout_atomicity_postgres`, `test_transaction_count_postgres`. The sampled cause is test fixtures whose Location has no currency ("This Location has no authoritative currency…"); the fixtures predate location-currency enforcement. They were previously hidden because the baseline ran without Postgres.
+
+**Manifest additions (names only).** Code only; no variables, dashboard settings or migrations. Add the five Batch F commits to the promotion line after Batch E. Behaviour notes for promotion: unhandled 500s now return JSON `{"detail": ...}` with CORS headers (new `UnhandledErrorResponseMiddleware`); `PATCH /users/me/profile` records only real changes; the browser keeps a non-sensitive `localStorage` key `cauldra.signedInSession` (a "was signed in" marker, cleared on sign-out).
+
+**Owner actions.**
+1. Deploy `130f3a4`+ to QA; run the QA checks for the rows above (a Manager sign-in for billing Retry, a disposable second location for Clear filters).
+2. Supply the OBS-5 onboarding-copy detail from the tracker.
+3. Android final pass (§7): add RESP-001 at 800 px, close tap areas, session-expiry notice, UX-014, the ERR-003 error text.
 
 ---
 
