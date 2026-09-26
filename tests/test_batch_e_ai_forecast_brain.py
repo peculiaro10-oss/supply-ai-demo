@@ -453,6 +453,7 @@ class AIContextTests(BatchEBase):
         system = self.calls[-1][0]
         self.assertIn('using only the business data provided', system)
         self.assertIn('If the data does not answer the question', system)
+        self.assertIn("Sales figures aren't included in your access.", system)
 
     def test_stock_out_question_has_the_forecast(self):
         rice = self.product(self.biz_a, 'Rice', qty=30)
@@ -506,6 +507,10 @@ class AccessibilityAndNamingTests(unittest.TestCase):
         self.assertNotIn('<div class="p-4 rounded-xl', block)
         self.assertRegex(block, r'<button type="button" data-ai-insights-trigger[^>]*onclick="closeAICenterModal\(\); fetchAIInsights\(\);"')
         self.assertIn('.ai-center-card:focus-visible{outline:2px solid #436BEE', BASE_CSS)
+
+    def test_opening_the_ai_center_moves_keyboard_focus_into_it(self):
+        self.assertIn('setTimeout(() => document.querySelector("#ai-center-modal .ai-center-card")?.focus(), 0);', APP_JS)
+        self.assertIn('aiCenterOpener = document.activeElement;', APP_JS)
 
     def test_no_duplicate_insight_requests(self):
         self.assertIn('if (aiInsightsInFlight) return;', APP_JS)

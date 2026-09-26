@@ -23013,11 +23013,19 @@
                 openBusinessAuthModal();
                 return;
             }
+            // UX-013: keyboard users land on the first card (then Tab to Generate
+            // Insights), and return to the control that opened the AI Center.
+            aiCenterOpener = document.activeElement;
             document.getElementById("ai-center-modal").classList.remove("hidden");
+            setTimeout(() => document.querySelector("#ai-center-modal .ai-center-card")?.focus(), 0);
         }
 
+        let aiCenterOpener = null;
         function closeAICenterModal() {
             document.getElementById("ai-center-modal").classList.add("hidden");
+            const opener = aiCenterOpener;
+            aiCenterOpener = null;
+            if (opener && opener !== document.body && document.contains(opener) && opener.offsetParent !== null) opener.focus();
         }
 
         // ===================================================================

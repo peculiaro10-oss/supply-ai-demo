@@ -16805,7 +16805,8 @@ def ai_chat(req: ChatRequest, user: User = Depends(require_ai_access), db: Sessi
     context = ai_business_context(db, user)
     system = ("You are Cauldra's business and inventory assistant. Answer using only the business data provided. "
               "If the data does not answer the question, say so briefly and name what is missing. If sales figures are "
-              "withheld for this person's role, say that sales reports are not included in their access. " + AI_REPLY_STYLE)
+              "withheld, tell the person directly, in the second person, that sales figures are not part of their "
+              "access in Cauldra (for example: \"Sales figures aren't included in your access.\"). " + AI_REPLY_STYLE)
     reply, credits = run_billable_ai(db, user, "chat", "gemini", GEMINI_MODEL, lambda u: gemini_text_response(system, f"Question: {req.message}\nBusiness data: {json.dumps(context, ensure_ascii=False)}", usage_out=u))
     return {"reply":reply, "credits_consumed": credits}
 
