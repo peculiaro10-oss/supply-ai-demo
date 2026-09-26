@@ -7700,6 +7700,21 @@ def delete_my_avatar(user: User = Depends(get_authenticated_user), db: Session =
     return {"message": "Profile photo removed.", "has_avatar": False}
 
 
+def _verification_email_rate_limited(provider_detail: str) -> HTTPException:
+    """OBS-8: the email provider's own limit used to be reported as "Please
+    wait a little". When the provider states a wait, it is passed on (message
+    and Retry-After); otherwise the customer is told to wait a few minutes."""
+    match = re.search(r"(?i)\b(\d+)\s*(seconds?|secs?|minutes?|mins?)\b", provider_detail or "")
+    if match:
+        amount = int(match.group(1))
+        seconds = amount * 60 if match.group(2).lower().startswith("min") else amount
+        if seconds > 0:
+            wait = f"{seconds} seconds" if seconds < 120 else f"{math.ceil(seconds / 60)} minutes"
+            return HTTPException(status_code=429, headers={"Retry-After": str(seconds)},
+                                 detail=f"Too many verification emails were requested. Please wait {wait} and try again.")
+    return HTTPException(status_code=429, detail="Too many verification emails were requested. Please wait a few minutes and try again.")
+
+
 @app.post("/users/me/email-change")
 def start_my_email_change(payload: UserEmailChangeRequest, request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
     """Begin a VERIFIED email change. The currently trusted address is kept
@@ -7722,7 +7737,7 @@ def start_my_email_change(payload: UserEmailChangeRequest, request: Request, use
         record_failure(db, "user-email-change", new_email)
         db.commit()
         if any(m in detail for m in ("rate", "limit", "too many", "seconds", "429")):
-            raise HTTPException(status_code=429, detail="Please wait a little before requesting another verification email.") from exc
+            raise _verification_email_rate_limited(detail) from exc
         raise HTTPException(status_code=502, detail="We couldn't send the verification email right now. Please try again.") from exc
     user.pending_email = new_email
     add_audit(db, user, "USER_EMAIL_CHANGE_REQUESTED", "Requested an email address change (pending verification).")
@@ -7788,7 +7803,7 @@ def start_my_email_verify(request: Request, user: User = Depends(get_authenticat
         record_failure(db, "user-email-verify", user.email)
         db.commit()
         if any(m in detail for m in ("rate", "limit", "too many", "seconds", "429")):
-            raise HTTPException(status_code=429, detail="Please wait a little before requesting another verification email.") from exc
+            raise _verification_email_rate_limited(detail) from exc
         raise HTTPException(status_code=502, detail="We couldn't send the verification email right now. Please try again.") from exc
     add_audit(db, user, "USER_EMAIL_VERIFICATION_REQUESTED", "Requested a verification email for the current account email.")
     db.commit()
@@ -7966,7 +7981,7 @@ def get_user_permissions(user_id: int, actor: User = Depends(get_current_user), 
         if actor.role == "manager" and target.role != "staff":
             raise HTTPException(status_code=403, detail="Managers can only view Staff permissions.")
         if actor.role not in ("admin", "manager"):
-            raise HTTPException(status_code=403, detail="Access denied.")
+            raise HTTPException(status_code=403, detail="Only an Admin or Manager can view account permissions.")
     effective = get_effective_permissions(target)
     try:
         overrides = json.loads(target.permission_overrides) if target.permission_overrides else {}
@@ -8040,7 +8055,7 @@ def update_user_permissions_batch(user_id: int, data: PermissionBatchUpdate, act
         if target.role != "staff":
             raise HTTPException(status_code=403, detail="Managers can only edit Staff permissions.")
     else:
-        raise HTTPException(status_code=403, detail="Access denied.")
+        raise HTTPException(status_code=403, detail="Only an Admin or Manager can change account permissions.")
 
     if data.expected_version is not None and data.expected_version != compute_permission_version(target):
         raise HTTPException(status_code=409, detail="Permissions changed since you opened this editor. Reload the latest permissions before saving.")
@@ -8165,7 +8180,7 @@ def serialize_account_action_request(x: AccountActionRequest, include_resolution
 def list_account_action_requests(actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(AccountActionRequest).filter(AccountActionRequest.business_id == actor.business_id, AccountActionRequest.status == "PENDING")
     if actor.role == "manager": q = q.filter(AccountActionRequest.requested_by_id == actor.id)
-    elif actor.role != "admin": raise HTTPException(status_code=403, detail="Access denied")
+    elif actor.role != "admin": raise HTTPException(status_code=403, detail="Only an Admin or Manager can view account action requests.")
     items = q.order_by(AccountActionRequest.created_at.desc()).all()
     return [serialize_account_action_request(x) for x in items]
 
@@ -8173,7 +8188,7 @@ def list_account_action_requests(actor: User = Depends(get_current_user), db: Se
 def list_account_action_request_history(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), actor: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(AccountActionRequest).filter(AccountActionRequest.business_id == actor.business_id, AccountActionRequest.status != "PENDING")
     if actor.role == "manager": q = q.filter(AccountActionRequest.requested_by_id == actor.id)
-    elif actor.role != "admin": raise HTTPException(status_code=403, detail="Access denied")
+    elif actor.role != "admin": raise HTTPException(status_code=403, detail="Only an Admin or Manager can view account action request history.")
     items = q.order_by(AccountActionRequest.resolved_at.desc()).offset(offset).limit(limit).all()
     return [serialize_account_action_request(x, include_resolution=True) for x in items]
 
@@ -9382,7 +9397,7 @@ def delete_product(product_id: int, request: Request, user: User = Depends(get_c
 
 @app.get("/product-deletion-requests")
 def list_product_deletion_requests(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role != "admin": raise HTTPException(status_code=403, detail="Access denied")
+    if user.role != "admin": raise HTTPException(status_code=403, detail="Only an Admin can review product deletion requests.")
     rows = db.query(ProductDeletionRequest).filter(ProductDeletionRequest.business_id == user.business_id, ProductDeletionRequest.status == "PENDING").all()
     return [{"id": r.id, "product_name": r.product_name, "sku": (db.query(Product).filter(Product.id == r.product_id).first().sku if r.product_id and db.query(Product).filter(Product.id == r.product_id).first() else ""), "requested_by_name": r.requested_by_name} for r in rows]
 
@@ -13215,7 +13230,7 @@ def list_business_day_reopen_requests(user: User = Depends(get_current_user), db
     # *they themselves* filed — otherwise there is no honest way for the
     # frontend to show "reopening requested, awaiting Admin approval" instead
     # of silently pretending the day is just closed.
-    if user.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Access denied")
+    if user.role not in {"admin", "manager"}: raise HTTPException(status_code=403, detail="Only an Admin or Manager can view Business Day reopen requests.")
     filters = [BusinessDayReopenRequest.business_id == user.business_id, BusinessDayReopenRequest.status == "PENDING"]
     if user.role == "manager":
         filters.append(BusinessDayReopenRequest.requested_by_id == user.id)
@@ -13228,7 +13243,7 @@ def list_business_day_reopen_requests(user: User = Depends(get_current_user), db
 
 @app.get("/business-days/reopen-requests/history")
 def list_business_day_reopen_request_history(limit: int = Query(50, ge=1, le=200), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role != "admin": raise HTTPException(status_code=403, detail="Access denied")
+    if user.role != "admin": raise HTTPException(status_code=403, detail="Only an Admin can view the Business Day reopen request history.")
     rows = db.query(BusinessDayReopenRequest).filter(BusinessDayReopenRequest.business_id == user.business_id, BusinessDayReopenRequest.status != "PENDING").order_by(BusinessDayReopenRequest.resolved_at.desc()).limit(limit).all()
     return [{
         "id": r.id, "business_day_id": r.business_day_id, "reason": r.reason,

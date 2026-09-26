@@ -6,9 +6,14 @@
         // same promise contract (resolve with the parsed value, or reject),
         // but the rejection carries a sentence written for people plus the
         // HTTP status, instead of a SyntaxError.
-        function unreadableResponseMessage(status) {
+        function unreadableResponseMessage(status, retryAfter) {
             if (status === 401) return "Your session could not be verified. Please sign in again.";
-            if (status === 429) return "Too many attempts right now. Please wait a moment and try again.";
+            if (status === 429) {
+                const seconds = Number.parseInt(retryAfter || "", 10);
+                return Number.isFinite(seconds) && seconds > 0
+                    ? `Too many attempts right now. Please wait ${seconds < 120 ? `${seconds} seconds` : `${Math.ceil(seconds / 60)} minutes`} and try again.`
+                    : "Too many attempts right now. Please wait a minute and try again.";
+            }
             if (!status || status >= 500) return "We couldn't complete that request right now. Please try again.";
             return "Something went wrong. Please try again.";
         }
@@ -19,7 +24,7 @@
                 return response.text().then(text => {
                     try { return JSON.parse(text); }
                     catch (_) {
-                        const error = new Error(unreadableResponseMessage(response.status));
+                        const error = new Error(unreadableResponseMessage(response.status, response.headers?.get?.("Retry-After")));
                         error.name = "UnreadableResponseError";
                         error.status = response.status;
                         throw error;
@@ -17398,8 +17403,30 @@
             if (typeof fn === "function") fn(toggleBtn);
         }
 
+        // OBS-8: a rate-limited request says when it can be tried again. The
+        // server's own sentence is kept when it already names a wait;
+        // otherwise Retry-After (or retry_after_seconds) supplies it.
+        function formatRetryWait(seconds) {
+            const s = Math.max(1, Math.ceil(Number(seconds) || 0));
+            if (s < 120) return s === 1 ? "1 second" : `${s} seconds`;
+            const m = Math.ceil(s / 60);
+            return `${m} minutes`;
+        }
+        function rateLimitMessage(response, data) {
+            const header = Number.parseInt(response?.headers?.get?.("Retry-After") || "", 10);
+            const bodySeconds = Number(data?.retry_after_seconds ?? data?.detail?.retry_after_seconds);
+            const seconds = Number.isFinite(header) && header > 0 ? header : (Number.isFinite(bodySeconds) && bodySeconds > 0 ? bodySeconds : null);
+            const serverText = friendlyErrorMessage(data, "");
+            if (serverText && /\b\d+\s*(second|sec|minute|min)|few minutes/i.test(serverText)) return serverText;
+            const lead = serverText && !/too many attempts right now/i.test(serverText) ? serverText.replace(/[.!\s]*$/, ".") : "Too many attempts.";
+            return seconds
+                ? `${lead} Please wait ${formatRetryWait(seconds)} and try again.`
+                : `${lead} Please wait a minute and try again.`;
+        }
+
         function showApiError(response, data, fallback = "Something went wrong. Please try again.") {
             if (response?.status === 401) return "Your session could not be verified. Please sign in again.";
+            if (response?.status === 429) return rateLimitMessage(response, data);
             if (noteSubscriptionResponse(response, data)) return `${subscriptionBlockedMessage} ${t("subscription.dataKept")}`;
             if (response?.status === 403) return friendlyErrorMessage(data, "You do not have permission to perform this action.");
             if (response?.status === 404) { const detail = friendlyErrorMessage(data, ""); return detail || fallback; }
@@ -20125,6 +20152,57 @@
             });
         }
 
+        // UX-014: a destination chosen from the navigation menu (desktop
+        // sidebar or the mobile drawer — by pointer, keyboard or Back-stack
+        // restore) used to open ON TOP of whatever module was already open,
+        // stacking panels. Now the newly opened module replaces the others:
+        // each is closed through its own close function, so its cleanup (the
+        // POS camera, polling) still runs. Only when a new module actually
+        // opened — a refused click (no permission, guest) leaves the current
+        // module where it was. Dialogs opened from inside a module (confirm,
+        // price edit, add product…) are not menu modules and are untouched.
+        const MENU_MODULE_MODALS = {
+            'settings-modal': 'closeSettingsModal', 'my-profile-modal': 'closeMyProfileModal',
+            'billing-modal': 'closeBillingModal', 'activity-history-modal': 'closeActivityHistoryModal',
+            'about-modal': 'closeAboutModal', 'ai-usage-modal': 'closeAiUsageModal',
+            'team-management-modal': 'closeTeamManagementModal', 'account-action-requests-modal': 'closeAccountActionRequestsModal',
+            'team-presence-modal': 'closeTeamPresenceModal', 'ai-center-modal': 'closeAICenterModal',
+            'business-brain-modal': 'closeBusinessBrainModal', 'po-modal': 'closePOModal',
+            'price-monitor-modal': 'closePriceMonitorModal', 'supplier-modal': 'closeSupplierModal',
+            'warehouse-modal': 'closeWarehouseModal', 'expenses-modal': 'closeExpensesModal',
+            'profit-modal': 'closeProfitModal', 'predictive-modal': 'closePredictiveModal',
+            'daily-sales-modal': 'closeDailySalesModal', 'alerts-modal': 'closeAlertsModal',
+            'sale-modal': 'closeSaleModal',
+        };
+        function visibleMenuModules() {
+            return Object.keys(MENU_MODULE_MODALS).filter(id => {
+                const el = document.getElementById(id);
+                return !!el && !el.classList.contains('hidden') && el.style.display !== 'none';
+            });
+        }
+        function closeMenuModule(id) {
+            const closer = window[MENU_MODULE_MODALS[id]];
+            try { if (typeof closer === 'function') { closer(); return; } } catch (_) {}
+            const el = document.getElementById(id);
+            if (el) { el.classList.add('hidden'); el.style.display = ''; }
+        }
+        function replaceModulesOpenedBefore(before) {
+            const now = visibleMenuModules();
+            const opened = now.filter(id => !before.includes(id));
+            if (!opened.length) return false;
+            before.forEach(id => { if (now.includes(id) && !opened.includes(id)) closeMenuModule(id); });
+            return true;
+        }
+        document.addEventListener('click', event => {
+            const item = event.target?.closest?.('[onclick]');
+            if (!item || !item.closest('aside, #mobile-nav-drawer')) return;
+            const before = visibleMenuModules();
+            if (!before.length) return;
+            // Capture phase: this runs before the item's own handler, which may
+            // open its module synchronously or after a short await.
+            setTimeout(() => { if (!replaceModulesOpenedBefore(before)) setTimeout(() => replaceModulesOpenedBefore(before), 350); }, 0);
+        }, true);
+
         function closeAllSettingsModals() {
             document.getElementById("settings-modal")?.classList.add("hidden");
             document.getElementById("billing-modal")?.classList.add("hidden");
@@ -22364,7 +22442,7 @@
             }
             if (!region) return;
             region.className = `flex items-center gap-2 px-3 py-2 rounded-xl border ${st.box} text-[11px] shadow-sm mb-3`;
-            region.innerHTML = `<i class="fa-solid ${st.icon} text-[10px] shrink-0"></i><span class="flex-1 leading-relaxed">${safe}</span><button type="button" class="text-textSec hover:text-textMain" onclick="this.parentElement.classList.add('hidden')"><i class="fa-solid fa-xmark"></i></button>`;
+            region.innerHTML = `<i class="fa-solid ${st.icon} text-[10px] shrink-0"></i><span class="flex-1 leading-relaxed">${safe}</span><button type="button" class="close-btn text-textSec hover:text-textMain" aria-label="${escapeHtml(t('common.close'))}" onclick="this.parentElement.classList.add('hidden')"><i class="fa-solid fa-xmark"></i></button>`;
             region.classList.remove('hidden');
             clearTimeout(region.__statusTimer);
             region.__statusTimer = setTimeout(() => region.classList.add('hidden'), type === 'error' ? 7000 : 4500);
@@ -24508,7 +24586,7 @@
                 if (!data.length) { list.innerHTML = `<div class="text-center py-8 text-textSec">No transactions recorded for this Business Day.</div>`; return; }
                 list.innerHTML = data.map(renderRefundTransactionRow).join('');
             } catch (e) {
-                list.innerHTML = `<div class="text-center py-8 text-danger">${friendlyErrorMessage(e.message, "Could not load transactions.")}</div>`;
+                list.innerHTML = `<div class="text-center py-8 text-danger" role="alert">${escapeHtml(friendlyErrorMessage(e.message, "Could not load transactions."))}</div>`;
             }
         }
 
@@ -24569,7 +24647,7 @@
                 document.getElementById('refund-modal-subtitle').textContent = `${formatBusinessDateTime(data.timestamp)} · Original ${formatCurrency(data.original_total)}${locationSuffix}`;
                 renderRefundModalLines();
             } catch (e) {
-                document.getElementById('refund-modal-lines').innerHTML = `<div class="text-center py-8 text-danger">${friendlyErrorMessage(e.message, "Could not load this transaction.")}</div>`;
+                document.getElementById('refund-modal-lines').innerHTML = `<div class="text-center py-8 text-danger" role="alert">${escapeHtml(friendlyErrorMessage(e.message, "Could not load this transaction."))}</div>`;
             }
         }
         function closeRefundModal() {
@@ -25927,7 +26005,7 @@
                 document.getElementById("expense-history-prev-btn").disabled = expenseHistoryPage === 0;
                 document.getElementById("expense-history-next-btn").disabled = (expenseHistoryPage + 1) * EXPENSE_HISTORY_PAGE_SIZE >= d.total;
             } catch (e) {
-                listEl.innerHTML = `<div class="text-center py-8 text-danger">${friendlyErrorMessage(e.message, "Unable to load expense history.")}</div>`;
+                listEl.innerHTML = `<div class="text-center py-8 text-danger" role="alert">${escapeHtml(friendlyErrorMessage(e.message, "Unable to load expense history."))}</div>`;
             }
         }
 
@@ -27382,7 +27460,7 @@
                         </div>` : ""}
                 `;
             } catch (e) {
-                body.innerHTML = `<div class="text-center py-10 text-danger">${friendlyErrorMessage(e.message, "Unable to load profit data.")}</div>`;
+                body.innerHTML = `<div class="text-center py-10 text-danger" role="alert">${escapeHtml(friendlyErrorMessage(e.message, "Unable to load profit data."))}</div>`;
             }
         }
 
@@ -27453,7 +27531,7 @@
                     }).join("")}
                 `;
             } catch (e) {
-                body.innerHTML = `<div class="text-center py-10 text-danger">${friendlyErrorMessage(e.message, "Unable to load profit data.")}</div>`;
+                body.innerHTML = `<div class="text-center py-10 text-danger" role="alert">${escapeHtml(friendlyErrorMessage(e.message, "Unable to load profit data."))}</div>`;
             }
         }
 
@@ -27764,7 +27842,7 @@
             businessBriefHistoryFilter = 'all';
             businessBriefHistory = { type: 'all', range: 'all', dateFrom: '', dateTo: '', items: [], offset: 0, hasMore: false, loading: false, loaded: false };
             try { renderBusinessBrain(await fetchBusinessBrain(), 'overview'); }
-            catch (err) { document.getElementById('business-brain-loading').textContent = err.message || t("businessBrain.temporarilyUnavailable"); }
+            catch (err) { document.getElementById('business-brain-loading').textContent = friendlyErrorMessage(err.message, t("businessBrain.temporarilyUnavailable")); }
         }
 
         function closeBusinessBrainModal() { document.getElementById('business-brain-modal').classList.add('hidden'); }

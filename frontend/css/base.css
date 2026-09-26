@@ -455,3 +455,9 @@
 .ai-md li+li{margin-top:.2rem}
 .ai-md .ai-md-heading{font-weight:700}
 .ai-md hr{border:0;border-top:1px solid #172033}
+
+/* OBS-6: icon-only close (×) buttons were as small as the glyph (~12-16px).
+   A centred 44×44 hit area is added without changing the button's visual
+   size or the header layout around it. */
+.close-btn{position:relative;}
+.close-btn::after{content:"";position:absolute;left:50%;top:50%;width:44px;height:44px;transform:translate(-50%,-50%);}

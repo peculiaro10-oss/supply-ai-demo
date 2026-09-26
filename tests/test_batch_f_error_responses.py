@@ -78,5 +78,40 @@ class UnhandledErrorHeadersTests(unittest.TestCase):
         self.assertEqual(names[-1], "UnhandledErrorResponseMiddleware", names)
 
 
+class RateLimitAndPermissionMessageTests(unittest.TestCase):
+    def test_obs8_provider_email_limit_says_when_to_retry(self):
+        exc = main._verification_email_rate_limited("email rate limit exceeded, retry after 45 seconds")
+        self.assertEqual(exc.status_code, 429)
+        self.assertEqual(exc.headers, {"Retry-After": "45"})
+        self.assertIn("45 seconds", exc.detail)
+        exc = main._verification_email_rate_limited("For security purposes, you can only request this after 3 minutes")
+        self.assertEqual(exc.headers, {"Retry-After": "180"})
+        self.assertIn("3 minutes", exc.detail)
+        exc = main._verification_email_rate_limited("rate limit")
+        self.assertIn("a few minutes", exc.detail)
+        self.assertNotIn("a little", exc.detail)
+        with open(main.__file__, encoding="utf-8") as fh:
+            self.assertNotIn("Please wait a little", fh.read())
+
+    def test_obs8_account_lockout_names_the_wait(self):
+        # check_rate_limit's lockout message already carries the seconds and
+        # Retry-After; it is what sign-in and Business ID checks return.
+        with open(main.__file__, encoding="utf-8") as fh:
+            source = fh.read()
+        self.assertIn('detail=f"Too many attempts. Please wait {seconds} seconds and try again."', source)
+
+    def test_ux015_no_bare_access_denied_left(self):
+        with open(main.__file__, encoding="utf-8") as fh:
+            source = fh.read()
+        self.assertNotIn('detail="Access denied', source)
+        for expected in (
+            "Only an Admin can review product deletion requests.",
+            "Only an Admin or Manager can view account action requests.",
+            "Only an Admin or Manager can view Business Day reopen requests.",
+            "Only an Admin or Manager can change account permissions.",
+        ):
+            self.assertIn(expected, source)
+
+
 if __name__ == "__main__":
     unittest.main()

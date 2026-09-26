@@ -298,7 +298,7 @@
                     <img src="/assets/cauldra-logo.png" alt="Cauldra" class="w-8 h-8 rounded-lg object-contain shrink-0">
                     <div id="mobile-brand-title" class="font-extrabold text-sm tracking-wide uppercase text-textMain truncate">Cauldra</div>
                 </div>
-                <button type="button" onclick="closeMobileNav()" class="w-8 h-8 rounded-lg bg-cardBg border border-borderCol text-textSec flex items-center justify-center shrink-0" aria-label="Close menu" data-i18n-aria-label="common.closeMenu"><i class="fa-solid fa-xmark"></i></button>
+                <button type="button" onclick="closeMobileNav()" class="close-btn w-8 h-8 rounded-lg bg-cardBg border border-borderCol text-textSec flex items-center justify-center shrink-0" aria-label="Close menu" data-i18n-aria-label="common.closeMenu"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <!-- SECTION 2: Business/account identity — sits fully BELOW the
                  Cauldra row (never beside the logo), separated by a divider,
@@ -598,7 +598,7 @@
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-2">
                     <i class="fa-solid fa-circle-info text-primary"></i> Stock Legend Guide
                 </h3>
-                <button type="button" onclick="closeStockInfoModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeStockInfoModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div class="space-y-3 text-xs text-textSec">
                 <p class="leading-relaxed">Stock values are formatted as <strong class="text-textMain font-mono">Current Stock / Minimum Threshold</strong>.</p>
@@ -621,7 +621,7 @@
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-2">
                     <i class="fa-solid fa-circle-check text-success text-base"></i> Business Created Successfully!
                 </h3>
-                <button type="button" onclick="closeBusinessIdSuccessModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeBusinessIdSuccessModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             
             <div class="space-y-2">
@@ -694,7 +694,7 @@
                 <h3 id="biz-auth-modal-title" class="font-bold text-sm text-textMain flex items-center gap-1.5">
                     <i class="fa-solid fa-building-user text-primary"></i> Welcome to Cauldra
                 </h3>
-                <button type="button" onclick="closeBusinessAuthModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeBusinessAuthModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <!-- CLEAN AUTH ERROR AREA -->
@@ -1089,7 +1089,7 @@
                     <h3 class="font-bold text-sm text-textMain">Password Recovery</h3>
                     <p class="text-[10px] text-textSec mt-1">Recover access to your Business account.</p>
                 </div>
-                <button type="button" onclick="closeForgotPasswordModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark"></i></button>
+                <button type="button" onclick="closeForgotPasswordModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div id="forgot-password-message" class="hidden mb-3 rounded-xl border px-3 py-2 text-[11px]"></div>
             <form id="forgot-password-request-form" onsubmit="handleForgotPassword(event)" class="space-y-3">
@@ -1165,7 +1165,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-2xl w-full shadow-2xl flex flex-col max-h-[90vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-building text-primary"></i> Business Profile</h3>
-                <button type="button" onclick="closeSettingsModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeSettingsModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <div data-dynamic-status></div>
@@ -1300,7 +1300,7 @@
                     </h3>
                     <p class="text-[11px] text-textSec mt-0.5" data-i18n="profile.subtitle">Manage your personal Cauldra account</p>
                 </div>
-                <button type="button" onclick="closeMyProfileModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer shrink-0" aria-label="Close"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeMyProfileModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer shrink-0" aria-label="Close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <div data-dynamic-status class="px-4 sm:px-5 pt-3"></div>
@@ -1415,7 +1415,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-2xl w-full shadow-2xl flex flex-col max-h-[90vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-credit-card text-primary"></i> Subscription &amp; Billing</h3>
-                <button type="button" onclick="closeBillingModal()" aria-label="Close Subscription and Billing" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeBillingModal()" aria-label="Close Subscription and Billing" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <div class="flex-1 overflow-y-auto pr-1 space-y-4 text-xs">
@@ -1519,7 +1519,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-2xl w-full shadow-2xl flex flex-col max-h-[90vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3 shrink-0">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-clock-rotate-left text-primary"></i> Activity History</h3>
-                <button type="button" onclick="closeActivityHistoryModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeActivityHistoryModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <!-- Filters operate on whatever activity records the backend actually
@@ -1617,7 +1617,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-lg w-full shadow-2xl flex flex-col max-h-[90vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3 shrink-0">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-circle-info text-primary"></i> About</h3>
-                <button type="button" onclick="closeAboutModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeAboutModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 space-y-4 text-xs text-textMain">
                 <div>
@@ -1663,7 +1663,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-2xl w-full shadow-2xl flex flex-col max-h-[90vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3 shrink-0">
                 <h3 id="legal-doc-title" class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-scale-balanced text-primary"></i> Legal</h3>
-                <button type="button" onclick="closeLegalDocModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeLegalDocModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div id="legal-doc-body" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 text-[11px] text-textSec leading-relaxed space-y-3"></div>
         </div>
@@ -1674,7 +1674,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-lg w-full shadow-2xl flex flex-col max-h-[90vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3 shrink-0">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-wand-magic-sparkles text-primary"></i> AI Credits &amp; Usage</h3>
-                <button type="button" onclick="closeAiUsageModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeAiUsageModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div id="ai-usage-body" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 text-xs text-textMain space-y-3">
                 <div class="text-center py-6 text-textSec"><i class="fa-solid fa-spinner fa-spin mr-1.5"></i> Loading usage…</div>
@@ -1745,7 +1745,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-2xl w-full shadow-2xl flex flex-col max-h-[90vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-user-group text-primary"></i> <span data-i18n="team.title">Team Management</span></h3>
-                <button type="button" onclick="closeTeamManagementModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeTeamManagementModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <div class="space-y-2 text-xs flex-1 overflow-y-auto pr-1">
@@ -1833,7 +1833,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-4 sm:p-6 max-w-2xl w-full shadow-2xl flex flex-col max-h-[90vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3 shrink-0">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-shield-halved text-primary"></i> Account Action Requests</h3>
-                <button type="button" onclick="closeAccountActionRequestsModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeAccountActionRequestsModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <p class="text-textSec text-xs mb-2 shrink-0">Review and decide on account actions that require approval.</p>
 
@@ -1865,7 +1865,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-md w-full shadow-2xl flex flex-col max-h-[85vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3 shrink-0">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-shield-halved text-cyan-400"></i> Access &amp; Permissions</h3>
-                <button type="button" onclick="closeEmployeePermissionsModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeEmployeePermissionsModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div id="employee-permissions-body" class="overflow-y-auto flex-1 pr-1"></div>
             <!-- Draft-and-save footer (batch permission save — see
@@ -1891,7 +1891,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-sm w-full shadow-2xl flex flex-col">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-user-plus text-primary"></i> <span data-i18n="team.addEmployee">Add Employee</span></h3>
-                <button type="button" onclick="closeAddEmployeeModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeAddEmployeeModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <form onsubmit="handleCreateEmployee(event)" class="space-y-3 text-xs">
@@ -1967,7 +1967,7 @@
                         <i class="fa-solid fa-box-archive text-primary"></i> <span data-i18n="products.addNewItem">Add New Inventory Item</span>
                     </h3>
                 </div>
-                <button type="button" onclick="closeAddProductModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeAddProductModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <!-- EMBEDDED AI MARGIN ADVISOR -->
@@ -2001,7 +2001,7 @@
                 <div id="product-camera-container" class="hidden mt-2 p-2 bg-bgMain rounded-xl border border-primary/30">
                     <div class="flex items-center justify-between mb-1.5 text-[10px] text-primary font-medium">
                         <span><i class="fa-solid fa-camera mr-1"></i> <span data-i18n="products.liveScanner">Live Scanner</span></span>
-                        <button type="button" onclick="stopCameraScanner()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark"></i></button>
+                        <button type="button" onclick="stopCameraScanner()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button>
                     </div>
                     <div id="product-camera-view" class="inline-camera-box overflow-hidden rounded-lg bg-black/40"></div>
                 </div>
@@ -2011,7 +2011,7 @@
                 <div id="product-dup-hint" class="hidden sm:col-span-2 flex items-start gap-2 px-3 py-2 rounded-xl border border-warning/30 bg-warning/10 text-[11px] text-amber-200">
                     <i class="fa-solid fa-circle-info mt-0.5 shrink-0"></i>
                     <span id="product-dup-hint-text" class="flex-1 leading-relaxed"></span>
-                    <button type="button" onclick="document.getElementById('product-dup-hint').classList.add('hidden')" class="text-textSec hover:text-textMain shrink-0"><i class="fa-solid fa-xmark"></i></button>
+                    <button type="button" onclick="document.getElementById('product-dup-hint').classList.add('hidden')" class="close-btn text-textSec hover:text-textMain shrink-0" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div>
                     <label class="block font-medium text-textSec mb-1" data-i18n="products.skuBarcode">SKU / Barcode</label>
@@ -2085,7 +2085,7 @@
                     </h3>
                     <p class="text-xs text-textSec" data-i18n="aiCenter.subtitle">Centralized artificial intelligence features</p>
                 </div>
-                <button type="button" onclick="closeAICenterModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeAICenterModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -2130,7 +2130,7 @@
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5">
                     <i class="fa-solid fa-pen-to-square text-primary"></i> <span data-i18n="products.editTitle">Edit Product & Stock Level</span>
                 </h3>
-                <button type="button" onclick="closeEditProductModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeEditProductModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <!-- EMBEDDED AI MARGIN ADVISOR FOR EDIT -->
@@ -2152,7 +2152,7 @@
                 <div id="edit-product-dup-hint" class="hidden flex items-start gap-2 px-3 py-2 rounded-xl border border-warning/30 bg-warning/10 text-[11px] text-amber-200">
                     <i class="fa-solid fa-circle-info mt-0.5 shrink-0"></i>
                     <span id="edit-product-dup-hint-text" class="flex-1 leading-relaxed"></span>
-                    <button type="button" onclick="document.getElementById('edit-product-dup-hint').classList.add('hidden')" class="text-textSec hover:text-textMain shrink-0"><i class="fa-solid fa-xmark"></i></button>
+                    <button type="button" onclick="document.getElementById('edit-product-dup-hint').classList.add('hidden')" class="close-btn text-textSec hover:text-textMain shrink-0" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <input type="hidden" id="edit-p-id">
                 <div>
@@ -2234,7 +2234,7 @@
                 </div>
                 <div class="flex items-center gap-1">
                     <button type="button" data-ai-insights-trigger onclick="fetchAIInsights()" title="Quick Stock Insights" aria-label="Generate Insights" class="text-textSec hover:text-textMain p-1 text-xs cursor-pointer disabled:opacity-60 disabled:cursor-wait"><i class="fa-solid fa-lightbulb text-primary"></i></button>
-                    <button type="button" onclick="toggleAIChatWindow()" class="text-textSec hover:text-textMain p-1 text-xs cursor-pointer"><i class="fa-solid fa-xmark"></i></button>
+                    <button type="button" onclick="toggleAIChatWindow()" class="close-btn text-textSec hover:text-textMain p-1 text-xs cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button>
                 </div>
             </div>
 
@@ -2269,7 +2269,7 @@
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5">
                     <i class="fa-solid fa-cash-register text-primary"></i> Sales Checkout
                 </h3>
-                <button type="button" onclick="closeSaleModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeSaleModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <!-- Staff operating-Location selector (FINAL 2-DEFECT CLOSURE PASS,
@@ -2311,7 +2311,7 @@
                     <div id="pos-camera-container" class="hidden mt-2 p-2 bg-cardBg rounded-xl border border-primary/35">
                         <div class="flex items-center justify-between mb-1.5 text-[10px] text-primary font-medium">
                             <span><i class="fa-solid fa-camera mr-1"></i> Sales Camera Reader</span>
-                            <button type="button" onclick="stopCameraScanner()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark"></i></button>
+                            <button type="button" onclick="stopCameraScanner()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button>
                         </div>
                         <div id="pos-camera-view" class="inline-camera-box overflow-hidden rounded-lg bg-black/40"></div>
                     </div>
@@ -2349,7 +2349,7 @@
                     <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-file-invoice text-success"></i> <span data-i18n="navigation.purchaseOrders">Purchase Orders</span></h3>
                     <p class="text-[11px] text-textSec" data-i18n="purchaseOrders.modalSubtitle">Generate restock orders, review drafts, and browse sent order history</p>
                 </div>
-                <button type="button" onclick="closePOModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closePOModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <!-- Generate Purchase Order / Purchase Order History tabs. Drafts
@@ -2421,7 +2421,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-md w-full shadow-2xl flex flex-col">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <h3 id="confirm-modal-title" class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-triangle-exclamation text-warning"></i> Confirm Action</h3>
-                <button type="button" id="confirm-modal-close" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" id="confirm-modal-close" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             
             <div class="py-2 text-xs text-textMain leading-relaxed">
@@ -2440,7 +2440,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-md w-full shadow-2xl flex flex-col max-h-[90vh] overflow-y-auto">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-clone text-warning"></i> <span id="duplicate-modal-title">Possible duplicate found</span></h3>
-                <button type="button" id="duplicate-modal-close" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" id="duplicate-modal-close" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <p id="duplicate-modal-message" class="text-xs text-textMain leading-relaxed mb-3">This looks a lot like a product you already have. Are you sure this is not the same product?</p>
             <div id="duplicate-candidate-list" class="space-y-2"></div>
@@ -2457,7 +2457,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-md w-full shadow-2xl flex flex-col">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <h3 id="input-modal-title" class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-pen-to-square text-primary"></i> Enter Information</h3>
-                <button type="button" id="input-modal-close" class="text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" id="input-modal-close" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div class="py-2 space-y-2">
                 <label id="input-modal-label" class="block text-xs font-medium text-textSec">Enter a value</label>
@@ -2493,7 +2493,7 @@
                             <button type="button" onclick="runMenuExport(this,'exportPriceMonitorExcel')" class="w-full text-left px-3 py-1.5 hover:bg-cardHover flex items-center gap-2 cursor-pointer"><i class="fa-solid fa-file-excel text-success w-3"></i> Excel</button>
                         </div>
                     </div>
-                    <button type="button" onclick="closePriceMonitorModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                    <button type="button" onclick="closePriceMonitorModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
                 </div>
             </div>
 
@@ -2534,7 +2534,7 @@
             <div id="direct-camera-snap-box" class="hidden mb-3 p-3 rounded-xl bg-bgMain border border-primary/40 text-xs space-y-2">
                 <div class="flex items-center justify-between text-primary font-medium">
                     <span><i class="fa-solid fa-camera mr-1"></i> <span data-i18n="priceMonitor.cameraViewfinder">Camera Viewfinder</span></span>
-                    <button type="button" onclick="closeDirectCameraSnap()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark"></i></button>
+                    <button type="button" onclick="closeDirectCameraSnap()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div class="relative overflow-hidden rounded-lg bg-black/80 flex flex-col items-center justify-center p-2">
                     <video id="snap-video-stream" autoplay playsinline class="w-full max-h-[220px] object-cover rounded-lg"></video>
@@ -2598,7 +2598,7 @@
                             <button type="button" onclick="runMenuExport(this,'exportSuppliersExcel')" class="w-full text-left px-3 py-1.5 hover:bg-cardHover flex items-center gap-2 cursor-pointer"><i class="fa-solid fa-file-excel text-success w-3"></i> Excel</button>
                         </div>
                     </div>
-                    <button type="button" onclick="closeSupplierModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                    <button type="button" onclick="closeSupplierModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
                 </div>
             </div>
 
@@ -2641,7 +2641,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-md w-full shadow-2xl flex flex-col max-h-[90vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <h3 id="location-form-title" class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-map-location-dot text-primary"></i> Add Location</h3>
-                <button type="button" onclick="closeLocationFormModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeLocationFormModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <form id="location-form" onsubmit="handleSaveLocation(event)" class="space-y-2.5 text-xs flex-1 overflow-y-auto pr-1">
                 <input type="hidden" id="location-form-id" value="">
@@ -2703,7 +2703,7 @@
                     <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-warehouse text-primary"></i> <span data-i18n="warehouses.title">Warehouses & Stock Routing</span></h3>
                     <p class="text-[11px] text-textSec" data-i18n="warehouses.subtitle">Manage storage locations and transfer stock</p>
                 </div>
-                <button type="button" onclick="closeWarehouseModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeWarehouseModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <div class="flex-1 overflow-y-auto pr-1 space-y-4 text-xs">
@@ -2770,7 +2770,7 @@
     <!-- BUSINESS BRAIN: user-facing summary over the existing /business-brain intelligence engine -->
     <div id="business-brain-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
         <div class="business-brief-modal-shell bg-cardBg border border-borderCol rounded-2xl p-5 max-w-5xl w-full shadow-2xl flex flex-col max-h-[90vh]">
-            <div class="flex items-start justify-between gap-4 pb-3 border-b border-borderCol mb-3"><div><h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-clipboard-list text-primary"></i><span data-i18n="businessBrain.title">Business Brain</span></h3><p class="text-[11px] text-textSec" data-i18n="businessBrain.subtitle">A focused summary of what matters now, what is approaching, and what Cauldra has learned.</p></div><button type="button" onclick="closeBusinessBrainModal()" class="business-brief-close text-textSec hover:text-textMain cursor-pointer" aria-label="Close Business Brain"><i class="fa-solid fa-xmark text-base"></i></button></div>
+            <div class="flex items-start justify-between gap-4 pb-3 border-b border-borderCol mb-3"><div><h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-clipboard-list text-primary"></i><span data-i18n="businessBrain.title">Business Brain</span></h3><p class="text-[11px] text-textSec" data-i18n="businessBrain.subtitle">A focused summary of what matters now, what is approaching, and what Cauldra has learned.</p></div><button type="button" onclick="closeBusinessBrainModal()" class="close-btn business-brief-close text-textSec hover:text-textMain cursor-pointer" aria-label="Close Business Brain"><i class="fa-solid fa-xmark text-base"></i></button></div>
             <div id="business-brain-loading" class="text-center py-10 text-xs text-textSec" data-i18n="businessBrain.reviewing">Reviewing your business data…</div>
             <div id="business-brain-body" class="hidden flex-1 min-h-0 flex flex-col"><div class="business-brief-tabs" id="business-brain-tabs" role="tablist" aria-label="Business Brain sections"><button type="button" data-tab="overview" onclick="switchBusinessBrainTab('overview')" class="brain-tab-btn" role="tab" data-i18n="businessBrain.tabOverview">Overview</button><button type="button" data-tab="memory" onclick="switchBusinessBrainTab('memory')" class="brain-tab-btn" role="tab" data-i18n="businessBrain.tabMemory">Memory</button><button type="button" data-tab="history" onclick="switchBusinessBrainTab('history')" class="brain-tab-btn" role="tab" data-i18n="businessBrain.tabHistory">History</button></div><div id="business-brain-content" class="business-brief-modal-content flex-1 overflow-y-auto pr-1"></div></div>
             <div class="pt-3 border-t border-borderCol mt-3 flex justify-end"><button type="button" onclick="closeBusinessBrainModal()" class="bg-bgMain hover:bg-cardHover text-textSec px-3.5 py-2 rounded-xl text-xs font-semibold transition border border-borderCol cursor-pointer" data-i18n="common.close">Close</button></div>
@@ -2785,7 +2785,7 @@
                     <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-money-bill-wave text-primary"></i> Expenses</h3>
                     <p class="text-[11px] text-textSec">Record and review business expenses</p>
                 </div>
-                <button type="button" onclick="closeExpensesModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeExpensesModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <div class="flex gap-1.5 border-b border-borderCol pb-2 mb-3">
@@ -2923,7 +2923,7 @@
                             <button type="button" onclick="runMenuExport(this,'exportProfitExcel')" class="w-full text-left px-3 py-1.5 hover:bg-cardHover flex items-center gap-2 cursor-pointer whitespace-nowrap"><i class="fa-solid fa-file-excel text-success w-3"></i> Excel (3 sheets)</button>
                         </div>
                     </div>
-                    <button type="button" onclick="closeProfitModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                    <button type="button" onclick="closeProfitModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
                 </div>
             </div>
 
@@ -3002,7 +3002,7 @@
                             <button type="button" onclick="runMenuExport(this,'exportPredictiveExcel')" class="w-full text-left px-3 py-1.5 hover:bg-cardHover flex items-center gap-2 cursor-pointer"><i class="fa-solid fa-file-excel text-success w-3"></i> Excel</button>
                         </div>
                     </div>
-                    <button type="button" onclick="closePredictiveModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                    <button type="button" onclick="closePredictiveModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
                 </div>
             </div>
 
@@ -3051,7 +3051,7 @@
                 <div id="fin-intel-detail-panel" class="hidden mt-3 pt-3 border-t border-borderCol text-[11px]">
                     <div class="flex items-center justify-between mb-1.5">
                         <h5 class="font-bold text-textMain" id="fin-intel-detail-name">—</h5>
-                        <button type="button" onclick="document.getElementById('fin-intel-detail-panel').classList.add('hidden')" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark"></i></button>
+                        <button type="button" onclick="document.getElementById('fin-intel-detail-panel').classList.add('hidden')" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button>
                     </div>
                     <div class="grid grid-cols-2 sm:grid-cols-4 gap-2" id="fin-intel-detail-grid"></div>
                     <p class="text-textSec mt-2" id="fin-intel-detail-why"></p>
@@ -3071,7 +3071,7 @@
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <div><h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-receipt text-primary"></i> Sales</h3><p class="text-[11px] text-textSec">Today's Sales shows status only — open or close the Business Day from the Dashboard.</p></div>
                  <div class="flex items-center gap-2">
-                     <button type="button" onclick="closeDailySalesModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark"></i></button>
+                     <button type="button" onclick="closeDailySalesModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button>
                  </div>
             </div>
             <div class="flex gap-1.5 border-b border-borderCol pb-2 mb-3">
@@ -3165,7 +3165,7 @@
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-lg w-full shadow-2xl flex flex-col max-h-[85vh]">
             <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3">
                 <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-receipt text-primary"></i> Transactions</h3>
-                <button type="button" onclick="closeRefundTransactionsModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeRefundTransactionsModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div id="refund-transactions-list" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 space-y-2 text-xs">
                 <div class="text-center py-6 text-textSec">Loading…</div>
@@ -3187,7 +3187,7 @@
                     <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-rotate-left text-warning"></i> Refund Sale</h3>
                     <p class="text-[11px] text-textSec" id="refund-modal-subtitle"></p>
                 </div>
-                <button type="button" onclick="closeRefundModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeRefundModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div id="refund-modal-lines" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 space-y-2 text-xs">
                 <div class="text-center py-6 text-textSec">Loading…</div>
@@ -3234,7 +3234,7 @@
                     <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-warehouse text-primary"></i> Choose Warehouse</h3>
                     <p class="text-[11px] text-textSec">One or more items are stocked in more than one warehouse — pick which one this sale draws from.</p>
                 </div>
-                <button type="button" onclick="closePosWarehouseSelectModal()" class="text-textSec hover:text-textMain transition-colors cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closePosWarehouseSelectModal()" class="close-btn text-textSec hover:text-textMain transition-colors cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div id="pos-warehouse-select-lines" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 space-y-3 text-xs"></div>
             <div class="flex justify-end gap-2 pt-3 border-t border-borderCol mt-3">
@@ -3247,7 +3247,7 @@
     <!-- TEAM PRESENCE MODAL -->
     <div id="team-presence-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-2xl w-full shadow-2xl flex flex-col max-h-[85vh]">
-            <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3"><div><h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-users text-primary"></i> Team Presence</h3><p class="text-[11px] text-textSec">Current team sessions and sign-in times.</p></div><div class="flex items-center gap-2 shrink-0"><div class="export-menu relative inline-block"><button type="button" onclick="toggleExportMenu(this)" class="export-menu-toggle bg-bgMain hover:bg-cardHover text-textSec border border-borderCol px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap" aria-haspopup="true" aria-expanded="false" aria-label="Export team presence"><i class="fa-solid fa-download text-[10px]"></i> Export <i class="fa-solid fa-chevron-down text-[9px]"></i></button><div class="export-menu-panel hidden absolute right-0 mt-1 w-28 bg-cardBg border border-borderCol rounded-xl shadow-xl z-40 py-1 text-[11px]"><button type="button" onclick="runMenuExport(this,'exportTeamPresenceCsv')" class="w-full text-left px-2.5 py-1.5 hover:bg-cardHover flex items-center gap-1.5 cursor-pointer"><i class="fa-solid fa-file-csv text-textSec w-3"></i> CSV</button><button type="button" onclick="runMenuExport(this,'exportTeamPresenceExcel')" class="w-full text-left px-2.5 py-1.5 hover:bg-cardHover flex items-center gap-1.5 cursor-pointer"><i class="fa-solid fa-file-excel text-success w-3"></i> Excel</button></div></div><button type="button" onclick="closeTeamPresenceModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark"></i></button></div></div>
+            <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-3"><div><h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-users text-primary"></i> Team Presence</h3><p class="text-[11px] text-textSec">Current team sessions and sign-in times.</p></div><div class="flex items-center gap-2 shrink-0"><div class="export-menu relative inline-block"><button type="button" onclick="toggleExportMenu(this)" class="export-menu-toggle bg-bgMain hover:bg-cardHover text-textSec border border-borderCol px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap" aria-haspopup="true" aria-expanded="false" aria-label="Export team presence"><i class="fa-solid fa-download text-[10px]"></i> Export <i class="fa-solid fa-chevron-down text-[9px]"></i></button><div class="export-menu-panel hidden absolute right-0 mt-1 w-28 bg-cardBg border border-borderCol rounded-xl shadow-xl z-40 py-1 text-[11px]"><button type="button" onclick="runMenuExport(this,'exportTeamPresenceCsv')" class="w-full text-left px-2.5 py-1.5 hover:bg-cardHover flex items-center gap-1.5 cursor-pointer"><i class="fa-solid fa-file-csv text-textSec w-3"></i> CSV</button><button type="button" onclick="runMenuExport(this,'exportTeamPresenceExcel')" class="w-full text-left px-2.5 py-1.5 hover:bg-cardHover flex items-center gap-1.5 cursor-pointer"><i class="fa-solid fa-file-excel text-success w-3"></i> Excel</button></div></div><button type="button" onclick="closeTeamPresenceModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button></div></div>
             <div id="team-presence-container" class="flex-1 overflow-y-auto max-h-[420px] custom-scrollbar pr-1 space-y-2"></div>
             <div class="pt-3 border-t border-borderCol mt-3 flex justify-end"><button type="button" onclick="closeTeamPresenceModal()" class="bg-bgMain hover:bg-cardHover text-textSec px-3.5 py-2 rounded-xl text-xs font-semibold border border-borderCol cursor-pointer">Close</button></div>
         </div>
@@ -3256,7 +3256,7 @@
     <!-- PRICE SOURCE SETUP MODAL -->
     <div id="price-source-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-[70] hidden flex items-center justify-center p-4">
         <div class="bg-cardBg border border-borderCol rounded-2xl p-5 max-w-lg w-full shadow-2xl">
-            <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-4"><div><h3 class="font-bold text-sm text-textMain">Add Price Source</h3><p class="text-[11px] text-textSec">Choose one clean monitoring method for this supplier product.</p></div><button type="button" onclick="closePriceSourceModal()" class="text-textSec hover:text-textMain"><i class="fa-solid fa-xmark"></i></button></div>
+            <div class="flex items-center justify-between pb-3 border-b border-borderCol mb-4"><div><h3 class="font-bold text-sm text-textMain">Add Price Source</h3><p class="text-[11px] text-textSec">Choose one clean monitoring method for this supplier product.</p></div><button type="button" onclick="closePriceSourceModal()" class="close-btn text-textSec hover:text-textMain" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark"></i></button></div>
             <form onsubmit="createPriceSource(event)" class="space-y-3 text-xs">
                 <select id="price-source-supplier" required class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain"><option value="">Select supplier</option></select>
                 <select id="price-source-product" required class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain"><option value="">Select product</option></select>
@@ -3277,7 +3277,7 @@
                     <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-bell text-warning"></i> <span data-i18n="alerts.title">Notifications</span></h3>
                     <p class="text-[11px] text-textSec" data-i18n="alerts.subtitle">Everything Cauldra has flagged for your attention — tap one to open it</p>
                 </div>
-                <button type="button" onclick="closeAlertsModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeAlertsModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
 
             <div class="flex-1 overflow-y-auto max-h-[300px] pr-1 space-y-2.5 text-xs" id="notifications-container">
@@ -3306,7 +3306,7 @@
                     <h3 class="font-bold text-sm text-textMain flex items-center gap-1.5"><i class="fa-solid fa-sliders text-primary"></i> <span data-i18n="alerts.preferencesTitle">Notification Preferences</span></h3>
                     <p class="text-[11px] text-textSec" data-i18n="alerts.preferencesSubtitle">Security and billing-critical alerts always stay on. Everything else here is optional.</p>
                 </div>
-                <button type="button" onclick="closeNotificationPreferencesModal()" class="text-textSec hover:text-textMain cursor-pointer"><i class="fa-solid fa-xmark text-base"></i></button>
+                <button type="button" onclick="closeNotificationPreferencesModal()" class="close-btn text-textSec hover:text-textMain cursor-pointer" aria-label="Close" data-i18n-aria-label="common.close"><i class="fa-solid fa-xmark text-base"></i></button>
             </div>
             <div class="flex-1 overflow-y-auto pr-1 space-y-2 text-xs" id="notification-preferences-container"></div>
             <div class="pt-3 border-t border-borderCol mt-3 flex justify-end">

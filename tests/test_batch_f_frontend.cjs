@@ -42,7 +42,8 @@ test('ERR-001 non-JSON bodies reject with a readable sentence and the status', a
       [new Response('Internal Server Error', { status: 500 }), 500, "We couldn't complete that request right now. Please try again."],
       [new Response('<html><body>502 Bad Gateway</body></html>', { status: 502 }), 502, "We couldn't complete that request right now. Please try again."],
       [new Response('', { status: 401 }), 401, 'Your session could not be verified. Please sign in again.'],
-      [new Response('Too Many Requests', { status: 429 }), 429, 'Too many attempts right now. Please wait a moment and try again.'],
+      [new Response('Too Many Requests', { status: 429 }), 429, 'Too many attempts right now. Please wait a minute and try again.'],
+      [new Response('Too Many Requests', { status: 429, headers: { 'Retry-After': '45' } }), 429, 'Too many attempts right now. Please wait 45 seconds and try again.'],
       [new Response('oops', { status: 400 }), 400, 'Something went wrong. Please try again.'],
     ];
     for (const [response, status, message] of cases) {
@@ -246,6 +247,62 @@ test('EXP-001 a guest pressing Export is sent to Sign In instead of nothing', ()
   calls.length = 0;
   ctx.toggle({ nextElementSibling: { classList: { contains: () => true, remove: () => calls.push('opened') } }, setAttribute() {} });
   assert.deepEqual(calls, ['close', 'opened'], 'signed-in users still get the menu');
+});
+
+// --- UX-014: a menu destination replaces the open module ---------------------
+test('UX-014 opening a module from the menu closes the modules that were open, through their own close', () => {
+  const state = { 'supplier-modal': true, 'warehouse-modal': false, 'sale-modal': true };
+  const closed = [];
+  const els = {};
+  for (const id of Object.keys(state)) els[id] = { classList: { contains: c => c === 'hidden' && !state[id] }, style: { display: '' } };
+  const ctx = { document: { getElementById: id => els[id] || null, addEventListener() {} }, setTimeout, window: {} };
+  ctx.window.closeSupplierModal = () => { closed.push('supplier'); state['supplier-modal'] = false; };
+  ctx.window.closeSaleModal = () => { closed.push('sale (camera stopped by its own close)'); state['sale-modal'] = false; };
+  vm.createContext(ctx);
+  const start = appSource.indexOf('const MENU_MODULE_MODALS = {');
+  const end = appSource.indexOf("document.addEventListener('click', event => {", start);
+  vm.runInContext(appSource.slice(start, end) + '\nthis.visible = visibleMenuModules; this.replace = replaceModulesOpenedBefore;', ctx);
+  const before = ctx.visible();
+  assert.deepEqual([...before].sort(), ['sale-modal', 'supplier-modal']);
+  assert.equal(ctx.replace(before), false, 'nothing new opened (e.g. no permission): nothing is closed');
+  assert.deepEqual(closed, []);
+  state['warehouse-modal'] = true;
+  assert.equal(ctx.replace(before), true);
+  assert.deepEqual(closed.sort(), ['sale (camera stopped by its own close)', 'supplier']);
+  assert.deepEqual([...ctx.visible()], ['warehouse-modal']);
+  assert.match(appSource, /item\.closest\('aside, #mobile-nav-drawer'\)/, 'only menu clicks replace; in-module dialogs are untouched');
+});
+
+// --- OBS-6: close buttons have a real tap area -------------------------------
+test('OBS-6 every icon-only close button carries the 44px hit area and a name', () => {
+  const css = fs.readFileSync(path.join(root, 'frontend/css/base.css'), 'utf8');
+  assert.match(css, /\.close-btn::after\{[^}]*width:44px;height:44px;/);
+  const buttons = indexHtml.match(/<button[^>]*>\s*<i class="fa-solid fa-xmark[^"]*"><\/i>\s*<\/button>/g) || [];
+  assert.ok(buttons.length >= 40, `found ${buttons.length}`);
+  for (const b of buttons) {
+    assert.match(b, /class="close-btn /, b);
+    assert.match(b, /aria-label="/, b);
+  }
+});
+
+// --- OBS-2: error text is presented one way ----------------------------------
+test('OBS-2 inline load errors are escaped, filtered and announced like the rest', () => {
+  assert.doesNotMatch(appSource, /innerHTML = `<div class="text-center py-(?:8|10) text-danger">\$\{friendlyErrorMessage/, 'no unescaped inline error');
+  assert.equal((appSource.match(/role="alert">\$\{escapeHtml\(friendlyErrorMessage\(e\.message, /g) || []).length, 5);
+  assert.doesNotMatch(appSource, /textContent = err\.message \|\|/);
+});
+
+// --- OBS-8: rate-limit messages say when to retry ----------------------------
+test('OBS-8 a 429 always names the wait', () => {
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`${extract('friendlyErrorMessage')}\n${extract('isTechnicalErrorText')}\n${extract('formatRetryWait')}\n${extract('rateLimitMessage')}\nthis.m = rateLimitMessage;`, ctx);
+  const res = h => ({ headers: { get: k => (k === 'Retry-After' ? h : null) } });
+  assert.equal(ctx.m(res('30'), { detail: 'Too many attempts. Please wait 30 seconds and try again.' }), 'Too many attempts. Please wait 30 seconds and try again.', 'a server sentence that names the wait is kept');
+  assert.equal(ctx.m(res('600'), { detail: { message: 'Too many verification emails were requested from this connection.', retry_after_seconds: 600 } }), 'Too many verification emails were requested from this connection. Please wait 10 minutes and try again.');
+  assert.equal(ctx.m(res(null), { detail: { message: 'The email provider is temporarily rate limiting verification requests.', retry_after_seconds: 90 } }), 'The email provider is temporarily rate limiting verification requests. Please wait 90 seconds and try again.');
+  assert.equal(ctx.m(res(null), {}), 'Too many attempts. Please wait a minute and try again.');
+  assert.match(extract('showApiError'), /status === 429\) return rateLimitMessage\(response, data\)/);
 });
 
 (async () => {
