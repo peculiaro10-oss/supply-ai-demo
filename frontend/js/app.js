@@ -1,3 +1,35 @@
+        // ERR-001: a response body that is not JSON (Starlette's plain-text
+        // "Internal Server Error", a proxy's HTML 502/504 page, an empty body)
+        // used to reach customers as the parser's own text — "Unexpected token
+        // 'I', "Internal S"... is not valid JSON". Every call site reads bodies
+        // with res.json(), so the readable error is produced here, once: the
+        // same promise contract (resolve with the parsed value, or reject),
+        // but the rejection carries a sentence written for people plus the
+        // HTTP status, instead of a SyntaxError.
+        function unreadableResponseMessage(status) {
+            if (status === 401) return "Your session could not be verified. Please sign in again.";
+            if (status === 429) return "Too many attempts right now. Please wait a moment and try again.";
+            if (!status || status >= 500) return "We couldn't complete that request right now. Please try again.";
+            return "Something went wrong. Please try again.";
+        }
+        (function installReadableJsonErrors() {
+            if (typeof Response === "undefined" || !Response.prototype || Response.prototype.json.__cauldraReadable) return;
+            const readableJson = function () {
+                const response = this;
+                return response.text().then(text => {
+                    try { return JSON.parse(text); }
+                    catch (_) {
+                        const error = new Error(unreadableResponseMessage(response.status));
+                        error.name = "UnreadableResponseError";
+                        error.status = response.status;
+                        throw error;
+                    }
+                });
+            };
+            readableJson.__cauldraReadable = true;
+            Response.prototype.json = readableJson;
+        })();
+
         // Resolves the backend base URL for whichever shell this page is
         // running in. On the ordinary web deployment, location.origin is
         // correct (main.py serves this same file). Inside a Capacitor-packaged
@@ -16984,8 +17016,20 @@
                 }
                 if (!text) { try { const json = JSON.stringify(error); if (json && json !== "{}") text = json; } catch (_) {} }
             } else text = String(error).trim();
-            const technical = /^(not found|404|method not allowed|500|internal server error|could not validate credentials|networkerror|failed to fetch)$/i.test(text) || /^(error|exception|traceback)[: ]/i.test(text) || text.includes("<html") || text.includes("detail\":");
-            return technical || !text ? fallback : text;
+            if (!isTechnicalErrorText(text)) return text;
+            // ERR-001: callers that pass the raw message as its own fallback
+            // (friendlyErrorMessage(e.message, e.message)) must not get it back.
+            return fallback && isTechnicalErrorText(fallback) ? "Something went wrong. Please try again." : fallback;
+        }
+        function isTechnicalErrorText(text) {
+            text = String(text ?? "").trim();
+            if (!text) return true;
+            return /^(not found|404|method not allowed|500|internal server error|could not validate credentials|networkerror|failed to fetch)$/i.test(text)
+                || /^(error|exception|traceback|syntaxerror|typeerror)[: ]/i.test(text)
+                || text.includes("<html") || /<!doctype/i.test(text) || text.includes("detail\":")
+                // ERR-001: JSON parser text from every engine (V8, WebKit, Firefox).
+                || /unexpected token|is not valid json|unexpected end of json|json\.parse|json parse error|unexpected (?:end of data|character|eof)|unrecognized token/i.test(text)
+                || /^(?:failed to fetch|load failed)$|networkerror when attempting/i.test(text);
         }
 
         // Scan Results box (AI invoice/receipt scanning) has its own renderer

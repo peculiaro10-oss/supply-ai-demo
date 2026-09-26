@@ -428,6 +428,41 @@ app = FastAPI(
     redoc_url=None if IS_PRODUCTION else "/redoc",
     openapi_url=None if IS_PRODUCTION else "/openapi.json",
 )
+
+# --- ERR-003: unhandled errors still carry CORS and security headers --------
+# Starlette answers an unhandled exception from ServerErrorMiddleware, which
+# sits OUTSIDE every middleware added below, so that 500 was plain text with
+# no Access-Control-Allow-Origin: the Android WebView (cross-origin from
+# https://localhost) could not read it and reported "check your connection".
+# Added first, this is the innermost middleware: its JSON 500 travels back out
+# through CORS and SecurityHeaders like any other response. The exception is
+# re-raised afterwards so logging and Sentry see it exactly as before.
+UNHANDLED_ERROR_DETAIL = "We couldn't complete that request right now. Please try again."
+
+class UnhandledErrorResponseMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def tracking_send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracking_send)
+        except Exception:
+            if not started:
+                await JSONResponse(status_code=500, content={"detail": UNHANDLED_ERROR_DETAIL})(scope, receive, send)
+            raise
+
+app.add_middleware(UnhandledErrorResponseMiddleware)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 if ALLOWED_ORIGINS:
     app.add_middleware(
