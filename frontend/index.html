@@ -234,7 +234,7 @@
                         <i class="fa-solid fa-tags w-4"></i> <span data-i18n="navigation.priceMonitor">Price Monitor</span>
                     </button>
                     <button type="button" id="nav-btn-predictive" onclick="checkFeatureAccess('predictive monitor', openPredictiveModal)" class="w-full text-left flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-textSec hover:text-textMain hover:bg-cardHover transition font-medium cursor-pointer">
-                        <i class="fa-solid fa-chart-line w-4"></i> <span data-i18n="navigation.predictive">Predictive</span>
+                        <i class="fa-solid fa-chart-line w-4"></i> <span data-i18n="predictive.title">Inventory Financial Analysis</span>
                     </button>
                 </div>
             </div>
@@ -2089,32 +2089,32 @@
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div class="p-4 rounded-xl bg-bgMain border border-borderCol hover:border-primary/50 transition cursor-pointer flex flex-col justify-between" onclick="closeAICenterModal(); openPriceMonitorModal();">
-                    <div class="space-y-1">
-                        <div class="w-8 h-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center mb-2"><i class="fa-solid fa-tags"></i></div>
-                        <h4 class="font-bold text-xs text-textMain" data-i18n="aiCenter.priceMonitorTitle">Price Monitor</h4>
-                        <p class="text-[11px] text-textSec leading-snug" data-i18n="aiCenter.priceMonitorDesc">Track vendor supplier quotes, detect price spikes, and run profit margin protection.</p>
-                    </div>
-                    <span class="text-[10px] text-primary font-semibold mt-3 flex items-center gap-1"><span data-i18n="aiCenter.openPriceMonitor">Open Price Monitor</span> <i class="fa-solid fa-arrow-right text-[9px]"></i></span>
-                </div>
+                <button type="button" class="ai-center-card w-full text-left p-4 rounded-xl bg-bgMain border border-borderCol hover:border-primary/50 transition cursor-pointer flex flex-col justify-between" onclick="closeAICenterModal(); openPriceMonitorModal();">
+                    <span class="block space-y-1">
+                        <span class="w-8 h-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center mb-2" aria-hidden="true"><i class="fa-solid fa-tags"></i></span>
+                        <span class="block font-bold text-xs text-textMain" data-i18n="aiCenter.priceMonitorTitle">Price Monitor</span>
+                        <span class="block text-[11px] text-textSec leading-snug" data-i18n="aiCenter.priceMonitorDesc">Track vendor supplier quotes, detect price spikes, and run profit margin protection.</span>
+                    </span>
+                    <span class="text-[10px] text-primary font-semibold mt-3 flex items-center gap-1"><span data-i18n="aiCenter.openPriceMonitor">Open Price Monitor</span> <i class="fa-solid fa-arrow-right text-[9px]" aria-hidden="true"></i></span>
+                </button>
 
-                <div class="p-4 rounded-xl bg-bgMain border border-borderCol hover:border-primary/50 transition cursor-pointer flex flex-col justify-between" onclick="closeAICenterModal(); openPredictiveModal();">
-                    <div class="space-y-1">
-                        <div class="w-8 h-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center mb-2"><i class="fa-solid fa-chart-line"></i></div>
-                        <h4 class="font-bold text-xs text-textMain" data-i18n="aiCenter.predictiveTitle">Predictive Monitor</h4>
-                        <p class="text-[11px] text-textSec leading-snug" data-i18n="aiCenter.predictiveDesc">7-day rolling cycle sales analysis, daily burn rates, and automated stockout risk alerts.</p>
-                    </div>
-                    <span class="text-[10px] text-primary font-semibold mt-3 flex items-center gap-1"><span data-i18n="aiCenter.openPredictive">Open Predictive</span> <i class="fa-solid fa-arrow-right text-[9px]"></i></span>
-                </div>
+                <button type="button" class="ai-center-card w-full text-left p-4 rounded-xl bg-bgMain border border-borderCol hover:border-primary/50 transition cursor-pointer flex flex-col justify-between" onclick="closeAICenterModal(); openPredictiveModal();">
+                    <span class="block space-y-1">
+                        <span class="w-8 h-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center mb-2" aria-hidden="true"><i class="fa-solid fa-chart-line"></i></span>
+                        <span class="block font-bold text-xs text-textMain" data-i18n="predictive.title">Inventory Financial Analysis</span>
+                        <span class="block text-[11px] text-textSec leading-snug" data-i18n="predictive.subtitle">See where your inventory is putting money at risk, tying up capital, or creating potential losses.</span>
+                    </span>
+                    <span class="text-[10px] text-primary font-semibold mt-3 flex items-center gap-1"><span data-i18n="predictive.viewFullAnalysis">View Inventory Financial Analysis →</span></span>
+                </button>
 
-                <div class="p-4 rounded-xl bg-bgMain border border-borderCol hover:border-primary/50 transition cursor-pointer flex flex-col justify-between sm:col-span-2" onclick="closeAICenterModal(); fetchAIInsights();">
-                    <div class="space-y-1">
-                        <div class="w-8 h-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center mb-2"><i class="fa-solid fa-lightbulb text-primary"></i></div>
-                        <h4 class="font-bold text-xs text-textMain" data-i18n="aiCenter.aiInsightsTitle">AI Insights</h4>
-                        <p class="text-[11px] text-textSec leading-snug" data-i18n="aiCenter.aiInsightsDesc">Generate real-time business health recommendations and restock optimization insights.</p>
-                    </div>
-                    <span class="text-[10px] text-primary font-semibold mt-3 flex items-center gap-1"><span data-i18n="aiCenter.generateInsights">Generate Insights</span> <i class="fa-solid fa-arrow-right text-[9px]"></i></span>
-                </div>
+                <button type="button" data-ai-insights-trigger class="ai-center-card w-full text-left p-4 rounded-xl bg-bgMain border border-borderCol hover:border-primary/50 transition cursor-pointer flex flex-col justify-between sm:col-span-2 disabled:opacity-60 disabled:cursor-wait" onclick="closeAICenterModal(); fetchAIInsights();">
+                    <span class="block space-y-1">
+                        <span class="w-8 h-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center mb-2" aria-hidden="true"><i class="fa-solid fa-lightbulb text-primary"></i></span>
+                        <span class="block font-bold text-xs text-textMain" data-i18n="aiCenter.aiInsightsTitle">AI Insights</span>
+                        <span class="block text-[11px] text-textSec leading-snug" data-i18n="aiCenter.aiInsightsDesc">Generate real-time business health recommendations and restock optimization insights.</span>
+                    </span>
+                    <span class="text-[10px] text-primary font-semibold mt-3 flex items-center gap-1"><span data-i18n="aiCenter.generateInsights">Generate Insights</span> <i class="fa-solid fa-arrow-right text-[9px]" aria-hidden="true"></i></span>
+                </button>
             </div>
 
             <div class="pt-4 border-t border-borderCol mt-4 flex justify-end">
@@ -2233,7 +2233,7 @@
                     </div>
                 </div>
                 <div class="flex items-center gap-1">
-                    <button type="button" onclick="fetchAIInsights()" title="Quick Stock Insights" class="text-textSec hover:text-textMain p-1 text-xs cursor-pointer"><i class="fa-solid fa-lightbulb text-primary"></i></button>
+                    <button type="button" data-ai-insights-trigger onclick="fetchAIInsights()" title="Quick Stock Insights" aria-label="Generate Insights" class="text-textSec hover:text-textMain p-1 text-xs cursor-pointer disabled:opacity-60 disabled:cursor-wait"><i class="fa-solid fa-lightbulb text-primary"></i></button>
                     <button type="button" onclick="toggleAIChatWindow()" class="text-textSec hover:text-textMain p-1 text-xs cursor-pointer"><i class="fa-solid fa-xmark"></i></button>
                 </div>
             </div>
@@ -3006,7 +3006,7 @@
                 </div>
             </div>
 
-            <div id="fin-intel-modal-loading" class="text-center py-10 text-xs text-textSec" data-i18n="predictive.analyzing">Analyzing telemetry...</div>
+            <div id="fin-intel-modal-loading" class="text-center py-10 text-xs text-textSec" data-i18n="predictive.analyzing">Loading your analysis…</div>
             <div id="fin-intel-modal-insufficient" class="hidden text-center py-10 text-xs text-textSec"></div>
 
             <div id="fin-intel-modal-body" class="hidden flex-1 min-h-0 flex flex-col">

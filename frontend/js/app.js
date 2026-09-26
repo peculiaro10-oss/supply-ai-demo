@@ -1743,10 +1743,15 @@
                     needsYourAttention: "Needs Your Attention", comingUp: "Coming Up", cauldraRecommends: "Cauldra Recommends", whatCauldraIsLearning: "What Cauldra is Learning",
                     memorySalesPatterns: "Sales patterns", memorySeasonalPatterns: "Seasonal patterns", memoryProductRelationships: "Product relationships", memoryOther: "Other observations",
                     historyAll: "All", historyRecommendations: "Recommendations", historyForecasts: "Forecasts", historyEmpty: "No earlier intelligence has been recorded yet.",
-                    healthyState: "Nothing urgent needs your attention right now.", noComingUp: "No supported forecast is ready yet.", noCurrentRecommendation: "No supported recommendation is needed right now.",
-                    dashAttentionEmpty: "Nothing needs your attention right now.", dashComingEmpty: "Still learning your business patterns.", dashRecommendEmpty: "More data is needed before Cauldra can make a reliable recommendation.",
+                    healthyState: "Nothing urgent needs your attention right now.", noComingUp: "No forecast is ready yet.",
+                    // BRAIN-003: an empty "Cauldra Recommends" is explained by the server's
+                    // recommendation_state, never presented as "nothing is needed".
+                    recommendNoneFromChecks: "No reliable recommendation right now. Cauldra currently checks stock levels, expected demand and seasonal demand.",
+                    recommendInsufficientHistory: "Not enough completed sales history yet for a reliable recommendation.",
+                    recommendRestricted: "Recommendations are shown to people with full Business Brain access.",
+                    dashAttentionEmpty: "Nothing needs your attention right now.", dashComingEmpty: "Still learning your business patterns.",
                     dashLearningEmpty: "Cauldra is still learning from your business activity.",
-                    patternsLearned: "Patterns learned", predictionsConfirmed: "Predictions confirmed", daysObserved: "Days observed",
+                    patternsLearned: "Patterns found", forecastsChecked: "Forecasts checked", daysObserved: "Days of sales history", noneYet: "None yet",
                     learningNote: "Cauldra is continuously learning from your sales, inventory, and business patterns.",
                     unavailable: "Business Brain unavailable", stillLearning: "Cauldra is still learning from your business data.",
                     attentionCount: { one: "1 thing deserves your attention.", other: "{count} things deserve your attention." },
@@ -1808,9 +1813,9 @@
                     aiInsightsTitle: "AI Insights",
                     aiInsightsDesc: "Generate real-time business health recommendations and restock optimization insights.",
                     generateInsights: "Generate Insights", closeAiCenter: "Close AI Center",
-                    analyzingTelemetry: "Analyzing inventory telemetry...",
+                    analyzingTelemetry: "Reviewing your stock and sales…",
                     insightsUnavailable: "Inventory insights are unavailable right now.",
-                    defaultInsight: "Inventory levels are stable. Maintain current replenishment cycles.",
+                    defaultInsight: "Cauldra couldn't put together insights this time. Please try again.",
                     insightsTemporarilyUnavailable: "Inventory insights are temporarily unavailable. Please try again.",
                 },
                 priceMonitor: {
@@ -1863,7 +1868,7 @@
                 predictive: {
                     title: "Inventory Financial Analysis",
                     subtitle: "See where your inventory is putting money at risk, tying up capital, or creating potential losses.",
-                    analyzing: "Analyzing telemetry...", exposureHeading: "Inventory Financial Exposure",
+                    analyzing: "Loading your analysis…", exposureHeading: "Inventory Financial Exposure",
                     salesAtRisk: "Potential Sales at Risk", capitalTiedUp: "Capital Tied Up",
                     marginPressure: "Estimated Margin Pressure", potentiallyRecoverable: "Potentially Recoverable",
                     exposureNote: 'These categories can overlap (e.g. a slow-moving product may appear under both Capital Tied Up and Potentially Recoverable) — they are shown as Financial Exposure Identified, not added into a single "money lost" figure.',
@@ -1892,7 +1897,7 @@
                     catDecliningMargins: "Declining margins", catRecoveryOpportunities: "Potential recovery opportunities",
                     noInefficiency: "No inventory inefficiency identified from current data.",
                     noProductsFlagged: "No products currently flagged in this category.",
-                    detailCurrentInventory: "Current Inventory", detailSalesVelocity: "Sales Velocity", perDay: "{count} / day",
+                    detailCurrentInventory: "Current Inventory", detailSalesVelocity: "Sales Velocity", perDay: "{count} / business day",
                     detailEstDaysRemaining: "Estimated Days Remaining", detailSalesAtRisk: "Potential Sales at Risk",
                     detailCostValueTiedUp: "Cost Value Tied Up", detailMargin: "Margin", notEnoughData: "Not enough data",
                     marginWithListed: "{realized}% (listed {listed}%)", detailRecentSales: "Recent Sales", lastSaleOn: "Last sale {date}",
@@ -17451,7 +17456,7 @@
                 'inventory': 'navigation.inventory', 'suppliers': 'navigation.suppliers',
                 'warehouses': 'navigation.warehouses', 'expenses': 'navigation.expenses', 'profit': 'navigation.profit',
                 'business brain': 'navigation.businessBrain', 'ai center': 'navigation.aiCenter',
-                'price monitor': 'navigation.priceMonitor', 'predictive monitor': 'navigation.predictive',
+                'price monitor': 'navigation.priceMonitor', 'predictive monitor': 'predictive.title',
                 'new sale': 'dashboard.newSale', 'add product': 'dashboard.addProduct',
             };
             const key = map[featureName.toLowerCase()];
@@ -27337,15 +27342,36 @@
                 items.push({ ...row, icon:'fa-bell', onclick:"checkFeatureAccess('business brain', openBusinessBrainModal)" });
             });
             const risk = lastFinancialIntelData?.report_ready ? lastFinancialIntelData.money_at_risk?.total : 0;
-            if (risk > 0) items.push({ priority:'critical', icon:'fa-chart-line', title:`${formatCurrency(risk)} at risk from stockouts`, summary:'Open Financial Intelligence for the product-level evidence.', onclick:"checkFeatureAccess('predictive monitor', () => openPredictiveModal('at-risk'))" });
+            if (risk > 0) items.push({ priority:'critical', icon:'fa-chart-line', title:`${formatCurrency(risk)} at risk from stockouts`, summary:'Open Inventory Financial Analysis for the product-level evidence.', onclick:"checkFeatureAccess('predictive monitor', () => openPredictiveModal('at-risk'))" });
             return items;
         }
 
         function getBusinessBriefRecommendationItems(data = businessBrainData) {
             const rows = (data?.recommendations || []).filter(row => row.priority !== 'critical').map(row => ({ ...row, icon:'fa-lightbulb', onclick:"checkFeatureAccess('business brain', openBusinessBrainModal)" }));
-            const recoverable = lastFinancialIntelData?.report_ready ? lastFinancialIntelData.potentially_recoverable?.total : 0;
-            if (recoverable > 0) rows.push({ priority:'opportunity', icon:'fa-arrow-trend-up', title:`${formatCurrency(recoverable)} potentially recoverable`, summary:'Review the slow-moving stock and supported actions.', onclick:"checkFeatureAccess('predictive monitor', () => openPredictiveModal('recoverable'))" });
+            const recoverableGroup = lastFinancialIntelData?.report_ready ? lastFinancialIntelData.potentially_recoverable : null;
+            const recoverable = recoverableGroup?.recommendable === false ? 0 : Number(recoverableGroup?.total || 0);
+            if (recoverable > 0) rows.push({ priority:'opportunity', icon:'fa-arrow-trend-up', title:`${formatCurrency(recoverable)} potentially recoverable`, summary:'Review the slow-moving stock and suggested actions.', onclick:"checkFeatureAccess('predictive monitor', () => openPredictiveModal('recoverable'))" });
             return rows;
+        }
+
+        // BRAIN-003: why "Cauldra Recommends" is empty, from the server's own
+        // recommendation_state — never "no recommendation is needed".
+        function businessBriefRecommendationEmptyText(data = businessBrainData) {
+            const state = data?.recommendation_state;
+            if (state === 'restricted') return t("businessBrain.recommendRestricted");
+            if (state === 'none_from_checks') return t("businessBrain.recommendNoneFromChecks");
+            return t("businessBrain.recommendInsufficientHistory");
+        }
+
+        // UX-008: forecasts are whole units for countable goods; the API keeps
+        // the precise figure and also sends this wording.
+        function businessBriefForecastUnits(row) {
+            if (row.predicted_units_text) return row.predicted_units_text;
+            const n = Number(row.predicted_units);
+            if (!Number.isFinite(n) || n <= 0) return 'no units';
+            if (n < 0.5) return 'less than 1 unit';
+            const whole = Math.round(n);
+            return `about ${whole} unit${whole === 1 ? '' : 's'}`;
         }
 
         function getBusinessBriefLearningSummary(data = businessBrainData) {
@@ -27376,8 +27402,8 @@
             const days = Number(data.history_days || 0);
             const stat = (label, value) => `<div class="business-brief-learning-stat"><span>${brainEsc(label)}</span><strong>${brainEsc(String(value))}</strong></div>`;
             return `<div class="business-brief-learning-stats">`
-                + stat(t("businessBrain.patternsLearned"), patterns)
-                + stat(t("businessBrain.predictionsConfirmed"), evaluated)
+                + stat(t("businessBrain.patternsLearned"), patterns || t("businessBrain.noneYet"))
+                + stat(t("businessBrain.forecastsChecked"), evaluated || t("businessBrain.noneYet"))
                 + stat(t("businessBrain.daysObserved"), days)
                 + `</div><p class="business-brief-learning-note">${brainEsc(t("businessBrain.learningNote"))}</p>`;
         }
@@ -27431,11 +27457,13 @@
                 ? attention.slice(0, 2).map(row => businessBriefSignalRow(row, true)).join('') + businessBriefMore(attention.length)
                 : businessBriefEmpty('fa-circle-check', t("businessBrain.dashAttentionEmpty"), 'text-success');
             const comingBody = coming.length
-                ? coming.slice(0, 2).map(row => businessBriefSignalRow({ priority:'opportunity', icon:'fa-calendar-days', title:`${row.product_name}: about ${row.predicted_units} units`, summary:`By ${formatBusinessDate(row.target_at, {dateStyle:'medium'})} · ${row.confidence}` }, true)).join('') + businessBriefMore(coming.length)
-                : businessBriefEmpty('fa-seedling', t("businessBrain.dashComingEmpty"), 'text-primary');
+                ? coming.slice(0, 2).map(row => businessBriefSignalRow({ priority:'opportunity', icon:'fa-calendar-days', title:`${row.product_name}: ${businessBriefForecastUnits(row)}`, summary:`By ${formatBusinessDate(row.target_at, {dateStyle:'medium'})} · ${row.confidence}` }, true)).join('') + businessBriefMore(coming.length)
+                : (businessBrainData?.recommendation_state === 'restricted'
+                    ? businessBriefEmpty('fa-lock', 'Forecasts are available to Admins and Managers.')
+                    : businessBriefEmpty('fa-seedling', businessBrainData?.learning === false ? t("businessBrain.noComingUp") : t("businessBrain.dashComingEmpty"), 'text-primary'));
             const recommendationBody = recommendations.length
                 ? recommendations.slice(0, 2).map(row => businessBriefSignalRow(row, true)).join('') + businessBriefMore(recommendations.length)
-                : businessBriefEmpty('fa-circle-info', t("businessBrain.dashRecommendEmpty"));
+                : businessBriefEmpty('fa-circle-info', businessBriefRecommendationEmptyText());
             const learningBody = getBusinessBriefLearningBody();
             container.innerHTML = [
                 businessBriefDashCard(t("businessBrain.needsYourAttention"), 'fa-bell', attention.length ? 'text-warning' : 'text-success', attentionBody),
@@ -27506,8 +27534,8 @@
             const attentionRows = getBusinessBriefAttentionItems(data);
             const recommendationRows = getBusinessBriefRecommendationItems(data);
             const attentionBody = attentionRows.length ? attentionRows.slice(0, 4).map(row => row.id ? businessBriefRecommendationCard(row, staff) : businessBriefSignalRow(row)).join('') : businessBriefEmpty('fa-circle-check', t("businessBrain.healthyState"), 'text-success');
-            const comingBody = staff ? businessBriefEmpty('fa-lock', 'Forecasts are available to Admins and Managers.') : (data.coming || []).slice(0, 4).map(row => `<article class="business-brief-detail-row"><strong>${brainEsc(row.product_name)} · about ${brainEsc(row.predicted_units)} units</strong><p>${brainEsc(row.confidence)} · target ${brainEsc(formatBusinessDate(row.target_at, {dateStyle:'medium'}))}</p></article>`).join('') || businessBriefEmpty('fa-calendar-check', t("businessBrain.noComingUp"));
-            const recommendationBody = recommendationRows.length ? recommendationRows.slice(0, 4).map(row => row.id ? businessBriefRecommendationCard(row, staff) : businessBriefSignalRow(row)).join('') : businessBriefEmpty('fa-circle-check', t("businessBrain.noCurrentRecommendation"), 'text-success');
+            const comingBody = staff ? businessBriefEmpty('fa-lock', 'Forecasts are available to Admins and Managers.') : (data.coming || []).slice(0, 4).map(row => `<article class="business-brief-detail-row"><strong>${brainEsc(row.product_name)} · ${brainEsc(businessBriefForecastUnits(row))} in 7 days</strong><p>${brainEsc(row.confidence)} · by ${brainEsc(formatBusinessDate(row.target_at, {dateStyle:'medium'}))}</p>${row.kind === 'velocity' && data.confidence_basis ? `<p>${brainEsc(data.confidence_basis)}</p>` : ''}</article>`).join('') || businessBriefEmpty('fa-calendar-check', t("businessBrain.noComingUp"));
+            const recommendationBody = recommendationRows.length ? recommendationRows.slice(0, 4).map(row => row.id ? businessBriefRecommendationCard(row, staff) : businessBriefSignalRow(row)).join('') : businessBriefEmpty('fa-circle-info', businessBriefRecommendationEmptyText(data));
             const learningBody = businessBriefEmpty(data.learning ? 'fa-seedling' : 'fa-chart-simple', getBusinessBriefLearningSummary(data), data.learning ? 'text-primary' : 'text-textSec');
             return `<div class="business-brief-overview-grid">${businessBriefCard(t("businessBrain.needsYourAttention"), 'fa-bell', attentionRows.length ? 'text-warning' : 'text-success', attentionBody)}${businessBriefCard(t("businessBrain.comingUp"), 'fa-calendar-days', 'text-primary', comingBody)}${businessBriefCard(t("businessBrain.cauldraRecommends"), 'fa-lightbulb', 'text-success', recommendationBody)}${businessBriefCard(t("businessBrain.whatCauldraIsLearning"), 'fa-chart-simple', 'text-primary', learningBody)}</div>`;
         }
@@ -29524,7 +29552,7 @@
             const cell = (label, value) => `<div class="bg-bgMain border border-borderCol rounded-lg p-2"><div class="text-[9px] uppercase tracking-wide text-textSec">${label}</div><div class="text-xs font-bold text-textMain mt-0.5">${value}</div></div>`;
             document.getElementById('fin-intel-detail-grid').innerHTML = [
                 cell(t("predictive.detailCurrentInventory"), p.quantity),
-                cell(t("predictive.detailSalesVelocity"), t("predictive.perDay", {count: p.daily_velocity.toFixed(2)})),
+                cell(t("predictive.detailSalesVelocity"), p.daily_velocity == null ? t("predictive.notEnoughData") : t("predictive.perDay", {count: p.daily_velocity.toFixed(2)})),
                 cell(t("predictive.detailEstDaysRemaining"), p.days_to_stockout === null ? t("common.unknown") : t("predictive.daysUnit", {count: p.days_to_stockout})),
                 cell(t("predictive.detailSalesAtRisk"), formatCurrency(p.potential_sales_at_risk)),
                 cell(t("predictive.detailCostValueTiedUp"), formatCurrency(p.capital_tied_up)),
@@ -29997,13 +30025,76 @@
             });
         }
 
+        // AI-001: AI replies are Markdown. They are rendered into a small, fixed
+        // set of elements (paragraphs, bold/italic, bullet and numbered lists, a
+        // heading line, a divider). Every character of the model's text is
+        // HTML-escaped FIRST; only then are those few patterns turned into tags
+        // this function writes itself — so model text can never add markup,
+        // attributes, links or script. Tables, links and code are shown as text.
+        function renderAIMarkdown(text) {
+            const esc = value => String(value)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            const inline = value => esc(value)
+                .replace(/\*\*(?=\S)([^*]+?)\*\*/g, '<strong>$1</strong>')
+                .replace(/__(?=\S)([^_]+?)__/g, '<strong>$1</strong>')
+                .replace(/(^|[^*\w])\*(?=\S)([^*]+?)\*(?!\w)/g, '$1<em>$2</em>')
+                .replace(/`([^`]+)`/g, '$1');
+            const html = [];
+            let list = null;
+            let paragraph = [];
+            const flushParagraph = () => { if (paragraph.length) { html.push(`<p>${paragraph.map(inline).join('<br>')}</p>`); paragraph = []; } };
+            const closeList = () => { if (list) { html.push(`</${list}>`); list = null; } };
+            const openList = kind => { if (list !== kind) { closeList(); html.push(`<${kind}>`); list = kind; } };
+            String(text ?? '').replace(/\r\n?/g, '\n').split('\n').forEach(raw => {
+                const line = raw.trim();
+                let m;
+                if (!line) { flushParagraph(); closeList(); return; }
+                if (/^([-*_])(\s*\1){2,}$/.test(line)) { flushParagraph(); closeList(); html.push('<hr>'); return; }
+                if ((m = line.match(/^#{1,6}\s+(.+?)\s*#*$/))) { flushParagraph(); closeList(); html.push(`<p class="ai-md-heading">${inline(m[1])}</p>`); return; }
+                if ((m = line.match(/^[-*+•]\s+(.+)$/))) { flushParagraph(); openList('ul'); html.push(`<li>${inline(m[1])}</li>`); return; }
+                if ((m = line.match(/^\d{1,3}[.)]\s+(.+)$/))) { flushParagraph(); openList('ol'); html.push(`<li>${inline(m[1])}</li>`); return; }
+                closeList();
+                paragraph.push(line);
+            });
+            flushParagraph();
+            closeList();
+            return html.join('');
+        }
+
+        function appendAIReply(chatMessages, title, text, fallbackText) {
+            const body = renderAIMarkdown(text) || `<p>${escapeHtml(fallbackText)}</p>`;
+            chatMessages.insertAdjacentHTML('beforeend', `
+                <div class="bg-bgMain border border-borderCol p-2.5 rounded-xl shadow-sm my-1 mr-4">
+                    <p class="font-semibold text-primary mb-0.5 text-[11px]">${escapeHtml(title)}</p>
+                    <div class="ai-md text-textMain text-xs">${body}</div>
+                </div>
+            `);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        // UX-013: one Generate Insights request at a time, whichever control
+        // started it (the AI Center card or the chat window's lightbulb).
+        let aiInsightsInFlight = false;
         async function fetchAIInsights() {
+            if (aiInsightsInFlight) return;
+            aiInsightsInFlight = true;
+            const triggers = () => document.querySelectorAll('[data-ai-insights-trigger]');
+            triggers().forEach(el => { el.disabled = true; el.setAttribute('aria-busy', 'true'); });
+            try { await runAIInsights(); }
+            finally {
+                aiInsightsInFlight = false;
+                triggers().forEach(el => { el.disabled = false; el.removeAttribute('aria-busy'); });
+            }
+        }
+
+        async function runAIInsights() {
             const chatMessages = document.getElementById("chat-messages");
             const win = document.getElementById("ai-chat-window");
             if (win.classList.contains("hidden")) toggleAIChatWindow();
 
             chatMessages.innerHTML += `
-                <div class="bg-primary/15 border border-primary/30 p-2.5 rounded-xl shadow-sm my-1">
+                <div class="bg-primary/15 border border-primary/30 p-2.5 rounded-xl shadow-sm my-1" role="status">
                     <p class="font-semibold text-primary mb-0.5 text-[11px]">Cauldra Assistant</p>
                     <p class="text-textMain leading-relaxed text-[11px] italic animate-pulse">${t("aiCenter.analyzingTelemetry")}</p>
                 </div>
@@ -30018,13 +30109,7 @@
                 if (!res.ok) throw new Error(showApiError(res, data, t("aiCenter.insightsUnavailable")));
 
                 chatMessages.lastElementChild.remove();
-                chatMessages.innerHTML += `
-                    <div class="bg-bgMain border border-borderCol p-2.5 rounded-xl shadow-sm my-1">
-                        <p class="font-semibold text-primary mb-0.5 text-[11px]">Cauldra Insights</p>
-                        <p class="text-textMain leading-relaxed text-[11px]">${escapeHtml(data.insight) || t("aiCenter.defaultInsight")}</p>
-                    </div>
-                `;
-                chatMessages.scrollTop = chatMessages.scrollHeight;
+                appendAIReply(chatMessages, "Cauldra Insights", data.insight, t("aiCenter.defaultInsight"));
             } catch (err) {
                 chatMessages.lastElementChild.remove();
                 chatMessages.innerHTML += `
@@ -30168,13 +30253,7 @@
 
                 if (!res.ok) throw new Error(showApiError(res, data, "The AI assistant couldn't process that request right now."));
 
-                chatMessages.innerHTML += `
-                    <div class="bg-bgMain border border-borderCol p-2.5 rounded-xl shadow-sm my-1 mr-4">
-                        <p class="font-semibold text-primary mb-0.5 text-[11px]">Cauldra Assistant</p>
-                        <p class="text-textMain leading-relaxed text-[11px]">${escapeHtml(data.reply) || "I am analyzing your inventory data."}</p>
-                    </div>
-                `;
-                chatMessages.scrollTop = chatMessages.scrollHeight;
+                appendAIReply(chatMessages, "Cauldra Assistant", data.reply, "Cauldra couldn't answer that this time. Please try again.");
             } catch (err) {
                 chatMessages.innerHTML += `
                     <div class="bg-bgMain border border-borderCol p-2.5 rounded-xl shadow-sm my-1 mr-4">

@@ -2243,6 +2243,26 @@ FIN_INTEL_STOCKOUT_RISK_DAYS = 7         # "next 7 days" stockout sales-risk win
 FIN_INTEL_SLOW_MOVING_LOOKBACK_DAYS = 30  # no sale within this window (or ever) => slow-moving candidate
 FIN_INTEL_MARGIN_WINDOW_DAYS = 30        # "monthlyized" margin-pressure impact window
 FIN_INTEL_SEVERELY_STALE_DAYS = FIN_INTEL_SLOW_MOVING_LOOKBACK_DAYS * 2
+# UX-011: "Cauldra Recommends" once led with "₦1 potentially recoverable" — a
+# trivial amount fed by audit test data with implausible figures. Two rules now
+# apply at the source: a product whose stock or prices are not valid money
+# inputs (negative, not a number) is left out of every estimate and reported;
+# and the recoverable total is only offered as a recommendation when it is
+# material — at least this share of the cost value of the stock on hand. The
+# full list stays visible in Inventory Financial Analysis either way.
+FIN_INTEL_RECOMMEND_MIN_SHARE = 0.01
+
+def product_money_inputs_valid(p) -> bool:
+    for value in (p.quantity, p.cost_price, p.wholesale_price, p.retail_price):
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(number) or number < 0:
+            return False
+    return True
 
 def get_or_create_subscription(db: Session, business: BusinessProfile, commit: bool = True) -> BusinessSubscription:
     """BusinessSubscription is the single source of truth for plan/trial/billing state.
@@ -3072,6 +3092,16 @@ _KNOWN_CURRENCY_CODES = {
     code for code in (_extract_currency_code_shape(ctx["currency"]) for ctx in COUNTRY_CONTEXTS.values())
     if code
 }
+
+# Code -> display symbol, from the same COUNTRY_CONTEXTS values ("NGN (₦)" ->
+# "₦"), so a business whose currency is stored as a bare code still sees money
+# the way the rest of Cauldra shows it (see money_text()).
+_CURRENCY_SYMBOLS = {}
+for _ctx in COUNTRY_CONTEXTS.values():
+    _code = _extract_currency_code_shape(_ctx["currency"])
+    _sym = re.search(r"\(([^)]+)\)", _ctx["currency"])
+    if _code and _sym:
+        _CURRENCY_SYMBOLS.setdefault(_code, _sym.group(1).strip())
 
 def normalize_currency_code(value: Optional[str]) -> Optional[str]:
     """Reduces a currency value to its bare ISO-4217 code: "NGN (₦)" ->
@@ -6136,6 +6166,43 @@ def units_label(count, singular: str = "unit", plural: str = "units") -> str:
     except (TypeError, ValueError):
         is_one = False
     return f"{count} {singular if is_one else plural}"
+
+
+def forecast_units_text(units) -> str:
+    """Customer-facing wording for a forecast of countable goods (UX-008). The
+    forecast keeps its precision internally; people are told whole units."""
+    try:
+        value = float(units)
+    except (TypeError, ValueError):
+        return "an unknown number of units"
+    if not math.isfinite(value) or value <= 0:
+        return "no units"
+    if value < 0.5:
+        return "less than 1 unit"
+    return f"about {units_label(int(value + 0.5))}"
+
+
+def money_text(amount, currency: Optional[str]) -> str:
+    """A money figure as customers see it elsewhere in Cauldra: the currency's
+    symbol, thousands separators and no stray '.0' ("₦46,000", "₦1,250.50").
+    `currency` is a stored business/location value such as "NGN (₦)"."""
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(value):
+        return ""
+    raw = (currency or "").strip()
+    symbol_match = re.search(r"\(([^)]+)\)", raw)
+    code = normalize_currency_code(raw)
+    symbol = symbol_match.group(1).strip() if symbol_match else _CURRENCY_SYMBOLS.get(code or "")
+    if symbol and symbol != code:
+        prefix = symbol
+    else:
+        prefix = f"{code or raw} " if (code or raw) else ""
+    rounded = round(abs(value), 2)
+    digits = f"{rounded:,.0f}" if rounded == int(rounded) else f"{rounded:,.2f}"
+    return f"{'-' if value < 0 else ''}{prefix}{digits}"
 
 
 def reorder_quantity(min_stock_level, on_hand) -> int:
@@ -9401,25 +9468,92 @@ def product_warehouse_stocks(product_id:int,user:User=Depends(get_current_user),
         row=WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=p.warehouse or "Main Central Warehouse",quantity=p.quantity); db.add(row); db.commit(); rows=[row]
     return [{"warehouse":r.warehouse,"quantity":r.quantity} for r in rows]
 
-@app.get("/products/predictive-forecast")
-def predictive_forecast(user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
-    sales_count = db.query(SaleModel).filter(SaleModel.business_id == user.business_id).count()
+# --- Sales rate basis shared by every forecast (BRAIN-001) --------------------
+# The rate is "units per completed business day": sales on closed days divided
+# by the number of distinct dates with a closed session. A forecast horizon is
+# in CALENDAR days, and a business that trades six days a week has only about
+# six business days in any seven calendar days. Multiplying the per-business-
+# day rate by 7 over-stated every 7-day forecast by 7/6 (+16.7%). The horizon is
+# now converted to the business days it will really contain, measured from the
+# business's own closed dates: for each weekday, the share of its calendar
+# occurrences (first to last closed date) that were trading days. Seven calendar
+# days contain each weekday once, so a Mon–Sat business gets exactly 6.
+def _business_day_dates(db: Session, business_id: int) -> List[date]:
+    rows = db.query(func.distinct(BusinessDay.date)).filter(BusinessDay.business_id == business_id, BusinessDay.is_open == False).all()
+    out = set()
+    for (value,) in rows:
+        try:
+            out.add(date.fromisoformat(str(value)[:10]))
+        except (TypeError, ValueError):
+            continue
+    return sorted(out)
+
+def trading_days_per_week(closed_dates: List[date]) -> float:
+    """Expected business days in any 7 calendar days, from this business's own
+    closed dates. A weekday never seen inside the history span is assumed to
+    trade like the weekdays that were (no evidence either way)."""
+    if not closed_dates:
+        return 7.0
+    first, last = closed_dates[0], closed_dates[-1]
+    calendar_count = [0] * 7
+    day = first
+    while day <= last:
+        calendar_count[day.weekday()] += 1
+        day += timedelta(days=1)
+    trading_count = [0] * 7
+    for d in closed_dates:
+        trading_count[d.weekday()] += 1
+    shares = {wd: trading_count[wd] / calendar_count[wd] for wd in range(7) if calendar_count[wd]}
+    fallback = (sum(shares.values()) / len(shares)) if shares else 1.0
+    return round(sum(shares.get(wd, fallback) for wd in range(7)), 4)
+
+def closed_day_sales_filter(db: Session, business_id: int):
+    """Sales that belong to a completed business day. A sale in a session that
+    is open right now belongs to a day not yet counted in the denominator, so it
+    is left out of the rate (legacy sales without a business day are kept)."""
+    open_ids = [row_id for (row_id,) in db.query(BusinessDay.id).filter(BusinessDay.business_id == business_id, BusinessDay.is_open == True).all()]
+    if not open_ids:
+        return SaleModel.business_id == business_id
+    return and_(SaleModel.business_id == business_id, or_(SaleModel.business_day_id.is_(None), ~SaleModel.business_day_id.in_(open_ids)))
+
+def sales_rate_basis(db: Session, business_id: int) -> Dict[str, Any]:
+    closed_dates = _business_day_dates(db, business_id)
     # Distinct calendar dates with at least one closed session — not a raw
     # row count. A business can close and reopen multiple sessions on the
     # same date (see the BusinessDay model docstring); counting rows would
     # inflate "history days" and understate daily velocity.
-    history_days = db.query(func.count(func.distinct(BusinessDay.date))).filter(BusinessDay.business_id == user.business_id, BusinessDay.is_open == False).scalar() or 0
+    history_days = db.query(func.count(func.distinct(BusinessDay.date))).filter(BusinessDay.business_id == business_id, BusinessDay.is_open == False).scalar() or 0
+    sold = dict(
+        db.query(SaleModel.product_id, func.sum(SaleModel.quantity))
+        .filter(closed_day_sales_filter(db, business_id)).group_by(SaleModel.product_id).all()
+    )
+    return {"history_days": history_days, "trading_days_per_week": trading_days_per_week(closed_dates), "total_sold_map": sold}
+
+def calendar_daily_rate(per_business_day: float, days_per_week: float) -> float:
+    """Units per calendar day from units per business day."""
+    return per_business_day * days_per_week / 7.0
+
+def forecast_units_for_horizon(per_business_day: float, days_per_week: float, horizon_days: int) -> float:
+    return calendar_daily_rate(per_business_day, days_per_week) * horizon_days
+
+@app.get("/products/predictive-forecast")
+def predictive_forecast(user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
+    sales_count = db.query(SaleModel).filter(SaleModel.business_id == user.business_id).count()
+    basis = sales_rate_basis(db, user.business_id)
+    history_days, days_per_week = basis["history_days"], basis["trading_days_per_week"]
     products = db.query(Product).filter(Product.business_id == user.business_id).all()
     forecast = []
     for p in products:
-        product_sales = db.query(func.sum(SaleModel.quantity)).filter(SaleModel.business_id == user.business_id, SaleModel.product_id == p.id).scalar() or 0
+        product_sales = basis["total_sold_map"].get(p.id, 0) or 0
         daily_velocity = (product_sales / max(history_days, 1)) if history_days else 0
-        days_to_stockout = round(p.quantity / daily_velocity, 1) if daily_velocity > 0 else None
+        calendar_rate = calendar_daily_rate(daily_velocity, days_per_week)
+        # Stock lasts in CALENDAR days, so it is divided by the calendar rate.
+        days_to_stockout = round(max(p.quantity, 0) / calendar_rate, 1) if calendar_rate > 0 else None
         risk = "unknown"
         if days_to_stockout is not None:
             risk = "critical" if days_to_stockout <= 7 else "moderate" if days_to_stockout <= 21 else "low"
         forecast.append({"name": p.name, "sku": p.sku, "quantity": p.quantity, "daily_velocity": round(daily_velocity, 2), "days_to_stockout": days_to_stockout, "risk": risk})
-    return {"report_ready": history_days >= 6, "history_days": history_days, "sales_count": sales_count, "forecast": forecast}
+    return {"report_ready": history_days >= 6, "history_days": history_days, "trading_days_per_week": days_per_week, "sales_count": sales_count, "forecast": forecast}
 
 # -----------------------------------------------------------------------------
 # INVENTORY FINANCIAL INTELLIGENCE
@@ -9436,8 +9570,9 @@ def predictive_forecast(user: User = Depends(require_ai_access), db: Session = D
 @app.get("/products/financial-intelligence")
 def financial_intelligence(user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
-    # Distinct calendar dates with a closed session — see predictive_forecast().
-    history_days = db.query(func.count(func.distinct(BusinessDay.date))).filter(BusinessDay.business_id == user.business_id, BusinessDay.is_open == False).scalar() or 0
+    # Same rate basis as predictive_forecast() (see sales_rate_basis()).
+    basis = sales_rate_basis(db, user.business_id)
+    history_days, days_per_week = basis["history_days"], basis["trading_days_per_week"]
     currency = business.currency if business and business.currency else "USD ($)"
 
     if history_days < FIN_INTEL_MIN_HISTORY_DAYS:
@@ -9460,11 +9595,7 @@ def financial_intelligence(user: User = Depends(require_ai_access), db: Session 
     # with a fixed, small number of grouped aggregate queries up front, then
     # merged into per-product lookups in Python. Query count now stays
     # constant regardless of how many products exist.
-    total_sold_map = dict(
-        db.query(SaleModel.product_id, func.sum(SaleModel.quantity))
-        .filter(SaleModel.business_id == user.business_id)
-        .group_by(SaleModel.product_id).all()
-    )
+    total_sold_map = basis["total_sold_map"]
     last_sale_map = dict(
         db.query(SaleModel.product_id, func.max(SaleModel.timestamp))
         .filter(SaleModel.business_id == user.business_id)
@@ -9486,15 +9617,30 @@ def financial_intelligence(user: User = Depends(require_ai_access), db: Session 
 
     at_risk_rows, tied_up_rows, margin_rows, recoverable_rows, products_out = [], [], [], [], []
     at_risk_total = tied_up_total = margin_total = recoverable_total = 0.0
-    products_missing_cost = products_missing_price = 0
+    products_missing_cost = products_missing_price = products_invalid = 0
+    stock_cost_value = 0.0
 
     for p in products:
+        if not product_money_inputs_valid(p):
+            products_invalid += 1
+            products_out.append({
+                "product_id": p.id, "name": p.name, "sku": p.sku, "quantity": p.quantity,
+                "daily_velocity": None, "days_to_stockout": None, "potential_sales_at_risk": 0,
+                "capital_tied_up": 0, "is_slow_moving": False, "previous_margin_pct": None,
+                "current_margin_pct": None, "estimated_monthly_margin_impact": 0, "last_sale": None,
+                "figures_invalid": True,
+                "why_flagged": ["This product's stock or price figures are not valid (for example, below zero), so it is left out of these estimates. Correct it in Inventory."],
+            })
+            continue
+        if p.quantity and p.quantity > 0 and p.cost_price and p.cost_price > 0:
+            stock_cost_value += p.quantity * p.cost_price
         # Same all-time-sold / completed-business-days velocity used by
         # /products/predictive-forecast — deliberately not duplicated with a
         # different formula.
-        total_sold = total_sold_map.get(p.id, 0)
+        total_sold = total_sold_map.get(p.id, 0) or 0
         daily_velocity = (total_sold / history_days) if history_days else 0.0
-        days_to_stockout = round(p.quantity / daily_velocity, 1) if daily_velocity > 0 else None
+        calendar_rate = calendar_daily_rate(daily_velocity, days_per_week)
+        days_to_stockout = round(max(p.quantity, 0) / calendar_rate, 1) if calendar_rate > 0 else None
 
         last_sale_at = last_sale_map.get(p.id)
         days_since_last_sale = (now - last_sale_at).days if last_sale_at else None
@@ -9507,8 +9653,8 @@ def financial_intelligence(user: User = Depends(require_ai_access), db: Session 
         # window that current stock can't cover, priced at the actual selling
         # price. NOT current-stock-value; only the shortfall.
         if daily_velocity > 0 and days_to_stockout is not None and days_to_stockout <= FIN_INTEL_STOCKOUT_RISK_DAYS:
-            expected_demand_in_window = daily_velocity * FIN_INTEL_STOCKOUT_RISK_DAYS
-            units_at_risk = max(0.0, expected_demand_in_window - p.quantity)
+            expected_demand_in_window = forecast_units_for_horizon(daily_velocity, days_per_week, FIN_INTEL_STOCKOUT_RISK_DAYS)
+            units_at_risk = max(0.0, expected_demand_in_window - max(p.quantity, 0))
             if units_at_risk > 0 and p.retail_price > 0:
                 product_at_risk = units_at_risk * p.retail_price
                 at_risk_total += product_at_risk
@@ -9516,7 +9662,7 @@ def financial_intelligence(user: User = Depends(require_ai_access), db: Session 
                     "product_id": p.id, "name": p.name, "sku": p.sku, "quantity": p.quantity,
                     "days_to_stockout": days_to_stockout, "potential_sales_at_risk": round(product_at_risk, 2),
                 })
-                why_flags.append(f"Selling about {daily_velocity:.1f} units/day — at this pace stock runs out in ~{days_to_stockout} days, inside the {FIN_INTEL_STOCKOUT_RISK_DAYS}-day risk window.")
+                why_flags.append(f"Selling about {daily_velocity:.1f} units per business day — at this pace stock runs out in about {days_to_stockout:g} days, inside the {FIN_INTEL_STOCKOUT_RISK_DAYS}-day risk window.")
             elif units_at_risk > 0 and p.retail_price <= 0:
                 products_missing_price += 1
 
@@ -9596,6 +9742,8 @@ def financial_intelligence(user: User = Depends(require_ai_access), db: Session 
         })
 
     notes = []
+    if products_invalid:
+        notes.append(f"{products_invalid} product{'' if products_invalid == 1 else 's'} with stock or prices below zero {'was' if products_invalid == 1 else 'were'} left out of these estimates. Correct {'it' if products_invalid == 1 else 'them'} in Inventory.")
     if products_missing_price:
         notes.append("Cost and selling price information are required to calculate margin pressure for some products, so they were excluded from that estimate.")
     if products_missing_cost:
@@ -9606,7 +9754,13 @@ def financial_intelligence(user: User = Depends(require_ai_access), db: Session 
         "money_at_risk": {"total": round(at_risk_total, 2), "products": sorted(at_risk_rows, key=lambda r: -r["potential_sales_at_risk"])},
         "money_tied_up": {"total": round(tied_up_total, 2), "products": sorted(tied_up_rows, key=lambda r: -r["capital_tied_up"])},
         "margin_pressure": {"total": round(margin_total, 2), "products": sorted(margin_rows, key=lambda r: -r["estimated_monthly_impact"])},
-        "potentially_recoverable": {"total": round(recoverable_total, 2), "products": sorted(recoverable_rows, key=lambda r: -r["potential_value"])},
+        "potentially_recoverable": {
+            "total": round(recoverable_total, 2), "products": sorted(recoverable_rows, key=lambda r: -r["potential_value"]),
+            # Offered as a recommendation only when material (see
+            # FIN_INTEL_RECOMMEND_MIN_SHARE); the list above is always complete.
+            "recommendable": recoverable_total > 0 and recoverable_total >= stock_cost_value * FIN_INTEL_RECOMMEND_MIN_SHARE,
+        },
+        "invalid_products": products_invalid,
         "products": products_out,
     }
 
@@ -9964,11 +10118,32 @@ def _apply_business_relationships(db: Session, business_id: int, now: datetime) 
             evidence, rel.confidence, now,
         )
 
-def _brain_confidence(history_days: int, prior_accuracy: Optional[float]) -> float:
-    """A deterministic confidence score, calibrated by usable history and results."""
-    history_component = min(0.55, history_days / 90 * 0.55)
-    accuracy_component = 0.15 if prior_accuracy is None else max(0.0, min(0.30, prior_accuracy * 0.30))
-    return round(min(0.90, 0.20 + history_component + accuracy_component), 2)
+# UX-009: the old score gave 0.20 + up to 0.55 for history alone, plus 0.15
+# whenever nothing had been checked yet — so every business past ~64 days of
+# history read "High confidence", even when its measured forecast accuracy was
+# close to zero. Confidence now rests on the two things Cauldra can actually
+# measure: how much sales history there is (full credit at 28 business days)
+# and how well past forecasts matched real sales. "High" requires a proven
+# record: at least BRAIN_CONFIDENCE_MIN_EVALUATED checked forecasts averaging
+# about two-thirds accuracy or better ("Moderate" from 25%; below that,
+# "Limited"). Unchecked forecasts can reach "Moderate" at most.
+BRAIN_CONFIDENCE_FULL_HISTORY_DAYS = 28
+BRAIN_CONFIDENCE_MIN_EVALUATED = 3
+
+def _brain_confidence(history_days: int, prior_accuracy: Optional[float], evaluated: int = 0) -> float:
+    """A deterministic confidence score from data sufficiency and measured accuracy."""
+    sufficiency = max(0.0, min(1.0, (history_days or 0) / BRAIN_CONFIDENCE_FULL_HISTORY_DAYS))
+    if prior_accuracy is None or evaluated < BRAIN_CONFIDENCE_MIN_EVALUATED:
+        return round(0.20 + 0.40 * sufficiency, 2)  # never above 0.60: unproven
+    accuracy = max(0.0, min(1.0, prior_accuracy))
+    return round(min(0.90, 0.20 + 0.10 * sufficiency + 0.60 * accuracy), 2)
+
+def _brain_confidence_basis(history_days: int, prior_accuracy: Optional[float], evaluated: int) -> str:
+    """Plain words for what the confidence label rests on."""
+    days = f"{history_days} completed business day{'' if history_days == 1 else 's'}"
+    if prior_accuracy is None or evaluated < BRAIN_CONFIDENCE_MIN_EVALUATED:
+        return f"Based on {days}. Past forecasts have not yet been checked against enough real sales."
+    return f"Based on {days}. Past forecasts matched real sales {round(prior_accuracy * 100)}% on average ({evaluated} checked)."
 
 def _brain_confidence_label(confidence: float) -> str:
     return "High confidence" if confidence >= 0.70 else "Moderate confidence" if confidence >= 0.45 else "Limited confidence"
@@ -10128,11 +10303,12 @@ def _brain_revenue_at_risk(db: Session, business_id: int, location_id: Optional[
         current_stock = evidence.get("current_stock")
         if expected is None or current_stock is None:
             continue
-        shortfall = max(0.0, float(expected) - float(current_stock))
+        # Stock below zero is a record to correct, not extra demand (UX-011).
+        shortfall = max(0.0, float(expected) - max(float(current_stock), 0.0))
         if shortfall <= 0:
             continue
         product = db.query(Product).filter(Product.id == row.product_id, Product.business_id == business_id).first()
-        if not product or not product.retail_price:
+        if not product or not product.retail_price or not product_money_inputs_valid(product):
             continue
         risk_value = shortfall * product.retail_price
         per_product[row.product_id] = max(per_product.get(row.product_id, 0.0), risk_value)
@@ -10205,8 +10381,8 @@ def _business_brain_meta(db: Session, business_id: int) -> Dict[str, Any]:
     history_days = db.query(func.count(func.distinct(BusinessDay.date))).filter(BusinessDay.business_id == business_id, BusinessDay.is_open == False).scalar() or 0
     completed = db.query(BusinessBrainPrediction).filter(BusinessBrainPrediction.business_id == business_id, BusinessBrainPrediction.accuracy_score.isnot(None)).all()
     prior_accuracy = sum(row.accuracy_score for row in completed) / len(completed) if completed else None
-    confidence = _brain_confidence(history_days, prior_accuracy)
-    return {"history_days": history_days, "confidence": confidence, "prior_accuracy": prior_accuracy, "evaluated_predictions": len(completed), "accuracy_trend": _brain_accuracy_trend(completed)}
+    confidence = _brain_confidence(history_days, prior_accuracy, len(completed))
+    return {"history_days": history_days, "confidence": confidence, "prior_accuracy": prior_accuracy, "evaluated_predictions": len(completed), "accuracy_trend": _brain_accuracy_trend(completed), "confidence_basis": _brain_confidence_basis(history_days, prior_accuracy, len(completed))}
 
 def _resolve_stock_row_warehouse(db: Session, business_id: int, stock: "WarehouseStock", cache: Dict[Any, Optional["Warehouse"]]) -> Optional["Warehouse"]:
     """Real warehouse_id (migration 0031) first; a legacy WarehouseStock
@@ -10239,10 +10415,8 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
     # Grouped once instead of one SUM query per product (see the identical
     # fix in /products/financial-intelligence) — query count no longer
     # scales with catalog size.
-    total_sold_map = dict(
-        db.query(SaleModel.product_id, func.sum(SaleModel.quantity))
-        .filter(SaleModel.business_id == business_id).group_by(SaleModel.product_id).all()
-    )
+    basis = sales_rate_basis(db, business_id)
+    total_sold_map, days_per_week = basis["total_sold_map"], basis["trading_days_per_week"]
     # Low-stock evidence (FINAL 3-DEFECT CLOSURE PASS, defect #1): the real
     # per-warehouse stock source, batched once (no N+1) — never
     # Product.quantity, which is the business-wide AGGREGATE and can hide
@@ -10320,25 +10494,27 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
             _upsert_brain_recommendation(db, business_id, product.id, fingerprint, "stock_review", "critical", f"Review stock for {product.name}", f"Current stock is {units_label(product.quantity)}, at or below this product's minimum level of {product.min_stock_level}.", {"current_stock": product.quantity, "minimum_stock": product.min_stock_level, "source": "current_inventory", "location_id": loc_id, "location_name": loc_name})
             affirmed.add(fingerprint)
         if history_days < BUSINESS_BRAIN_HISTORY_DAYS: continue
-        total_sold = total_sold_map.get(product.id, 0)
+        total_sold = total_sold_map.get(product.id, 0) or 0
         daily_velocity = float(total_sold) / history_days
         if daily_velocity <= 0:
             # No longer selling: an "averages X units/day" Memory is stale, so
             # withdraw it rather than keep presenting an out-of-date figure.
             _delete_brain_memory(db, business_id, f"velocity-28:{product.id}")
             continue
-        raw_expected_units = round(daily_velocity * BUSINESS_BRAIN_FORECAST_HORIZON_DAYS, 2)
+        # BRAIN-001: the per-business-day rate times the business days the
+        # 7 calendar days will really contain — never times 7 calendar days.
+        raw_expected_units = round(forecast_units_for_horizon(daily_velocity, days_per_week, BUSINESS_BRAIN_FORECAST_HORIZON_DAYS), 2)
         calibration_factor = _prediction_bias_factor(db, business_id, product.id, "velocity")
         expected_units = round(raw_expected_units * (calibration_factor or 1.0), 2)
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        evidence = {"completed_business_days": history_days, "units_sold": total_sold, "average_daily_units": round(daily_velocity, 2), "horizon_days": BUSINESS_BRAIN_FORECAST_HORIZON_DAYS, "prior_prediction_accuracy": round(prior_accuracy, 3) if prior_accuracy is not None else None, "raw_expected_units": raw_expected_units, "calibration_factor": calibration_factor}
+        evidence = {"completed_business_days": history_days, "units_sold": total_sold, "average_daily_units": round(daily_velocity, 2), "horizon_days": BUSINESS_BRAIN_FORECAST_HORIZON_DAYS, "business_days_per_week": days_per_week, "prior_prediction_accuracy": round(prior_accuracy, 3) if prior_accuracy is not None else None, "raw_expected_units": raw_expected_units, "calibration_factor": calibration_factor}
         prediction = db.query(BusinessBrainPrediction).filter(BusinessBrainPrediction.business_id == business_id, BusinessBrainPrediction.product_id == product.id, BusinessBrainPrediction.kind == "velocity", BusinessBrainPrediction.forecast_at >= today, BusinessBrainPrediction.actual_units.is_(None)).first()
         if prediction is None:
             db.add(BusinessBrainPrediction(business_id=business_id, product_id=product.id, kind="velocity", forecast_at=now, target_at=now + timedelta(days=BUSINESS_BRAIN_FORECAST_HORIZON_DAYS), predicted_units=expected_units, confidence=confidence, evidence_json=json.dumps(evidence)))
         else:
             prediction.predicted_units, prediction.confidence, prediction.evidence_json = expected_units, confidence, json.dumps(evidence)
         if product.quantity < expected_units:
-            days_to_stockout = round(product.quantity / daily_velocity, 1)
+            days_to_stockout = round(max(product.quantity, 0) / calendar_daily_rate(daily_velocity, days_per_week), 1)
             # forecast_stockout is, and stays, genuinely BUSINESS-WIDE
             # (FINAL 2-DEFECT CLOSURE PASS, defect #2 — Option B):
             # daily_velocity/total_sold above are summed across every
@@ -10354,7 +10530,7 @@ def refresh_business_brain(db: Session, business_id: int) -> Dict[str, Any]:
             # per-Location, which risks a much larger, riskier surface for
             # a small, sparse-data branch than simply being honest that
             # this figure is business-wide.
-            _upsert_brain_recommendation(db, business_id, product.id, f"forecast-stockout:{product.id}", "forecast_stockout", "critical" if days_to_stockout <= 3 else "important", f"Prepare for demand on {product.name}", f"Based on {history_days} completed business days, expected demand for the next 7 days is about {expected_units:g} units while current stock is {product.quantity}.", {**evidence, "current_stock": product.quantity, "days_to_stockout": days_to_stockout, "expected_units": expected_units})
+            _upsert_brain_recommendation(db, business_id, product.id, f"forecast-stockout:{product.id}", "forecast_stockout", "critical" if days_to_stockout <= 3 else "important", f"Prepare for demand on {product.name}", f"Based on {history_days} completed business days, expected demand for the next 7 days is {forecast_units_text(expected_units)}, while current stock is {units_label(product.quantity)}.", {**evidence, "current_stock": product.quantity, "days_to_stockout": days_to_stockout, "expected_units": expected_units})
             affirmed.add(f"forecast-stockout:{product.id}")
         if history_days >= 28:
             _upsert_brain_memory(db, business_id, product.id, f"velocity-28:{product.id}", f"{product.name} has averaged about {daily_velocity:.1f} units per completed business day across {history_days} recorded days.", evidence, confidence, now)
@@ -10390,6 +10566,10 @@ def _resolve_products_locations(db: Session, business_id: int, product_ids) -> D
 
 @app.get("/business-brain")
 def business_brain(location_id: Optional[int] = Query(None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Baseline access is the `ai.use` permission (the same code the app's
+    # navigation uses for Business Brain). It is deliberately NOT a plan check:
+    # Business Brain is in every plan, including Starter (Batch C decision).
+    require_permission(user, "ai.use")
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     if business and (business.business_brain_dirty or business.business_brain_refreshed_at is None):
         if _try_claim_business_brain_refresh(db, user.business_id):
@@ -10433,7 +10613,8 @@ def business_brain(location_id: Optional[int] = Query(None), user: User = Depend
     # Content-depth gate, not a 403: someone without business_brain.view_full
     # (Staff by default) gets the same restricted stock_review-only view they
     # always have — granting the permission adds more, it never takes away
-    # baseline access to this endpoint (that's ai.use, checked above).
+    # baseline access to this endpoint (ai.use, enforced at the top of this
+    # function; X6: this comment used to claim a check that did not exist).
     has_full_view = has_permission(user, "business_brain.view_full")
     if not has_full_view: rows = [r for r in rows if r.kind == "stock_review"]
     # Location classification (section 32-40, revised by the FINAL 2-DEFECT
@@ -10487,7 +10668,21 @@ def business_brain(location_id: Optional[int] = Query(None), user: User = Depend
     def rec_out(r):
         loc_id, loc_name = _brain_recommendation_location(r)
         return {"id": r.id, "kind": r.kind, "priority": r.priority, "title": r.title, "summary": r.summary, "evidence": json.loads(r.evidence_json or "{}"), "status": r.status, "updated_at": to_utc_iso(r.updated_at), "location_id": loc_id, "location_name": loc_name}
-    output = {"learning": meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS, "history_days": meta["history_days"], "currency": business.currency if business else "USD ($)", "attention": [rec_out(r) for r in rows], "recommendations": [rec_out(r) for r in rows], "history_available": True, "learning_message": "Cauldra is still learning this part of your business. Continue recording sales and closing business days to build reliable predictions." if meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS else None}
+    # BRAIN-003: say WHY "Cauldra Recommends" is empty instead of asserting
+    # that nothing is needed. The engine only runs stock-level, expected-demand
+    # and seasonal-demand checks; an empty list means those checks found nothing
+    # to recommend, or there isn't enough history for them to run, or this
+    # person's view doesn't include recommendations — never "no action needed".
+    learning = meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS
+    if not has_full_view:
+        recommendation_state = "restricted"
+    elif any(r.priority != "critical" for r in rows):
+        recommendation_state = "available"
+    elif learning:
+        recommendation_state = "insufficient_history"
+    else:
+        recommendation_state = "none_from_checks"
+    output = {"learning": learning, "history_days": meta["history_days"], "recommendation_state": recommendation_state, "recommendation_checks": ["stock levels", "expected demand", "seasonal demand"], "currency": business.currency if business else "USD ($)", "attention": [rec_out(r) for r in rows], "recommendations": [rec_out(r) for r in rows], "history_available": True, "learning_message": "Cauldra is still learning this part of your business. Continue recording sales and closing business days to build reliable predictions." if meta["history_days"] < BUSINESS_BRAIN_HISTORY_DAYS else None}
     if has_full_view:
         # Memory statements (velocity-28/seasonal — see refresh_business_
         # brain()/_apply_seasonal_pattern()) are, like forecast_stockout/
@@ -10513,7 +10708,11 @@ def business_brain(location_id: Optional[int] = Query(None), user: User = Depend
             # business-wide) — matches how a business-wide Recommendation
             # is kept under any Location filter above.
             seen_pred.add(key)
-            coming.append({"product_name": name, "predicted_units": p.predicted_units, "target_at": to_utc_iso(p.target_at), "confidence": _brain_confidence_label(p.confidence), "evidence": json.loads(p.evidence_json or "{}"), "location_id": None, "location_name": None})
+            # A sales-rate forecast's confidence is the business's current
+            # evidence-based score (UX-009), not the value stored with an older
+            # row; seasonal forecasts keep their own pattern-strength score.
+            label_score = meta["confidence"] if p.kind == "velocity" else p.confidence
+            coming.append({"product_name": name, "kind": p.kind, "predicted_units": p.predicted_units, "predicted_units_text": forecast_units_text(p.predicted_units), "target_at": to_utc_iso(p.target_at), "confidence": _brain_confidence_label(label_score), "evidence": json.loads(p.evidence_json or "{}"), "location_id": None, "location_name": None})
             if len(coming) >= 8: break
         actions_taken = db.query(BusinessBrainRecommendation).filter(BusinessBrainRecommendation.business_id == user.business_id, BusinessBrainRecommendation.status == "acted").count()
         # Location-scoped exactly like the recommendations/memory/coming
@@ -10524,7 +10723,7 @@ def business_brain(location_id: Optional[int] = Query(None), user: User = Depend
         # again for defect #2 (Option B) — see that function's own updated
         # docstring.
         revenue_risk = _brain_revenue_at_risk(db, user.business_id, location_id=location_id)
-        output.update({"memory": [{"statement": m.statement, "evidence": json.loads(m.evidence_json or "{}"), "confidence": _brain_confidence_label(m.confidence), "last_observed_at": to_utc_iso(m.last_observed_at), "first_seen": to_utc_iso(m.created_at), "reinforced": bool(m.last_observed_at and m.created_at and (m.last_observed_at - m.created_at) > timedelta(days=1)), "location_id": None, "location_name": None} for m in memories], "coming": coming, "outcomes": {"evaluated_predictions": meta["evaluated_predictions"], "accuracy": round(meta["prior_accuracy"] * 100, 1) if meta["prior_accuracy"] is not None else None, "accuracy_trend": meta["accuracy_trend"], "actions_taken": actions_taken, "revenue_at_risk": revenue_risk["value"], "revenue_at_risk_currency": revenue_risk["currency"], "revenue_at_risk_mixed_currency": revenue_risk["mixed_currency"], "revenue_at_risk_by_currency": revenue_risk["by_currency"], "message": "Prediction outcomes will appear after forecast periods complete." if not meta["evaluated_predictions"] else None}})
+        output.update({"confidence": _brain_confidence_label(meta["confidence"]), "confidence_basis": meta["confidence_basis"], "memory": [{"statement": m.statement, "evidence": json.loads(m.evidence_json or "{}"), "confidence": _brain_confidence_label(meta["confidence"] if (m.fingerprint or "").startswith("velocity-") else m.confidence), "last_observed_at": to_utc_iso(m.last_observed_at), "first_seen": to_utc_iso(m.created_at), "reinforced": bool(m.last_observed_at and m.created_at and (m.last_observed_at - m.created_at) > timedelta(days=1)), "location_id": None, "location_name": None} for m in memories], "coming": coming, "outcomes": {"evaluated_predictions": meta["evaluated_predictions"], "accuracy": round(meta["prior_accuracy"] * 100, 1) if meta["prior_accuracy"] is not None else None, "accuracy_trend": meta["accuracy_trend"], "actions_taken": actions_taken, "revenue_at_risk": revenue_risk["value"], "revenue_at_risk_currency": revenue_risk["currency"], "revenue_at_risk_mixed_currency": revenue_risk["mixed_currency"], "revenue_at_risk_by_currency": revenue_risk["by_currency"], "message": "Prediction outcomes will appear after forecast periods complete." if not meta["evaluated_predictions"] else None}})
     return output
 
 @app.post("/business-brain/recommendations/{recommendation_id}/action")
@@ -10590,6 +10789,7 @@ def business_brain_history(
     history to filter it locally. Every row is a record this engine already
     stores (resolved/acted/dismissed recommendations, evaluated forecasts);
     no separate history ledger is written."""
+    require_permission(user, "ai.use")  # same baseline as GET /business-brain
     now = datetime.utcnow()
     restricted_view = not has_permission(user, "business_brain.view_full")
     want = (type or "all").strip().lower()
@@ -10646,7 +10846,7 @@ def business_brain_history(
             events.append({"type": "forecast",
                            "category": "Seasonal forecast" if prediction.kind == "seasonal" else "Demand forecast",
                            "title": f"{product_name} forecast evaluated",
-                           "summary": f"Forecast {prediction.predicted_units:g} units; actual {prediction.actual_units:g} units.{acc_text}",
+                           "summary": f"Forecast {forecast_units_text(prediction.predicted_units)}; actual {units_label(int(round(prediction.actual_units or 0)))}.{acc_text}",
                            "status": "evaluated", "outcome": outcome,
                            "occurred_at": to_utc_iso(occurred_at), "_sort": occurred_at})
 
@@ -16482,18 +16682,131 @@ def download_upload(upload_id: int, user: User = Depends(get_current_user), db: 
         headers={"Content-Disposition": f'attachment; filename="{row.original_name}"'},
     )
 
+# --- What the AI assistant is given (AI-002, AI-003, UX-012) -----------------
+# The model never touches the database. The server builds one bounded summary
+# of THIS business (every query filters on the signed-in user's business_id)
+# from figures Cauldra already computes elsewhere, limited to what this
+# person's permissions show them in the app:
+#   * stock, prices and the stock-out forecast — the same data the Inventory
+#     view and Inventory Financial Analysis show anyone with AI access;
+#   * sales totals and top products per period — only with `reports.sales`
+#     (the Sales Reports permission); otherwise the summary says it is withheld.
+# Money is written out in the business's currency ("₦46,000") before the model
+# sees it, because this is the one point where Cauldra knows a value is money.
+AI_SALES_PERIODS = (
+    ("today", "today"), ("yesterday", "yesterday"), ("this_week", "week"), ("last_week", "previous_week"),
+    ("this_month", "month"), ("last_month", "previous_month"), ("last_3_months", "last_3_months"), ("this_year", "year"),
+)
+AI_TOP_PRODUCTS_PER_PERIOD = 15
+
+AI_REPLY_STYLE = (
+    "Write for a business owner in plain, everyday business language. Keep it short and practical. "
+    "Format with short paragraphs, **bold** for key facts and '-' bullet lists; a short '###' heading is fine. "
+    "Do not use tables, links, code or HTML. "
+    "Money in the data is already written in the business's currency (for example ₦46,000); quote money exactly in that "
+    "form, never as a bare number such as 46000.0. Stock and sales quantities are whole units. "
+    "Never call the business's records 'system anomalies', 'telemetry', errors, or test/dummy entries. If a product's "
+    "figures look wrong (for example stock below zero), say the stock record needs checking with a physical count."
+)
+
+def _ai_sales_summary(db: Session, business: "BusinessProfile") -> Dict[str, Any]:
+    fallback = normalize_currency_code(business.currency) or business.currency
+    name_expr = func.coalesce(SaleModel.product_name_snapshot, Product.name, literal("Deleted product"))
+    periods = {}
+    for label, period in AI_SALES_PERIODS:
+        start_utc, end_utc = resolve_financial_period(business, period)
+        rows = (
+            db.query(SaleModel.currency_snapshot, SaleModel.product_id, name_expr, func.coalesce(func.sum(SaleModel.quantity), 0), func.coalesce(func.sum(SaleModel.total_price), 0.0))
+            .outerjoin(Product, Product.id == SaleModel.product_id)
+            .filter(SaleModel.business_id == business.id, SaleModel.timestamp >= start_utc, SaleModel.timestamp < end_utc)
+            .group_by(SaleModel.currency_snapshot, SaleModel.product_id, name_expr).all()
+        )
+        by_currency: Dict[str, Dict[str, Any]] = {}
+        for currency, _pid, name, units, revenue in rows:
+            code = normalize_currency_code(currency) or fallback
+            bucket = by_currency.setdefault(code, {"gross": 0.0, "units": 0, "products": {}})
+            bucket["gross"] += float(revenue or 0)
+            bucket["units"] += int(units or 0)
+            line = bucket["products"].setdefault(name, [0, 0.0])
+            line[0] += int(units or 0)
+            line[1] += float(revenue or 0)
+        refunds = (
+            db.query(RefundTransaction.currency_snapshot, func.coalesce(func.sum(RefundTransaction.refund_total), 0.0))
+            .filter(RefundTransaction.business_id == business.id, RefundTransaction.created_at >= start_utc, RefundTransaction.created_at < end_utc)
+            .group_by(RefundTransaction.currency_snapshot).all()
+        )
+        refund_by_currency: Dict[str, float] = {}
+        for currency, total in refunds:
+            code = normalize_currency_code(currency) or fallback
+            refund_by_currency[code] = refund_by_currency.get(code, 0.0) + float(total or 0)
+        out = []
+        for code in sorted(set(by_currency) | set(refund_by_currency)):
+            bucket = by_currency.get(code, {"gross": 0.0, "units": 0, "products": {}})
+            refunded = refund_by_currency.get(code, 0.0)
+            top = sorted(bucket["products"].items(), key=lambda kv: -kv[1][1])[:AI_TOP_PRODUCTS_PER_PERIOD]
+            out.append({
+                "currency": code,
+                "gross_sales": money_text(bucket["gross"], code), "refunds": money_text(refunded, code),
+                "net_sales": money_text(bucket["gross"] - refunded, code), "units_sold": bucket["units"],
+                "products_sold": len(bucket["products"]),
+                "top_products_by_revenue": [{"product": name, "units_sold": units, "revenue": money_text(revenue, code)} for name, (units, revenue) in top],
+            })
+        periods[label] = {"from_utc": to_utc_iso(start_utc), "to_utc": to_utc_iso(end_utc), "totals": out or "no sales recorded"}
+    return periods
+
+def ai_business_context(db: Session, user: "User") -> Dict[str, Any]:
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    currency = business.currency if business and business.currency else None
+    products = db.query(Product).filter(Product.business_id == user.business_id).all()
+    product_locations = _resolve_products_locations(db, user.business_id, [p.id for p in products])
+    loc_ids = {loc_id for loc_id, _ in product_locations.values() if loc_id}
+    loc_currency = {l.id: l.currency for l in db.query(Location).filter(Location.business_id == user.business_id, Location.id.in_(loc_ids)).all()} if loc_ids else {}
+    basis = sales_rate_basis(db, user.business_id)
+    history_days, days_per_week = basis["history_days"], basis["trading_days_per_week"]
+    forecast_ready = history_days >= BUSINESS_BRAIN_HISTORY_DAYS
+    inventory = []
+    for p in products:
+        product_currency = loc_currency.get(product_locations.get(p.id, (None, None))[0]) or currency
+        row = {
+            "product": p.name, "sku": p.sku, "category": p.category,
+            "stock_units": p.quantity, "minimum_stock_units": p.min_stock_level,
+            "retail_price": money_text(p.retail_price, product_currency), "wholesale_price": money_text(p.wholesale_price, product_currency),
+            "cost_price": money_text(p.cost_price, product_currency),
+        }
+        if forecast_ready:
+            per_day = (basis["total_sold_map"].get(p.id, 0) or 0) / history_days
+            calendar_rate = calendar_daily_rate(per_day, days_per_week)
+            row["average_units_sold_per_business_day"] = round(per_day, 1)
+            row["expected_units_next_7_days"] = int(forecast_units_for_horizon(per_day, days_per_week, 7) + 0.5)
+            row["estimated_days_until_out_of_stock"] = round(max(p.quantity, 0) / calendar_rate, 1) if calendar_rate > 0 else None
+        inventory.append(row)
+    context: Dict[str, Any] = {
+        "business_currency": currency, "today_local_date": business_local_today(db, user.business_id),
+        "completed_business_days": history_days,
+        "stock_out_forecast": "included per product" if forecast_ready else f"not available yet (needs {BUSINESS_BRAIN_HISTORY_DAYS} completed business days of sales)",
+        "inventory": inventory,
+    }
+    if has_permission(user, "reports.sales") and business:
+        context["sales_by_period"] = _ai_sales_summary(db, business)
+    else:
+        context["sales_by_period"] = "withheld: this person's role does not include Sales Reports"
+    return context
+
 @app.get("/ai/insights")
 def ai_insights(user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
-    products=db.query(Product).filter(Product.business_id==user.business_id).all()
-    snapshot=[{"name":p.name,"category":p.category,"qty":p.quantity,"min":p.min_stock_level,"retail":p.retail_price,"cost":p.cost_price} for p in products]
-    insight, credits = run_billable_ai(db, user, "inventory_insight", "gemini", GEMINI_MODEL, lambda u: gemini_text_response("You are Cauldra's inventory intelligence engine. Analyze only the provided inventory snapshot and give concise, actionable insights.", json.dumps(snapshot), usage_out=u))
+    context = ai_business_context(db, user)
+    system = ("You are Cauldra's business advisor. Review only the business data provided and give a few concise, "
+              "actionable insights about stock, demand and, where included, sales. " + AI_REPLY_STYLE)
+    insight, credits = run_billable_ai(db, user, "inventory_insight", "gemini", GEMINI_MODEL, lambda u: gemini_text_response(system, json.dumps(context, ensure_ascii=False), usage_out=u))
     return {"insight": insight, "credits_consumed": credits}
 
 @app.post("/ai/chat")
 def ai_chat(req: ChatRequest, user: User = Depends(require_ai_access), db: Session = Depends(get_db)):
-    products=db.query(Product).filter(Product.business_id==user.business_id).all()
-    snapshot=[{"name":p.name,"sku":p.sku,"category":p.category,"qty":p.quantity,"min":p.min_stock_level,"retail":p.retail_price,"cost":p.cost_price} for p in products]
-    reply, credits = run_billable_ai(db, user, "chat", "gemini", GEMINI_MODEL, lambda u: gemini_text_response("You are Cauldra's business and inventory assistant. Use only the supplied business data. Be practical and concise; state when data is insufficient.", f"User question: {req.message}\nInventory snapshot: {json.dumps(snapshot)}", usage_out=u))
+    context = ai_business_context(db, user)
+    system = ("You are Cauldra's business and inventory assistant. Answer using only the business data provided. "
+              "If the data does not answer the question, say so briefly and name what is missing. If sales figures are "
+              "withheld for this person's role, say that sales reports are not included in their access. " + AI_REPLY_STYLE)
+    reply, credits = run_billable_ai(db, user, "chat", "gemini", GEMINI_MODEL, lambda u: gemini_text_response(system, f"Question: {req.message}\nBusiness data: {json.dumps(context, ensure_ascii=False)}", usage_out=u))
     return {"reply":reply, "credits_consumed": credits}
 
 # =============================================================================

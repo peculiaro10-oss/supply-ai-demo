@@ -435,3 +435,15 @@
 
 /* Guest visibility wins over all responsive display rules. */
 #header-global-search-wrap.hidden,#header-global-search-wrap[hidden]{display:none!important}
+
+/* UX-013: the AI Center cards are buttons; keyboard focus uses the app's usual ring. */
+.ai-center-card:focus-visible{outline:2px solid #436BEE;outline-offset:2px;}
+/* AI-001: formatted AI replies (see renderAIMarkdown in app.js). */
+.ai-md{line-height:1.55;overflow-wrap:anywhere}
+.ai-md>*+*{margin-top:.5rem}
+.ai-md ul,.ai-md ol{padding-left:1.1rem}
+.ai-md ul{list-style:disc}
+.ai-md ol{list-style:decimal}
+.ai-md li+li{margin-top:.2rem}
+.ai-md .ai-md-heading{font-weight:700}
+.ai-md hr{border:0;border-top:1px solid #172033}
