@@ -31096,7 +31096,6 @@
         let aiInsightsInFlight = false;
         async function fetchAIInsights() {
             if (aiInsightsInFlight) return;
-            if (aiUnavailableOffline()) return;
             aiInsightsInFlight = true;
             const triggers = () => document.querySelectorAll('[data-ai-insights-trigger]');
             triggers().forEach(el => { el.disabled = true; el.setAttribute('aria-busy', 'true'); });
@@ -31108,6 +31107,7 @@
         }
 
         async function runAIInsights() {
+            if (aiUnavailableOffline()) return;
             const chatMessages = document.getElementById("chat-messages");
             const win = document.getElementById("ai-chat-window");
             if (win.classList.contains("hidden")) toggleAIChatWindow();

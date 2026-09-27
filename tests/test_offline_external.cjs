@@ -60,7 +60,7 @@ const chat = between(app, 'async function sendAIChat(', 'function playSuccessBee
 check('AI chat offline keeps the question and says it was not answered', /input\.value = query;/.test(chat) && /has not been answered/.test(chat)
   && chat.indexOf('externalServiceUnreachable()') < chat.indexOf('/ai/chat') && chat.indexOf('externalServiceUnreachable()') < chat.indexOf('if (!authToken)'));
 check('AI chat local answers still come first', chat.indexOf('low stock') < chat.indexOf('externalServiceUnreachable()'));
-check('AI insights and margin advice do not run offline', /async function fetchAIInsights\(\) \{\s*if \(aiInsightsInFlight\) return;\s*if \(aiUnavailableOffline\(\)\) return;/.test(app)
+check('AI insights and margin advice do not run offline', /async function runAIInsights\(\) \{\s*if \(aiUnavailableOffline\(\)\) return;/.test(app)
   && /async function runProductAiMarginAdvice\(\) \{\s*if \(aiUnavailableOffline\(\)\) return;/.test(app) && /async function runEditAiMarginAdvice\(\) \{\s*if \(aiUnavailableOffline\(\)\) return;/.test(app));
 check('invoice scan says nothing was uploaded offline', (app.match(/Scanning an invoice needs the internet\. Nothing was uploaded or scanned\./g) || []).length === 2);
 const barcode = between(app, 'async function lookupBarcode(', 'const clearProvisional');
