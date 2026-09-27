@@ -675,6 +675,82 @@
             } catch (_) {}
         }
 
+        // ---- External actions offline (OFFLINE-EXTERNAL-001) ------------------
+        // A provider step (today: emailing a purchase order) saved offline is a
+        // request, not a result. It waits in the same sealed queue, is shown as
+        // "Waiting to send", can be cancelled until it starts, goes out through
+        // the server on reconnect, and is called sent only after the server
+        // reports the provider accepted it.
+        const EXTERNAL_ACTION_TYPES = new Set(["po_email_send"]);
+        const EXTERNAL_ACTION_MAX_ATTEMPTS = 8; // then Needs attention, never retried forever
+        let pendingPoEmailIds = new Set();
+
+        async function sha256Hex(text) {
+            const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(text || "")));
+            return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+        }
+
+        async function refreshPendingExternalActions() {
+            try {
+                const rows = window.CauldraOffline?.isUnlocked() ? await getOutboxForCurrentBusiness() : [];
+                pendingPoEmailIds = new Set(rows.filter((op) => op.type === "po_email_send" && op.status !== "conflict").map((op) => Number(op.payload?.po_id)));
+            } catch (_) { pendingPoEmailIds = new Set(); }
+            if (document.getElementById("po-draft-container") && Array.isArray(globalPurchaseOrders)) {
+                renderPurchaseOrderDrafts(getFilteredPurchaseOrderDrafts());
+            }
+        }
+
+        async function queuePurchaseOrderEmailOffline(po, supplier) {
+            if (!hasPermission("po.send")) { showToast("You do not have permission to send purchase orders.", "error"); return; }
+            if (po.status !== "DRAFT") { showToast("This purchase order was already sent.", "info"); return; }
+            if (pendingPoEmailIds.has(Number(po.id))) { showToast("This purchase order is already waiting to send.", "info"); return; }
+            const confirmed = await showCustomConfirm(
+                `You're offline. The email to ${supplier.name} will be saved on this device and sent automatically when you reconnect (within 3 days). It has not been sent yet.`,
+                "Send when back online?");
+            if (!confirmed) return;
+            const opId = generateOpId();
+            try {
+                await addOutboxOp({
+                    op_id: opId, business_id: currentBusinessId(), user_id: currentUserProfile?.id || null,
+                    auth_version: currentUserProfile?.auth_version ?? null,
+                    type: "po_email_send", endpoint: `/purchase-orders/${po.id}/dispatch-email`, method: "POST",
+                    payload: { po_id: Number(po.id), supplier_id: po.supplier_id == null ? null : Number(po.supplier_id), draft_sha256: await sha256Hex(po.email_draft || "") },
+                    client_ref: opId, meta: {}, depends_on_op_ids: [],
+                    label: `Email purchase order #${po.id} to ${supplier.name}`,
+                    captured_at: new Date().toISOString(),
+                    status: "pending", attempts: 0, next_retry_at: 0, created_at: Date.now(), last_error: null,
+                });
+            } catch (error) {
+                showToast(error?.message || "This email could not be saved on this device.", "error");
+                return;
+            }
+            await refreshPendingExternalActions();
+            showToast("Waiting to send: this purchase order will be emailed when you reconnect. It has not been sent yet.", "info");
+        }
+
+        function rememberSentPurchaseOrder(op) {
+            const po = globalPurchaseOrders.find((row) => Number(row.id) === Number(op.payload?.po_id));
+            if (po) { po.status = "SENT"; po.sent_at = new Date().toISOString(); }
+            pendingPoEmailIds.delete(Number(op.payload?.po_id));
+            // Only now, after the server reported the provider accepted it.
+            showToast(`Purchase order #${op.payload?.po_id} was emailed.`, "success");
+        }
+
+        window.addEventListener("cauldra-offline-op-cancelled", () => { refreshPendingExternalActions().catch(() => {}); });
+
+        // Cloud AI is never queued: it spends AI credits and answers from the
+        // business's data at the moment it runs, so a late answer would be
+        // stale. Offline it says plainly that nothing ran.
+        function externalServiceUnreachable() {
+            return offlineWorkspaceActive() || navigator.onLine === false;
+        }
+        const AI_OFFLINE_MESSAGE = "This needs the internet. Cauldra's AI has not run, and nothing was sent.";
+        function aiUnavailableOffline() {
+            if (!externalServiceUnreachable()) return false;
+            showToast(AI_OFFLINE_MESSAGE, "info");
+            return true;
+        }
+
         // ---- Products / Suppliers read cache --------------------------------
         // Lets the app keep showing (and, for products, selling from) the last
         // synchronized data while offline. Reconciled with server data every
@@ -814,6 +890,8 @@
                     }
 
                     await updateOutboxOp(op.op_id, { status: "syncing" });
+                    // Cancelled from Sync Details just before this pass reached it: never send it.
+                    if (!(await getOutboxForCurrentBusiness()).some((row) => row.op_id === op.op_id)) continue;
                     try {
                         if (generation !== syncGeneration || !authToken) break;
                         syncReplayAbortController = new AbortController();
@@ -877,10 +955,22 @@
                             const refusal = detail.message || friendlyErrorMessage(data, `Server rejected this change (HTTP ${res.status}).`);
                             await updateOutboxOp(op.op_id, { status: "conflict", conflict_code: conflictCode, conflict_details: detail.details || null, last_error: refusal });
                             if (op.type === "business_day_open" || op.type === "business_day_close") await holdDependentsOfRefusedBusinessDay({ ...op, last_error: refusal });
+                            if (EXTERNAL_ACTION_TYPES.has(op.type)) await refreshPendingExternalActions();
                             if (["AUTH_EXPIRED", "PERMISSION_CHANGED"].includes(conflictCode)) {
                                 await window.CauldraOffline?.quarantineActive(detail.message || "Your account or permissions changed.");
                                 setSyncStatus("auth_required");
                                 break;
+                            }
+                        } else if (EXTERNAL_ACTION_TYPES.has(op.type)) {
+                            // A provider that keeps failing is surfaced, not retried forever.
+                            const detail = data?.detail && typeof data.detail === "object" ? data.detail : {};
+                            const reason = detail.message || "The provider did not accept this yet. It has not been completed.";
+                            if ((op.attempts || 0) + 1 >= EXTERNAL_ACTION_MAX_ATTEMPTS) {
+                                await updateOutboxOp(op.op_id, { status: "conflict", conflict_code: "PROVIDER_UNAVAILABLE", attempts: (op.attempts || 0) + 1,
+                                    last_error: `${reason} It was tried ${EXTERNAL_ACTION_MAX_ATTEMPTS} times and has stopped; it was not sent.` });
+                                await refreshPendingExternalActions();
+                            } else {
+                                await scheduleOutboxRetry(op, reason);
                             }
                         } else {
                             await scheduleOutboxRetry(op, `Server error (HTTP ${res.status}).`);
@@ -974,6 +1064,8 @@
                     await rememberSyncedBusinessDay({ id: serverId, local_id: op.meta.local_id, location_id: op.payload?.location_id, is_open: known ? known.is_open : true });
                 } else if (op.type === "sale_refund") {
                     await rememberSyncedRefund(op, serverData);
+                } else if (op.type === "po_email_send") {
+                    rememberSentPurchaseOrder(op);
                 } else if (op.type === "business_day_close" && serverData?.business_day_id) {
                     await rememberSyncedBusinessDay({ id: serverData.business_day_id, location_id: op.payload?.location_id, is_open: false });
                 } else if (op.type === "product_create" && op.meta?.local_id && serverData?.id) {
@@ -17174,6 +17266,16 @@
             setTimeout(() => document.getElementById('forgot-code')?.focus(), 50);
         }
 
+        // Account recovery is a security email/SMS: it is never queued, since
+        // a delayed code would expire or arrive long after it was asked for.
+        // Offline, say so and keep what was typed.
+        function recoveryOfflineMessage(err, resetting = false) {
+            if (!(err instanceof TypeError) && navigator.onLine !== false) return "";
+            return resetting
+                ? "You're offline. Resetting the password needs the internet, so nothing was changed. What you typed is still here."
+                : "You're offline. Sending a recovery code needs the internet, so nothing was sent. What you typed is still here.";
+        }
+
         async function handleForgotPassword(event) {
             event.preventDefault();
             const submit = document.getElementById('forgot-password-submit');
@@ -17214,7 +17316,7 @@
                 if (!res.ok) throw new Error(showApiError(res, data, 'We could not send the recovery code right now.'));
                 showForgotResetStep(data);
             } catch (err) {
-                setForgotMessage(friendlyErrorMessage(err?.message || err, 'We could not send the recovery code right now.'), 'error');
+                setForgotMessage(recoveryOfflineMessage(err) || friendlyErrorMessage(err?.message || err, 'We could not send the recovery code right now.'), 'error');
             } finally {
                 if (submit) { submit.disabled = false; submit.textContent = 'Send Code'; }
             }
@@ -17235,7 +17337,7 @@
                 if (!res.ok) throw new Error(showApiError(res, data, 'We could not resend the recovery code.'));
                 showForgotResetStep(data);
             } catch (err) {
-                setForgotMessage(friendlyErrorMessage(err?.message || err, 'We could not resend the recovery code.'), 'error');
+                setForgotMessage(recoveryOfflineMessage(err) || friendlyErrorMessage(err?.message || err, 'We could not resend the recovery code.'), 'error');
                 if (btn) btn.disabled = false;
             }
         }
@@ -17265,7 +17367,7 @@
                 document.getElementById('forgot-password-reset-form')?.classList.add('hidden');
                 setTimeout(() => { closeForgotPasswordModal(); resetForgotPasswordModal(); }, 1200);
             } catch (err) {
-                setForgotMessage(friendlyErrorMessage(err?.message || err, 'We could not reset the password.'), 'error');
+                setForgotMessage(recoveryOfflineMessage(err, true) || friendlyErrorMessage(err?.message || err, 'We could not reset the password.'), 'error');
             } finally {
                 if (submit) { submit.disabled = false; submit.textContent = 'Reset Password'; }
             }
@@ -23359,6 +23461,7 @@
 
         let productAdvisorTimer = null;
         async function runProductAiMarginAdvice() {
+            if (aiUnavailableOffline()) return;
             const cost = parseFloat(document.getElementById("p-cost").value) || 0;
             const retail = parseFloat(document.getElementById("p-retail").value) || 0;
             const category = document.getElementById("p-category")?.value.trim() || "General";
@@ -23380,6 +23483,7 @@
 
         let editAdvisorTimer = null;
         async function runEditAiMarginAdvice() {
+            if (aiUnavailableOffline()) return;
             const cost = parseFloat(document.getElementById("edit-p-cost").value) || 0;
             const retail = parseFloat(document.getElementById("edit-p-retail").value) || 0;
             const category = document.getElementById("edit-p-category")?.value.trim() || "General";
@@ -23957,6 +24061,13 @@
                 return;
             }
 
+            // Offline: the business's own catalogue was checked above; the
+            // provider look-up is skipped, never reported as "not found".
+            if (externalServiceUnreachable()) {
+                showToast("No internet, so the barcode could not be looked up. It is not in your products; the barcode is kept, so enter the details yourself.", "info");
+                return;
+            }
+
             if (nameOwn) { nameEl.value = SENTINEL; nameEl.disabled = true; }
             if (skuEl && !skuEl.value.trim()) skuEl.value = generatedSku;
 
@@ -24053,7 +24164,9 @@
                 nameEl.disabled = false;
                 clearProvisional();
                 console.error("[barcode-flow] HTTP status: (request failed)  error:", (err && err.message) || err);
-                const msg = t("products.lookupFailed");
+                const msg = err instanceof TypeError
+                    ? "No internet, so the barcode could not be looked up. It is not in your products; the barcode is kept, so enter the details yourself."
+                    : t("products.lookupFailed");
                 console.log("[barcode-flow] message shown to user:", msg);
                 showToast(msg, "error");
             }
@@ -26765,6 +26878,7 @@
             updateGuestHeaderState();
             renderMobileNav();
             applyOfflineActionPolicy();
+            refreshPendingExternalActions().catch(() => {});
             setSyncStatus("offline");
         }
 
@@ -26773,7 +26887,7 @@
             const onlineOnlyFragments = [
                 "Billing", "Paystack", "EmailVerify", "EmailChange", "ChangePassword", "Employee", "Permission",
                 "DeleteBusiness", "CreateWarehouse", "DeleteWarehouse", "LocationModal", "PriceMonitor",
-                "sendPurchaseOrder", "sendPO", "toggleAIChat", "Invoice", "WhatsApp"
+                "sendPurchaseOrderWhatsApp", "Invoice", "WhatsApp"
             ];
             document.querySelectorAll("button[onclick],a[onclick]").forEach((element) => {
                 const handler = element.getAttribute("onclick") || "";
@@ -29743,6 +29857,14 @@
         }
 
         async function loadPurchaseOrders() {
+            // Offline: the purchase orders this device last synchronized stay
+            // readable, labelled with when they were saved.
+            if (offlineWorkspaceActive()) {
+                await refreshPendingExternalActions();
+                renderPurchaseOrderDrafts(getFilteredPurchaseOrderDrafts());
+                renderPurchaseOrderHistory(getFilteredPurchaseOrderHistory());
+                return;
+            }
             try {
                 const headers = authToken ? { "Authorization": `Bearer ${authToken}` } : {};
                 const res = await fetch(`${API_URL}/purchase-orders/`, { headers });
@@ -29838,19 +29960,28 @@
             return (Array.isArray(globalLocations) ? globalLocations.length : 0) > 1;
         }
 
+        function purchaseOrdersSavedNote() {
+            if (!offlineWorkspaceActive()) return "";
+            const savedAt = window.CauldraOffline?.currentSnapshot?.()?.cache?.["/purchase-orders/"]?.verified_at;
+            const when = savedAt ? formatBusinessDateTime(/(Z|[+-]\d\d:\d\d)$/.test(savedAt) ? savedAt : `${savedAt}Z`) : "";
+            return `<p class="po-offline-note text-[10px] text-textSec mb-2" role="note"><span>${escapeHtml(when ? `Using saved data from ${when}.` : "Using saved data.")}</span> <span>${escapeHtml("Editing and WhatsApp need the internet; an email waits until you reconnect.")}</span></p>`;
+        }
+
         function renderPurchaseOrderDrafts(pos) {
             const container = document.getElementById("po-draft-container");
             if (!pos.length) {
-                container.innerHTML = `<div class="text-center py-6 text-textSec text-xs">${t("purchaseOrders.noneMatchDraftSearch")}</div>`;
+                container.innerHTML = `${purchaseOrdersSavedNote()}<div class="text-center py-6 text-textSec text-xs">${t("purchaseOrders.noneMatchDraftSearch")}</div>`;
                 return;
             }
-            container.innerHTML = pos.map(po => {
+            const offline = offlineWorkspaceActive();
+            container.innerHTML = purchaseOrdersSavedNote() + pos.map(po => {
                 const supplier = globalSuppliers.find(s => String(s.id) === String(po.supplier_id)) || null;
-                const canSend = hasPermission('po.send');
+                const waitingToSend = pendingPoEmailIds.has(Number(po.id));
+                const canSend = hasPermission('po.send') && !waitingToSend;
                 const canEmail = !!(supplier && supplier.contact_email);
                 const canWhatsapp = !!(supplier && supplier.phone);
-                const canEditPo = hasPermission('po.edit');
-                const canDeletePo = hasPermission('po.delete');
+                const canEditPo = hasPermission('po.edit') && !offline && !waitingToSend;
+                const canDeletePo = hasPermission('po.delete') && !offline && !waitingToSend;
                 return `
                     <div class="bg-bgMain border border-borderCol rounded-xl p-4 space-y-2.5">
                         <div class="flex items-center justify-between">
@@ -29858,14 +29989,17 @@
                                 <span class="font-bold text-textMain text-xs">${t("purchaseOrders.poHeader", {id: po.id})} — <span class="text-primary">${escapeHtml(po.vendor_name) || t("purchaseOrders.generalVendor")}</span></span>
                                 <div class="text-[10px] text-textSec">${po.created_at ? t("purchaseOrders.createdOn", {date: formatBusinessDate(po.created_at)}) : t("purchaseOrders.recent")}${hasMultipleLocations() ? ` · <i class="fa-solid fa-location-dot"></i> ${escapeHtml(po.location_name || 'Legacy / Unknown')}` : ''}</div>
                             </div>
-                            <span class="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-warning/15 text-warning border border-warning/30">${t("purchaseOrders.draft")}</span>
+                            ${waitingToSend
+                                ? `<span class="po-waiting-to-send px-2.5 py-1 rounded-lg text-[10px] font-bold bg-primary/15 text-primary border border-primary/30">${escapeHtml("Waiting to send")}</span>`
+                                : `<span class="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-warning/15 text-warning border border-warning/30">${t("purchaseOrders.draft")}</span>`}
                         </div>
+                        ${waitingToSend ? `<p class="text-[10px] text-textSec" role="status">${escapeHtml("Saved on this device and not sent yet. It will be emailed when you reconnect; you can cancel it in Sync Details until then.")}</p>` : ''}
                         <div class="text-[11px] text-textSec bg-cardBg p-2.5 rounded-lg border border-borderCol/60">
                             <strong>${t("purchaseOrders.orderItemsNotes")}</strong> <span class="text-textMain">${escapeHtml(po.items_summary) || t("purchaseOrders.restockDefault")}</span>
                         </div>
                         <div class="flex flex-col sm:flex-row sm:items-center gap-2">
                             <label class="text-[10px] text-textSec font-semibold shrink-0">${t("purchaseOrders.assignSupplier")}</label>
-                            <select onchange="updatePODraftSupplier(${po.id}, this.value)" class="flex-1 bg-cardBg border border-borderCol text-textMain text-[11px] rounded-lg px-2 py-1.5 focus:outline-none focus:border-primary">
+                            <select onchange="updatePODraftSupplier(${po.id}, this.value)" ${offline || waitingToSend ? 'disabled' : ''} class="flex-1 bg-cardBg border border-borderCol text-textMain text-[11px] rounded-lg px-2 py-1.5 focus:outline-none focus:border-primary">
                                 ${poSupplierOptionsHtml(po.supplier_id)}
                             </select>
                         </div>
@@ -29876,9 +30010,9 @@
                             ${canSend ? `<button type="button" onclick="sendPurchaseOrderEmail(${po.id})" ${canEmail ? '' : 'disabled'} title="${canEmail ? '' : t("purchaseOrders.supplierMissingEmail")}" class="px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1 cursor-pointer border ${canEmail ? 'bg-primary/15 hover:bg-primary/25 text-primary border-primary/30' : 'bg-cardBg text-textSec/50 border-borderCol cursor-not-allowed'}">
                                 <i class="fa-solid fa-envelope"></i> ${t("purchaseOrders.sendEmail")}
                             </button>
-                            <button type="button" onclick="sendPurchaseOrderWhatsApp(${po.id})" ${canWhatsapp ? '' : 'disabled'} title="${canWhatsapp ? '' : t("purchaseOrders.supplierMissingPhone")}" class="px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1 cursor-pointer border ${canWhatsapp ? 'bg-success/15 hover:bg-success/25 text-success border-success/30' : 'bg-cardBg text-textSec/50 border-borderCol cursor-not-allowed'}">
+                            ${offline ? '' : `<button type="button" onclick="sendPurchaseOrderWhatsApp(${po.id})" ${canWhatsapp ? '' : 'disabled'} title="${canWhatsapp ? '' : t("purchaseOrders.supplierMissingPhone")}" class="px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1 cursor-pointer border ${canWhatsapp ? 'bg-success/15 hover:bg-success/25 text-success border-success/30' : 'bg-cardBg text-textSec/50 border-borderCol cursor-not-allowed'}">
                                 <i class="fa-brands fa-whatsapp"></i> ${t("purchaseOrders.sendWhatsapp")}
-                            </button>` : ''}
+                            </button>`}` : ''}
                             ${canDeletePo ? `<button type="button" onclick="deletePurchaseOrder(${po.id})" class="bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30 px-3 py-1 rounded-lg text-xs font-semibold cursor-pointer">
                                 <i class="fa-solid fa-trash"></i> ${t("common.delete")}
                             </button>` : ''}
@@ -29895,10 +30029,10 @@
         function renderPurchaseOrderHistory(pos) {
             const container = document.getElementById("po-history-container");
             if (!pos.length) {
-                container.innerHTML = `<div class="text-center py-6 text-textSec text-xs">${t("purchaseOrders.noneMatchHistorySearch")}</div>`;
+                container.innerHTML = `${purchaseOrdersSavedNote()}<div class="text-center py-6 text-textSec text-xs">${t("purchaseOrders.noneMatchHistorySearch")}</div>`;
                 return;
             }
-            container.innerHTML = pos.map(po => `
+            container.innerHTML = purchaseOrdersSavedNote() + pos.map(po => `
                 <div class="bg-bgMain border border-borderCol rounded-xl p-4 space-y-2.5">
                     <div class="flex items-center justify-between">
                         <div>
@@ -29985,6 +30119,8 @@
                 showToast(t("purchaseOrders.supplierMissingEmail"), "error");
                 return;
             }
+            if (offlineWorkspaceActive()) return queuePurchaseOrderEmailOffline(po, supplier);
+            if (pendingPoEmailIds.has(Number(poId))) { showToast("This purchase order is already waiting to send.", "info"); return; }
             const confirmed = await showCustomConfirm(t("purchaseOrders.sendEmailConfirmBody", {vendor: supplier.name}), t("purchaseOrders.sendEmailConfirmTitle"));
             if (!confirmed) return;
             try {
@@ -30166,6 +30302,7 @@
         }
 
         async function captureSnapshotAndAnalyze() {
+            if (externalServiceUnreachable()) { showToast("Scanning an invoice needs the internet. Nothing was uploaded or scanned.", "info"); return; }
             const videoEl = document.getElementById("snap-video-stream");
             const canvasEl = document.getElementById("snap-canvas-output");
             canvasEl.width = videoEl.videoWidth || 640;
@@ -30210,6 +30347,7 @@
         async function handleGlobalBulkInvoiceUpload(event) {
             const file = event.target.files[0];
             if (!file) return;
+            if (externalServiceUnreachable()) { event.target.value = ""; showToast("Scanning an invoice needs the internet. Nothing was uploaded or scanned.", "info"); return; }
             if (!INVOICE_SCAN_TYPES.includes((file.type || "").toLowerCase())) {
                 event.target.value = "";
                 showToast(t("priceMonitor.invoiceTypeNotSupported"), "error");
@@ -30958,6 +31096,7 @@
         let aiInsightsInFlight = false;
         async function fetchAIInsights() {
             if (aiInsightsInFlight) return;
+            if (aiUnavailableOffline()) return;
             aiInsightsInFlight = true;
             const triggers = () => document.querySelectorAll('[data-ai-insights-trigger]');
             triggers().forEach(el => { el.disabled = true; el.setAttribute('aria-busy', 'true'); });
@@ -31109,6 +31248,21 @@
                 return;
             }
 
+            const answerOffline = () => {
+                // Not queued and not answered: the question goes back in the box.
+                input.value = query;
+                chatMessages.innerHTML += `
+                    <div class="ai-offline-reply bg-bgMain border border-borderCol p-2.5 rounded-xl shadow-sm my-1 mr-4" role="status">
+                        <p class="font-semibold text-primary mb-0.5 text-[11px]">Cauldra Assistant</p>
+                        <p class="text-textMain leading-relaxed text-[11px]">${escapeHtml("You're offline, so this question has not been answered. It is still in the box; send it again when you're back online.")}</p>
+                    </div>
+                `;
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            };
+            // navigator.onLine is unreliable in the Android WebView, so a
+            // request that could not reach Cauldra at all is treated the same.
+            if (externalServiceUnreachable()) { answerOffline(); return; }
+
             if (!authToken) {
                 setTimeout(() => {
                     chatMessages.innerHTML += `
@@ -31135,6 +31289,7 @@
 
                 appendAIReply(chatMessages, "Cauldra Assistant", data.reply, "Cauldra couldn't answer that this time. Please try again.");
             } catch (err) {
+                if (err instanceof TypeError) { answerOffline(); return; }
                 chatMessages.innerHTML += `
                     <div class="bg-bgMain border border-borderCol p-2.5 rounded-xl shadow-sm my-1 mr-4">
                         <p class="font-semibold text-primary mb-0.5 text-[11px]">Cauldra Assistant</p>

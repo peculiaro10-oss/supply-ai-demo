@@ -12064,5 +12064,245 @@
   "Parte o toda esta venta ya se reembolsó en otro lugar, así que este reembolso no se aplicó. Revisa la venta en línea.",
   "تم استرداد جزء من هذه العملية أو كلها في مكان آخر، لذا لم يُطبَّق هذا الاسترداد. تحقق من العملية عبر الإنترنت.",
   "Parte ou toda esta venda já foi reembolsada em outro lugar, então este reembolso não foi aplicado. Verifique a venda online."
+ ],
+ "You do not have permission to send purchase orders.": [
+  "Vous n'avez pas l'autorisation d'envoyer des bons de commande.",
+  "No tienes permiso para enviar órdenes de compra.",
+  "ليس لديك إذن بإرسال أوامر الشراء.",
+  "Você não tem permissão para enviar pedidos de compra."
+ ],
+ "This purchase order was already sent.": [
+  "Ce bon de commande a déjà été envoyé.",
+  "Esta orden de compra ya se envió.",
+  "تم إرسال أمر الشراء هذا بالفعل.",
+  "Este pedido de compra já foi enviado."
+ ],
+ "This purchase order is already waiting to send.": [
+  "Ce bon de commande attend déjà d'être envoyé.",
+  "Esta orden de compra ya está esperando para enviarse.",
+  "أمر الشراء هذا في انتظار الإرسال بالفعل.",
+  "Este pedido de compra já está aguardando envio."
+ ],
+ "You're offline. The email to {name} will be saved on this device and sent automatically when you reconnect (within 3 days). It has not been sent yet.": [
+  "Vous êtes hors ligne. L'e-mail à {name} sera enregistré sur cet appareil et envoyé automatiquement à la reconnexion (sous 3 jours). Il n'a pas encore été envoyé.",
+  "Estás sin conexión. El correo a {name} se guardará en este dispositivo y se enviará automáticamente al reconectarte (en un plazo de 3 días). Todavía no se ha enviado.",
+  "أنت غير متصل. سيتم حفظ البريد الإلكتروني إلى {name} على هذا الجهاز وإرساله تلقائيًا عند إعادة الاتصال (خلال 3 أيام). لم يتم إرساله بعد.",
+  "Você está offline. O e-mail para {name} será salvo neste dispositivo e enviado automaticamente quando você se reconectar (em até 3 dias). Ainda não foi enviado."
+ ],
+ "Send when back online?": [
+  "Envoyer au retour de la connexion ?",
+  "¿Enviar al volver a estar en línea?",
+  "هل تريد الإرسال عند عودة الاتصال؟",
+  "Enviar quando voltar a ficar online?"
+ ],
+ "This email could not be saved on this device.": [
+  "Cet e-mail n'a pas pu être enregistré sur cet appareil.",
+  "No se pudo guardar este correo en este dispositivo.",
+  "تعذّر حفظ هذا البريد الإلكتروني على هذا الجهاز.",
+  "Não foi possível salvar este e-mail neste dispositivo."
+ ],
+ "Waiting to send: this purchase order will be emailed when you reconnect. It has not been sent yet.": [
+  "En attente d'envoi : ce bon de commande sera envoyé par e-mail à la reconnexion. Il n'a pas encore été envoyé.",
+  "Esperando para enviar: esta orden de compra se enviará por correo al reconectarte. Todavía no se ha enviado.",
+  "في انتظار الإرسال: سيُرسل أمر الشراء هذا بالبريد الإلكتروني عند إعادة الاتصال. لم يتم إرساله بعد.",
+  "Aguardando envio: este pedido de compra será enviado por e-mail quando você se reconectar. Ainda não foi enviado."
+ ],
+ "Purchase order #{#id} was emailed.": [
+  "Le bon de commande n° {#id} a été envoyé par e-mail.",
+  "La orden de compra n.º {#id} se envió por correo.",
+  "تم إرسال أمر الشراء رقم {#id} بالبريد الإلكتروني.",
+  "O pedido de compra nº {#id} foi enviado por e-mail."
+ ],
+ "Using saved data from {when}.": [
+  "Données enregistrées du {when}.",
+  "Usando datos guardados del {when}.",
+  "استخدام البيانات المحفوظة من {when}.",
+  "Usando dados salvos de {when}."
+ ],
+ "Using saved data.": [
+  "Données enregistrées.",
+  "Usando datos guardados.",
+  "استخدام البيانات المحفوظة.",
+  "Usando dados salvos."
+ ],
+ "Editing and WhatsApp need the internet; an email waits until you reconnect.": [
+  "La modification et WhatsApp nécessitent Internet ; un e-mail attend votre reconnexion.",
+  "Editar y WhatsApp necesitan internet; un correo espera hasta que te reconectes.",
+  "التعديل وواتساب يحتاجان إلى الإنترنت؛ ينتظر البريد الإلكتروني حتى تعيد الاتصال.",
+  "Editar e WhatsApp precisam de internet; um e-mail aguarda até você se reconectar."
+ ],
+ "Waiting to send": [
+  "En attente d'envoi",
+  "Esperando para enviar",
+  "في انتظار الإرسال",
+  "Aguardando envio"
+ ],
+ "Saved on this device and not sent yet. It will be emailed when you reconnect; you can cancel it in Sync Details until then.": [
+  "Enregistré sur cet appareil et pas encore envoyé. Il sera envoyé par e-mail à la reconnexion ; vous pouvez l'annuler dans les détails de synchronisation d'ici là.",
+  "Guardado en este dispositivo y aún no enviado. Se enviará por correo al reconectarte; hasta entonces puedes cancelarlo en Detalles de sincronización.",
+  "محفوظ على هذا الجهاز ولم يُرسل بعد. سيُرسل بالبريد الإلكتروني عند إعادة الاتصال؛ يمكنك إلغاؤه من تفاصيل المزامنة حتى ذلك الحين.",
+  "Salvo neste dispositivo e ainda não enviado. Será enviado por e-mail quando você se reconectar; até lá, você pode cancelá-lo em Detalhes da sincronização."
+ ],
+ "This needs the internet. Cauldra's AI has not run, and nothing was sent.": [
+  "Cela nécessite Internet. L'IA de Cauldra n'a pas été exécutée et rien n'a été envoyé.",
+  "Esto necesita internet. La IA de Cauldra no se ha ejecutado y no se envió nada.",
+  "هذا يحتاج إلى الإنترنت. لم يعمل الذكاء الاصطناعي في Cauldra، ولم يُرسل أي شيء.",
+  "Isso precisa de internet. A IA do Cauldra não foi executada e nada foi enviado."
+ ],
+ "Scanning an invoice needs the internet. Nothing was uploaded or scanned.": [
+  "La numérisation d'une facture nécessite Internet. Rien n'a été téléversé ni analysé.",
+  "Escanear una factura necesita internet. No se subió ni se escaneó nada.",
+  "مسح الفاتورة يحتاج إلى الإنترنت. لم يتم رفع أو مسح أي شيء.",
+  "Digitalizar uma fatura precisa de internet. Nada foi enviado nem digitalizado."
+ ],
+ "You're offline, so this question has not been answered. It is still in the box; send it again when you're back online.": [
+  "Vous êtes hors ligne, cette question n'a donc pas reçu de réponse. Elle est toujours dans la zone de saisie ; renvoyez-la quand vous serez de nouveau en ligne.",
+  "Estás sin conexión, así que esta pregunta no se ha respondido. Sigue en el cuadro; envíala de nuevo cuando vuelvas a estar en línea.",
+  "أنت غير متصل، لذلك لم تتم الإجابة على هذا السؤال. لا يزال في المربع؛ أرسله مرة أخرى عند عودة الاتصال.",
+  "Você está offline, então esta pergunta não foi respondida. Ela continua na caixa; envie novamente quando voltar a ficar online."
+ ],
+ "No internet, so the barcode could not be looked up. It is not in your products; the barcode is kept, so enter the details yourself.": [
+  "Pas d'Internet : le code-barres n'a pas pu être recherché. Il ne figure pas dans vos produits ; le code-barres est conservé, saisissez les détails vous-même.",
+  "Sin internet, no se pudo buscar el código de barras. No está en tus productos; el código se conserva, así que introduce los datos tú mismo.",
+  "لا يوجد إنترنت، لذلك تعذّر البحث عن الرمز الشريطي. إنه غير موجود في منتجاتك؛ تم الاحتفاظ بالرمز الشريطي، فأدخل التفاصيل بنفسك.",
+  "Sem internet, não foi possível consultar o código de barras. Ele não está nos seus produtos; o código foi mantido, então insira os detalhes você mesmo."
+ ],
+ "You're offline. Resetting the password needs the internet, so nothing was changed. What you typed is still here.": [
+  "Vous êtes hors ligne. La réinitialisation du mot de passe nécessite Internet, rien n'a donc été modifié. Ce que vous avez saisi est toujours là.",
+  "Estás sin conexión. Restablecer la contraseña necesita internet, así que no se cambió nada. Lo que escribiste sigue aquí.",
+  "أنت غير متصل. إعادة تعيين كلمة المرور تحتاج إلى الإنترنت، لذلك لم يتغير شيء. ما كتبته لا يزال هنا.",
+  "Você está offline. Redefinir a senha precisa de internet, então nada foi alterado. O que você digitou continua aqui."
+ ],
+ "You're offline. Sending a recovery code needs the internet, so nothing was sent. What you typed is still here.": [
+  "Vous êtes hors ligne. L'envoi d'un code de récupération nécessite Internet, rien n'a donc été envoyé. Ce que vous avez saisi est toujours là.",
+  "Estás sin conexión. Enviar un código de recuperación necesita internet, así que no se envió nada. Lo que escribiste sigue aquí.",
+  "أنت غير متصل. إرسال رمز الاسترداد يحتاج إلى الإنترنت، لذلك لم يُرسل أي شيء. ما كتبته لا يزال هنا.",
+  "Você está offline. Enviar um código de recuperação precisa de internet, então nada foi enviado. O que você digitou continua aqui."
+ ],
+ "The provider did not accept this yet. It has not been completed.": [
+  "Le fournisseur ne l'a pas encore accepté. Ce n'est pas terminé.",
+  "El proveedor aún no lo ha aceptado. No se ha completado.",
+  "لم يقبل المزوّد هذا بعد. لم يكتمل.",
+  "O provedor ainda não aceitou isso. Não foi concluído."
+ ],
+ "{reason} It was tried {#n} times and has stopped; it was not sent.": [
+  "{reason} Il a été tenté {#n} fois et s'est arrêté ; il n'a pas été envoyé.",
+  "{reason} Se intentó {#n} veces y se detuvo; no se envió.",
+  "{reason} تمت المحاولة {#n} مرات وتوقفت؛ لم يُرسل.",
+  "{reason} Foi tentado {#n} vezes e parou; não foi enviado."
+ ],
+ "This purchase order was already sent, so it was not sent again.": [
+  "Ce bon de commande a déjà été envoyé ; il n'a donc pas été renvoyé.",
+  "Esta orden de compra ya se envió, así que no se volvió a enviar.",
+  "تم إرسال أمر الشراء هذا بالفعل، لذلك لم يُرسل مرة أخرى.",
+  "Este pedido de compra já foi enviado, então não foi enviado novamente."
+ ],
+ "This purchase order changed after the email was saved offline, so it was not sent. Check it and send it again.": [
+  "Ce bon de commande a changé après l'enregistrement hors ligne de l'e-mail ; il n'a donc pas été envoyé. Vérifiez-le et renvoyez-le.",
+  "Esta orden de compra cambió después de guardar el correo sin conexión, así que no se envió. Revísala y envíala de nuevo.",
+  "تغيّر أمر الشراء هذا بعد حفظ البريد الإلكتروني دون اتصال، لذلك لم يُرسل. راجعه وأرسله مرة أخرى.",
+  "Este pedido de compra mudou depois que o e-mail foi salvo offline, então não foi enviado. Verifique-o e envie novamente."
+ ],
+ "This email was saved offline more than 3 days ago, so it was not sent automatically. Check the purchase order and send it again.": [
+  "Cet e-mail a été enregistré hors ligne il y a plus de 3 jours ; il n'a donc pas été envoyé automatiquement. Vérifiez le bon de commande et renvoyez-le.",
+  "Este correo se guardó sin conexión hace más de 3 días, así que no se envió automáticamente. Revisa la orden de compra y envíala de nuevo.",
+  "تم حفظ هذا البريد الإلكتروني دون اتصال منذ أكثر من 3 أيام، لذلك لم يُرسل تلقائيًا. راجع أمر الشراء وأرسله مرة أخرى.",
+  "Este e-mail foi salvo offline há mais de 3 dias, então não foi enviado automaticamente. Verifique o pedido de compra e envie novamente."
+ ],
+ "Email sending isn't available right now, so this purchase order was not sent. Send it again later or contact support.": [
+  "L'envoi d'e-mails n'est pas disponible pour le moment ; ce bon de commande n'a donc pas été envoyé. Renvoyez-le plus tard ou contactez le support.",
+  "El envío de correos no está disponible ahora, así que esta orden de compra no se envió. Envíala más tarde o contacta con soporte.",
+  "إرسال البريد الإلكتروني غير متاح حاليًا، لذلك لم يُرسل أمر الشراء هذا. أرسله لاحقًا أو تواصل مع الدعم.",
+  "O envio de e-mails não está disponível agora, então este pedido de compra não foi enviado. Envie novamente mais tarde ou contate o suporte."
+ ],
+ "The email service refused this purchase order email, so it was not sent. Check the supplier's email address, then send it again.": [
+  "Le service d'e-mail a refusé l'e-mail de ce bon de commande ; il n'a donc pas été envoyé. Vérifiez l'adresse e-mail du fournisseur, puis renvoyez-le.",
+  "El servicio de correo rechazó el correo de esta orden de compra, así que no se envió. Revisa el correo del proveedor y envíala de nuevo.",
+  "رفضت خدمة البريد الإلكتروني رسالة أمر الشراء هذه، لذلك لم تُرسل. تحقق من البريد الإلكتروني للمورّد ثم أرسلها مرة أخرى.",
+  "O serviço de e-mail recusou o e-mail deste pedido de compra, então ele não foi enviado. Verifique o e-mail do fornecedor e envie novamente."
+ ],
+ "The email service did not accept this purchase order yet. It has not been sent; Cauldra will try again.": [
+  "Le service d'e-mail n'a pas encore accepté ce bon de commande. Il n'a pas été envoyé ; Cauldra réessaiera.",
+  "El servicio de correo aún no aceptó esta orden de compra. No se ha enviado; Cauldra lo intentará de nuevo.",
+  "لم تقبل خدمة البريد الإلكتروني أمر الشراء هذا بعد. لم يُرسل؛ سيحاول Cauldra مرة أخرى.",
+  "O serviço de e-mail ainda não aceitou este pedido de compra. Ele não foi enviado; o Cauldra tentará novamente."
+ ],
+ "This purchase order no longer exists, so nothing was sent.": [
+  "Ce bon de commande n'existe plus ; rien n'a donc été envoyé.",
+  "Esta orden de compra ya no existe, así que no se envió nada.",
+  "لم يعد أمر الشراء هذا موجودًا، لذلك لم يُرسل أي شيء.",
+  "Este pedido de compra não existe mais, então nada foi enviado."
+ ],
+ "The purchase order changed after this email was saved, so it was not sent. Check it and send it again.": [
+  "Le bon de commande a changé après l'enregistrement de cet e-mail ; il n'a donc pas été envoyé. Vérifiez-le et renvoyez-le.",
+  "La orden de compra cambió después de guardar este correo, así que no se envió. Revísala y envíala de nuevo.",
+  "تغيّر أمر الشراء بعد حفظ هذا البريد الإلكتروني، لذلك لم يُرسل. راجعه وأرسله مرة أخرى.",
+  "O pedido de compra mudou depois que este e-mail foi salvo, então não foi enviado. Verifique-o e envie novamente."
+ ],
+ "This was saved offline too long ago to send automatically. Check it and send it again.": [
+  "Cet élément a été enregistré hors ligne il y a trop longtemps pour être envoyé automatiquement. Vérifiez-le et renvoyez-le.",
+  "Esto se guardó sin conexión hace demasiado tiempo para enviarse automáticamente. Revísalo y envíalo de nuevo.",
+  "تم حفظ هذا دون اتصال منذ وقت طويل جدًا لإرساله تلقائيًا. راجعه وأرسله مرة أخرى.",
+  "Isto foi salvo offline há muito tempo para ser enviado automaticamente. Verifique e envie novamente."
+ ],
+ "The email service is unavailable, so this was not sent. Send it again later from Purchase Orders.": [
+  "Le service d'e-mail est indisponible ; rien n'a donc été envoyé. Renvoyez-le plus tard depuis les bons de commande.",
+  "El servicio de correo no está disponible, así que no se envió. Envíalo más tarde desde Órdenes de compra.",
+  "خدمة البريد الإلكتروني غير متاحة، لذلك لم يُرسل هذا. أرسله لاحقًا من أوامر الشراء.",
+  "O serviço de e-mail está indisponível, então isto não foi enviado. Envie novamente mais tarde em Pedidos de compra."
+ ],
+ "The email service refused this email, so it was not sent. Check the supplier's email address.": [
+  "Le service d'e-mail a refusé cet e-mail ; il n'a donc pas été envoyé. Vérifiez l'adresse e-mail du fournisseur.",
+  "El servicio de correo rechazó este correo, así que no se envió. Revisa el correo del proveedor.",
+  "رفضت خدمة البريد الإلكتروني هذه الرسالة، لذلك لم تُرسل. تحقق من البريد الإلكتروني للمورّد.",
+  "O serviço de e-mail recusou este e-mail, então ele não foi enviado. Verifique o e-mail do fornecedor."
+ ],
+ "It is being sent right now, so it can't be cancelled. Check Sync Details again shortly.": [
+  "Il est en cours d'envoi et ne peut donc pas être annulé. Revenez aux détails de synchronisation dans un instant.",
+  "Se está enviando ahora mismo, así que no se puede cancelar. Revisa Detalles de sincronización en un momento.",
+  "يجري إرساله الآن، لذلك لا يمكن إلغاؤه. تحقق من تفاصيل المزامنة بعد قليل.",
+  "Está sendo enviado agora, então não pode ser cancelado. Verifique os Detalhes da sincronização em instantes."
+ ],
+ "This change is no longer waiting.": [
+  "Cette modification n'est plus en attente.",
+  "Este cambio ya no está en espera.",
+  "هذا التغيير لم يعد في الانتظار.",
+  "Esta alteração não está mais aguardando."
+ ],
+ "This change can no longer be cancelled.": [
+  "Cette modification ne peut plus être annulée.",
+  "Este cambio ya no se puede cancelar.",
+  "لم يعد من الممكن إلغاء هذا التغيير.",
+  "Esta alteração não pode mais ser cancelada."
+ ],
+ "Remove this from the device? It was not sent.": [
+  "Supprimer ceci de l'appareil ? Cela n'a pas été envoyé.",
+  "¿Quitar esto del dispositivo? No se envió.",
+  "هل تريد إزالة هذا من الجهاز؟ لم يُرسل.",
+  "Remover isto do dispositivo? Não foi enviado."
+ ],
+ "Cancel this before it is sent? It will not be sent.": [
+  "Annuler avant l'envoi ? Cela ne sera pas envoyé.",
+  "¿Cancelar antes de que se envíe? No se enviará.",
+  "هل تريد الإلغاء قبل الإرسال؟ لن يُرسل.",
+  "Cancelar antes de ser enviado? Não será enviado."
+ ],
+ "Removed. It was not sent.": [
+  "Supprimé. Cela n'a pas été envoyé.",
+  "Quitado. No se envió.",
+  "تمت الإزالة. لم يُرسل.",
+  "Removido. Não foi enviado."
+ ],
+ "Cancelled. It was not sent.": [
+  "Annulé. Cela n'a pas été envoyé.",
+  "Cancelado. No se envió.",
+  "تم الإلغاء. لم يُرسل.",
+  "Cancelado. Não foi enviado."
+ ],
+ "Email purchase order #{#id} to {name}": [
+  "Envoyer le bon de commande n° {#id} par e-mail à {name}",
+  "Enviar por correo la orden de compra n.º {#id} a {name}",
+  "إرسال أمر الشراء رقم {#id} بالبريد الإلكتروني إلى {name}",
+  "Enviar por e-mail o pedido de compra nº {#id} para {name}"
  ]
 }

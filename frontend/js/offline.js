@@ -542,7 +542,30 @@
         row.next_retry_at = updated.next_retry_at || 0;
         row.depends_on_op_ids = updated.depends_on_op_ids || [];
         row.sealed = await sealWithKey(active.dataKey, updated, `cauldra-outbox:${active.scope}:${opId}`);
-        await transaction("secure_outbox", "readwrite", ({ secure_outbox: store }) => requestToPromise(store.put(row)));
+        // Never re-create a change that was cancelled while this update was
+        // being sealed (OFFLINE-EXTERNAL-001).
+        await transaction("secure_outbox", "readwrite", async ({ secure_outbox: store }) => {
+            if (await requestToPromise(store.get(opId))) await requestToPromise(store.put(row));
+        });
+    }
+
+    // OFFLINE-EXTERNAL-001: only an external request that has not started
+    // (an email waiting to send, or one that stopped and needs attention) can
+    // be cancelled. First-party changes are never discarded from here.
+    const CANCELLABLE_TYPES = new Set(["po_email_send"]);
+    async function cancelOutbox(opId) {
+        if (!active) return { ok: false, reason: "Unlock Offline Access first." };
+        let outcome = { ok: false, reason: "This change can no longer be cancelled." };
+        await transaction("secure_outbox", "readwrite", async ({ secure_outbox: store }) => {
+            const row = await requestToPromise(store.get(opId));
+            if (!row || row.scope !== active.scope) { outcome = { ok: false, reason: "This change is no longer waiting." }; return; }
+            if (!CANCELLABLE_TYPES.has(row.type)) return;
+            if (row.status === "syncing") { outcome = { ok: false, reason: "It is being sent right now, so it can't be cancelled. Check Sync Details again shortly." }; return; }
+            await requestToPromise(store.delete(opId));
+            outcome = { ok: true, type: row.type };
+        });
+        if (outcome.ok) window.dispatchEvent(new CustomEvent("cauldra-offline-op-cancelled", { detail: { op_id: opId, type: outcome.type } }));
+        return outcome;
     }
 
     async function removeOutbox(opId) {
@@ -894,7 +917,7 @@
             </dialog>
             <dialog id="offline-sync-dialog" class="offline-dialog offline-sync-dialog" aria-labelledby="offline-sync-title">
                 <form method="dialog"><button class="offline-dialog-close" value="cancel" aria-label="Close">×</button></form>
-                <h2 id="offline-sync-title">Sync details</h2><p id="offline-sync-summary" role="status"></p>
+                <h2 id="offline-sync-title">Sync details</h2><p id="offline-sync-summary" role="status"></p><p id="offline-sync-notice" role="status"></p>
                 <div id="offline-conflict-list"></div><div id="offline-pending-list"></div><button type="button" id="offline-sync-retry" class="offline-primary">Retry sync</button>
             </dialog>
             <dialog id="offline-remove-dialog" class="offline-dialog offline-remove-dialog" aria-labelledby="offline-remove-title">
@@ -1161,20 +1184,34 @@
 
     async function openSyncDetails() {
         installUi();
+        document.getElementById("offline-sync-notice").textContent = "";
         const rows = await listOutbox();
         const pending = rows.filter((row) => ["pending", "syncing", "failed_retryable", "blocked_dependency"].includes(row.status));
         const conflicts = rows.filter((row) => row.status === "conflict");
         document.getElementById("offline-sync-summary").textContent = `${pending.length} waiting to sync · ${conflicts.length} need attention`;
         const list = document.getElementById("offline-conflict-list");
-        list.innerHTML = conflicts.length ? conflicts.map((row) => `<article><h3><span>Needs attention</span> · ${escapeText(row.label || row.type || "change")}</h3><p>${escapeText(row.last_error || conflictGuidance(row.conflict_code))}</p><small>${escapeText(new Date(row.created_at).toLocaleString())} · ${escapeText(row.op_id)}</small></article>`).join("") : "<p>No conflicts need attention.</p>";
+        list.innerHTML = conflicts.length ? conflicts.map((row) => `<article><h3><span>Needs attention</span> · ${escapeText(row.label || row.type || "change")}</h3><p>${escapeText(row.last_error || conflictGuidance(row.conflict_code))}</p><small>${escapeText(new Date(row.created_at).toLocaleString())} · ${escapeText(row.op_id)}</small>${cancelButton(row, "Remove")}</article>`).join("") : "<p>No conflicts need attention.</p>";
         // Nothing waiting here has happened on the server yet: a refund,
         // transfer or adjustment says "pending", never "done".
-        document.getElementById("offline-pending-list").innerHTML = pending.map((row) => `<article class="offline-pending"><h3><span>${escapeText(pendingStatus(row))}</span> · ${escapeText(row.label || row.type || "change")}</h3><small>${escapeText(new Date(row.created_at).toLocaleString())}</small></article>`).join("");
-        document.getElementById("offline-sync-dialog").showModal();
+        document.getElementById("offline-pending-list").innerHTML = pending.map((row) => `<article class="offline-pending"><h3><span>${escapeText(pendingStatus(row))}</span> · ${escapeText(row.label || row.type || "change")}</h3>${row.status === "failed_retryable" && CANCELLABLE_TYPES.has(row.type) && row.last_error ? `<p>${escapeText(row.last_error)}</p>` : ""}<small>${escapeText(new Date(row.created_at).toLocaleString())}</small>${row.status === "syncing" ? "" : cancelButton(row, "Cancel")}</article>`).join("");
+        const dialog = document.getElementById("offline-sync-dialog");
+        dialog.querySelectorAll("[data-cancel-op]").forEach((button) => button.addEventListener("click", async () => {
+            const message = button.dataset.action === "Remove" ? "Remove this from the device? It was not sent." : "Cancel this before it is sent? It will not be sent.";
+            if (!window.confirm(window.CauldraI18n ? window.CauldraI18n.translate(message) : message)) return;
+            button.disabled = true;
+            const result = await cancelOutbox(button.dataset.cancelOp);
+            await openSyncDetails();
+            document.getElementById("offline-sync-notice").textContent = result.ok ? (button.dataset.action === "Remove" ? "Removed. It was not sent." : "Cancelled. It was not sent.") : result.reason;
+        }));
+        if (!dialog.open) dialog.showModal();
+    }
+
+    function cancelButton(row, action) {
+        return CANCELLABLE_TYPES.has(row.type) ? `<button type="button" class="offline-cancel-op" data-cancel-op="${escapeText(row.op_id)}" data-action="${action}">${action}</button>` : "";
     }
 
     function pendingStatus(row) {
-        return ({ sale_refund: "Refund pending", stock_transfer: "Transfer pending", stock_adjust: "Adjustment pending" })[row.type] || "Waiting to sync";
+        return ({ sale_refund: "Refund pending", stock_transfer: "Transfer pending", stock_adjust: "Adjustment pending", po_email_send: "Waiting to send" })[row.type] || "Waiting to sync";
     }
 
     function conflictGuidance(code) {
@@ -1183,6 +1220,11 @@
             BUSINESS_DAY_CLOSED: "The original Business Day closed before this change synchronized.",
             BUSINESS_DAY_CONFLICT: "The Business Day opened offline could not be matched to this location's open Business Day. The work saved offline was kept for review.", AUTH_EXPIRED: "Sign in online as the original user to review this change.",
             REFUND_CONFLICT: "Part or all of this sale was already refunded elsewhere, so this refund was not applied. Check the sale online.",
+            PO_ALREADY_SENT: "This purchase order was already sent, so it was not sent again.",
+            PO_CHANGED: "The purchase order changed after this email was saved, so it was not sent. Check it and send it again.",
+            STALE_ACTION: "This was saved offline too long ago to send automatically. Check it and send it again.",
+            PROVIDER_UNAVAILABLE: "The email service is unavailable, so this was not sent. Send it again later from Purchase Orders.",
+            PROVIDER_REJECTED: "The email service refused this email, so it was not sent. Check the supplier's email address.",
             VALIDATION_ERROR: "Review the saved values before retrying." };
         return guidance[code] || "This change needs review before it can synchronize.";
     }
@@ -1226,7 +1268,7 @@
 
     window.CauldraOffline = Object.freeze({
         DB_VERSION, CLIENT_SCHEMA_VERSION, ACCESS_STATES, openDb, listIdentities, requestColdStart, unlock, unlockWithBiometric,
-        resumeOnline, provision, refreshAccess, refreshSnapshot, cacheWrite, cacheRead, enqueue, listOutbox, updateOutbox, removeOutbox,
+        resumeOnline, provision, refreshAccess, refreshSnapshot, cacheWrite, cacheRead, enqueue, listOutbox, updateOutbox, removeOutbox, cancelOutbox,
         openSetup, openChangePin, openBiometricSetup, openSyncDetails, biometricStatus, enableBiometrics, disableBiometrics,
         removeCurrentData, changePin, disable, storageStatus, quarantineActive, closeUnlockUi, recoverOnline, setRetryStatus, offerOptIn, sessionStatus, lock: lockWorkspace,
         setState(state) { if (Object.values(ACCESS_STATES).includes(state)) setAccessState(state); }, currentState() { return accessState; },
