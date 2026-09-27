@@ -457,7 +457,13 @@ class UnhandledErrorResponseMiddleware:
 
         try:
             await self.app(scope, receive, tracking_send)
-        except Exception:
+        except Exception as exc:
+            try:
+                line = schema_mismatch_log_line(exc, scope.get("method", ""), scope.get("path", ""))
+                if line:
+                    print(line)
+            except Exception:
+                pass
             if not started:
                 await JSONResponse(status_code=500, content={"detail": UNHANDLED_ERROR_DETAIL})(scope, receive, send)
             raise
@@ -686,9 +692,122 @@ def _log_database_backend_identity() -> None:
     print(f"[startup] Database name: {url.database}")
     print(f"[startup] Database schema: {schema}")
 
+# REC-001: say plainly when the database's migration level does not match
+# this code. Before this, a database behind the code surfaced only as scattered
+# per-request "column/table does not exist" tracebacks. Diagnostic only - this
+# never refuses to start: the recorded promotion order deliberately runs some
+# code ahead of its migration (e.g. 0042 after the Batch E code), and a
+# database whose schema is managed outside Alembic has no history table.
+# Revisions are read from the migration files' text: importing them would
+# import this module again.
+ALEMBIC_VERSIONS_DIR = PROJECT_DIR / "alembic" / "versions"
+_MIGRATION_ASSIGNMENT = re.compile(r"^(revision|down_revision)\s*(?::[^=]*)?=\s*(.+)$", re.MULTILINE)
+DATABASE_MIGRATION_STATUS: dict = {"state": "unchecked"}
+
+def code_migration_graph(versions_dir: Path = ALEMBIC_VERSIONS_DIR) -> dict:
+    """{revision: (down_revision, ...)} for every migration file this code ships."""
+    graph = {}
+    for path in sorted(versions_dir.glob("*.py")) if versions_dir.is_dir() else []:
+        found = dict(_MIGRATION_ASSIGNMENT.findall(path.read_text(encoding="utf-8")))
+        revision = re.findall(r"['\"]([^'\"]+)['\"]", found.get("revision", ""))
+        if revision:
+            graph[revision[0]] = tuple(re.findall(r"['\"]([^'\"]+)['\"]", found.get("down_revision", "")))
+    return graph
+
+def _migration_ancestry(graph: dict, revision: str) -> set:
+    seen, stack = set(), [revision]
+    while stack:
+        rev = stack.pop()
+        if rev in seen or rev not in graph:
+            continue
+        seen.add(rev)
+        stack.extend(graph[rev])
+    return seen
+
+def compare_migration_levels(database_revisions, graph: dict) -> dict:
+    """Pure comparison of the database's alembic_version rows with the code's
+    migration graph. database_revisions=None means no history table."""
+    referenced = {down for downs in graph.values() for down in downs}
+    heads = sorted(rev for rev in graph if rev not in referenced)
+    status = {"code": heads, "database": sorted(database_revisions or []), "pending": []}
+    if not graph:
+        return {**status, "state": "unknown"}
+    if database_revisions is None:
+        return {**status, "state": "untracked"}
+    if not database_revisions:
+        return {**status, "state": "empty"}
+    if any(rev not in graph for rev in database_revisions):
+        return {**status, "state": "ahead"}
+    applied = set().union(*(_migration_ancestry(graph, rev) for rev in database_revisions))
+    needed = set().union(*(_migration_ancestry(graph, rev) for rev in heads))
+    pending = sorted(needed - applied)
+    return {**status, "state": "behind" if pending else "current", "pending": pending}
+
+def read_database_migration_status() -> dict:
+    """Reads alembic_version (read-only) and compares it with this code."""
+    graph = code_migration_graph()
+    try:
+        with engine.connect() as conn:
+            has_table = conn.execute(sql_text("SELECT to_regclass('alembic_version') IS NOT NULL")).scalar()
+            revisions = [row[0] for row in conn.execute(sql_text("SELECT version_num FROM alembic_version"))] if has_table else None
+    except Exception as exc:
+        return {"state": "unreadable", "code": [], "database": [], "pending": [], "error": type(exc).__name__}
+    return compare_migration_levels(revisions, graph)
+
+def describe_migration_status(status: dict) -> str:
+    code = ", ".join(status.get("code") or []) or "unknown"
+    database = ", ".join(status.get("database") or []) or "none"
+    state = status.get("state")
+    if state == "current":
+        return f"Database migration: {database} (matches this code)"
+    if state == "behind":
+        pending = status.get("pending") or []
+        return (f"DATABASE BEHIND CODE: the database is at migration {database} but this code expects {code}; "
+                f"{len(pending)} migration(s) not applied: {', '.join(pending)}. Requests that use the missing "
+                "tables or columns will fail until `alembic upgrade head` is run (DEPLOYMENT.md, step 4).")
+    if state == "ahead":
+        return (f"Database migration {database} is not one this code ships (code head {code}). "
+                "Expected only while running older code against a newer database, e.g. a rollback.")
+    if state == "untracked":
+        return (f"Database migration: no Alembic history table (schema managed outside Alembic); "
+                f"this code expects {code}. The migration level cannot be checked automatically.")
+    if state == "empty":
+        return f"Database migration: the Alembic history table is empty; this code expects {code}."
+    if state == "unreadable":
+        return f"Database migration level could not be read ({status.get('error')}); this code expects {code}."
+    return "Database migration level unknown: this deployment has no alembic/versions directory."
+
+def log_database_migration_status() -> None:
+    global DATABASE_MIGRATION_STATUS
+    DATABASE_MIGRATION_STATUS = read_database_migration_status()
+    print(f"[startup] {describe_migration_status(DATABASE_MIGRATION_STATUS)}")
+
+# SQLSTATEs PostgreSQL raises when a statement names a table/column the
+# database does not have - what a database behind the code produces.
+_SCHEMA_MISMATCH_SQLSTATES = {"42P01": "table", "42703": "column"}
+
+def schema_mismatch_log_line(exc: BaseException, method: str = "", path: str = "") -> Optional[str]:
+    """Operator log line for a request that failed because the database lacks
+    a table/column this code uses; None for any other error."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        orig = getattr(exc, "orig", None) or exc
+        sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+        if sqlstate in _SCHEMA_MISMATCH_SQLSTATES:
+            diag = getattr(orig, "diag", None)
+            detail = (getattr(diag, "message_primary", None) or "").strip()
+            status = describe_migration_status(DATABASE_MIGRATION_STATUS) if DATABASE_MIGRATION_STATUS.get("state") != "unchecked" else "Database migration level not checked at startup."
+            return (f"[schema-behind-code] {method} {path}: the database is missing a "
+                    f"{_SCHEMA_MISMATCH_SQLSTATES[sqlstate]} this code uses ({detail or 'SQLSTATE ' + sqlstate}). "
+                    f"The database is probably behind the deployed code. {status}").strip()
+        exc = exc.__cause__ or exc.__context__
+    return None
+
 if not SKIP_DB_STARTUP_CHECK:
     verify_database_connectivity()
     _log_database_backend_identity()
+    log_database_migration_status()
 
 # -----------------------------------------------------------------------------
 # MODELS

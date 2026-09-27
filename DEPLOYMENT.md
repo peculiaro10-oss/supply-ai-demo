@@ -54,7 +54,13 @@ resolves (see the `Dockerfile` CMD and `.claude/launch.json`).
 
    The application container only starts Uvicorn; it never runs migrations at
    instance startup. This prevents multiple replicas from attempting the same
-   production migration concurrently.
+   production migration concurrently. It does read `alembic_version` at startup
+   and logs one `[startup] Database migration: ...` line: `matches this code`,
+   `DATABASE BEHIND CODE` (with the migrations not yet applied), a revision this
+   code does not ship (expected only during a rollback), or `no Alembic history
+   table` for a schema managed outside Alembic. It never refuses to start on
+   this. A request that fails because a table or column is missing also logs a
+   `[schema-behind-code]` line naming it; customers see the generic error.
 5. Set conservative connection-pool variables (`DATABASE_POOL_SIZE=5`,
    `DATABASE_MAX_OVERFLOW=10`, `DATABASE_POOL_TIMEOUT=30`,
    `DATABASE_POOL_RECYCLE=1800`, and `DATABASE_CONNECT_TIMEOUT=10`) unless
