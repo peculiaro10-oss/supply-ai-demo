@@ -7232,7 +7232,10 @@ def log_email_delivery_failure(purpose: str, category: str, **fields) -> None:
     record_ops_signal("ops_email_last_failure_at", datetime.utcnow().isoformat())
     record_ops_signal("ops_email_last_failure_category", category)
 
-def send_resend_email(*, purpose: str, to_email: str, subject: str, html: str) -> None:
+def send_resend_email(*, purpose: str, to_email: str, subject: str, html: str, idempotency_key: Optional[str] = None) -> None:
+    """idempotency_key (OFFLINE-EXTERNAL-001): Resend answers a repeat with the
+    same key (within 24 hours) without sending a second email, so a queued
+    send retried after a lost response is never delivered twice."""
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     if not api_key:
         log_email_delivery_failure(purpose, "configuration_error", setting="RESEND_API_KEY")
@@ -7244,7 +7247,8 @@ def send_resend_email(*, purpose: str, to_email: str, subject: str, html: str) -
     try:
         r = requests.post(
             "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+                     **({"Idempotency-Key": idempotency_key} if idempotency_key else {})},
             json={"from": RESEND_FROM, "to": [to_email], "subject": subject, "html": html},
             timeout=15,
         )
@@ -11852,7 +11856,21 @@ def confirm_po_whatsapp_sent(po_id: int, user: User = Depends(get_current_user),
 @app.post("/purchase-orders/{po_id}/dispatch-email")
 def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_permission(user, "po.send")
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).first()
+    try:
+        return email_purchase_order(db, user, po_id)
+    except EmailDeliveryError as exc:
+        if exc.category in ("missing_api_key", "sender_not_configured"):
+            raise HTTPException(status_code=503, detail="Email sending isn't available right now. Please contact support.") from None
+        raise HTTPException(status_code=502, detail="We could not email this purchase order right now.") from None
+
+def email_purchase_order(db: Session, user: User, po_id: int, idempotency_key: Optional[str] = None) -> dict:
+    """Shared by the online send and an offline-queued send (OFFLINE-EXTERNAL-001).
+    Raises EmailDeliveryError untouched so each caller decides whether a
+    failure is shown now or kept for a later retry; nothing is written unless
+    the provider accepted the email. The row lock makes two concurrent sends
+    of one draft (two tills, or a queued send meeting an online one) wait for
+    each other, so the second finds it SENT instead of emailing twice."""
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.business_id == user.business_id).with_for_update().first()
     if not po: raise HTTPException(status_code=404, detail="Purchase order not found.")
     # Immutability boundary: an already-SENT PO can never be (re)dispatched.
     if po.status != "DRAFT": raise HTTPException(status_code=409, detail="This purchase order has already been sent.")
@@ -11871,23 +11889,17 @@ def dispatch_po_email(po_id: int, user: User = Depends(get_current_user), db: Se
     # BEFORE calling the email provider so a plan that's already at its limit
     # never even attempts (and never appears to almost-succeed at) a send.
     check_plan_limit(db, business, "purchase_order", _po_sent_count_this_period(db, business))
-    try:
-        send_resend_email(
-            purpose="purchase_order", to_email=supplier.contact_email,
-            subject=f"Purchase Order #{po.id}",
-            html=f"<p>Hello {supplier.name},</p><p>{(po.email_draft or '').replace(chr(10), '<br>')}</p>",
-        )
-    except EmailDeliveryError as exc:
-        # Nothing is persisted above this point (status/sent_at are only ever
-        # set below, after a confirmed-successful send) — a failed/rejected
-        # email leaves the purchase order exactly as it was: still a DRAFT,
-        # still not counted against the plan's allowance. Only a genuinely
-        # provider-accepted send can consume it.
-        if exc.category == "missing_api_key":
-            raise HTTPException(status_code=503, detail="Email sending isn't available right now. Please contact support.") from None
-        if exc.category == "sender_not_configured":
-            raise HTTPException(status_code=503, detail="Email sending isn't available right now. Please contact support.") from None
-        raise HTTPException(status_code=502, detail="We could not email this purchase order right now.") from None
+    # Nothing is persisted above this point (status/sent_at are only ever set
+    # below, after a confirmed-successful send) — a failed/rejected email
+    # (EmailDeliveryError, raised to the caller) leaves the purchase order
+    # exactly as it was: still a DRAFT, still not counted against the plan's
+    # allowance. Only a genuinely provider-accepted send can consume it.
+    send_resend_email(
+        purpose="purchase_order", to_email=supplier.contact_email,
+        subject=f"Purchase Order #{po.id}",
+        html=f"<p>Hello {supplier.name},</p><p>{(po.email_draft or '').replace(chr(10), '<br>')}</p>",
+        **({"idempotency_key": idempotency_key} if idempotency_key else {}),
+    )
     po.status = "SENT"; po.sent_at = datetime.utcnow()
     po_location = db.query(Location).filter(Location.id == po.location_id).first() if po.location_id else None
     location_suffix = f" for {po_location.name}" if po_location else ""

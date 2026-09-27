@@ -494,6 +494,33 @@ def install(g):
         result = g["create_refund"](key, body, user, DeferredCommit(db))
         return {**result, "transaction_key": key, "offline": True}
 
+    # OFFLINE-EXTERNAL-001: an ordinary business email saved offline. It goes
+    # out automatically on reconnect only while it is still what the user
+    # asked for: recent, the same draft to the same supplier, still unsent.
+    PO_EMAIL_MAX_AGE = timedelta(hours=72)
+
+    def send_po_email(db, user, payload, captured, ref):
+        if _utcnow() - captured > PO_EMAIL_MAX_AGE:
+            failure("STALE_ACTION", "This email was saved offline more than 3 days ago, so it was not sent automatically. Check the purchase order and send it again.")
+        po = db.query(g["PurchaseOrder"]).filter_by(id=payload.get("po_id"), business_id=user.business_id).with_for_update().first()
+        if not po:
+            failure("RESOURCE_DELETED", "This purchase order no longer exists, so nothing was sent.")
+        if po.status != "DRAFT":
+            failure("PO_ALREADY_SENT", "This purchase order was already sent, so it was not sent again.")
+        seen = hashlib.sha256((po.email_draft or "").encode("utf-8")).hexdigest()
+        if po.supplier_id != payload.get("supplier_id") or seen != payload.get("draft_sha256"):
+            failure("PO_CHANGED", "This purchase order changed after the email was saved offline, so it was not sent. Check it and send it again.")
+        try:
+            # The provider key makes a retry after a lost answer a no-op at
+            # the provider too, not only in this database.
+            return g["email_purchase_order"](DeferredCommit(db), user, po.id, idempotency_key=f"cauldra-offline-{ref}")
+        except g["EmailDeliveryError"] as exc:
+            if exc.category in ("missing_api_key", "sender_not_configured", "configuration_error"):
+                failure("PROVIDER_UNAVAILABLE", "Email sending isn't available right now, so this purchase order was not sent. Send it again later or contact support.")
+            if exc.category == "provider_rejection":
+                failure("PROVIDER_REJECTED", "The email service refused this purchase order email, so it was not sent. Check the supplier's email address, then send it again.")
+            failure("PROVIDER_RETRY", "The email service did not accept this purchase order yet. It has not been sent; Cauldra will try again.", 503)
+
     @app.post("/offline/replay")
     def replay(op: Replay, request: Request, user=Depends(g["get_current_user"]), db=Depends(g["get_db"])):
         if op.schema_version != 2:
@@ -516,7 +543,7 @@ def install(g):
                  "expense_create": "expenses.record", "supplier_create": "supplier.create",
                  "business_day_open": "business_day.manage", "business_day_close": "business_day.manage",
                  "stock_adjust": "inventory.adjust_stock", "stock_transfer": "inventory.transfer_stock",
-                 "sale_refund": "sales.refund"}
+                 "sale_refund": "sales.refund", "po_email_send": "po.send"}
         if op.type not in rules:
             failure("ONLINE_ONLY", "This operation requires an online workflow.", 400)
         if op.type == "business_day_open" and payload.get("auto"):
@@ -604,6 +631,8 @@ def install(g):
                 result = transfer_stock(db, user, payload, captured, ref)
             elif op.type == "sale_refund":
                 result = refund_sale(db, user, payload, captured, ref, request)
+            elif op.type == "po_email_send":
+                result = send_po_email(db, user, payload, captured, ref)
             else:
                 result = g["create_supplier"](g["SupplierCreate"](**payload), user, deferred)
             response = {"op_id": ref, "status": "synced", "result": jsonable_encoder(result),
