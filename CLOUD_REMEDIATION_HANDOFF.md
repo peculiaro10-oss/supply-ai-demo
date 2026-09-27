@@ -809,6 +809,114 @@ This assumes the 15 Batch F rows are confirmed on QA. `75cb2f59` contains their 
 - URL-OPS-001 → `PRODUCTION-ROLLOUT ACTION`;
 - QA-AUTH-EMAIL-001 → `EXTERNAL — QA/provider configuration`.
 
+
+### 14.3 BUSINESS-DAY-OFFLINE-001 — open a Business Day while offline (2026-09-27, cloud session)
+
+**Finding (new, launch-scoped, owner requirement).** Offline sales needed an open Business Day that had synchronized *before* the outage. With none, the till refused: "Internet required: no previously synchronized open Business Day…". This blocked the final Android row 78 run on APK `cauldra-qa-rc-704b843.apk`.
+
+**Cause.**
+- `completePOSCheckoutOffline()` and `handleRecordExpenseOffline()` in `app.js` only accepted days from the offline snapshot's `days`.
+- `/offline/replay` had no change type for opening a day.
+
+**Branch and commits** (`remediation/batch-e-ai-forecast-brain`, from `704b843`):
+- `a3609a6` server: replay type `business_day_open`;
+- `95b8470` client: offline open, dependency ordering, id swap, conflict hold, Dashboard state, translations, tests.
+
+**Behaviour now.**
+- **A synchronized open day already exists:** unchanged; offline sales use it.
+- **No open day, user has `business_day.manage`:**
+  - the Dashboard **Open Business Day** control works offline;
+  - a sale or expense also opens one, as online checkout does.
+- **No open day, user lacks `business_day.manage`:** refused with "Ask someone who can open the Business Day to start it". The button is hidden, as online.
+- **Dashboard state:** the offline day shows **Business Day Open — "Opened offline at … · waiting to sync"**, with no Close control until it syncs.
+- **Storage:** the day is its own queued change (`business_day_open`, negative local id in `meta.local_id`). It is sealed like every other queued change, so it survives an offline restart and disappears once synced. No new store.
+- **Sync order:** sales and expenses recorded in the day list it in `depends_on_op_ids`. `runSync()` sends the day first, then swaps the local id for the server's (`resolveOutboxDependenciesOnBusinessDaySynced`), then sends the sales. No new sync framework.
+- **Server:**
+  - requires `business_day.manage` plus the usual device, identity and permission-hash checks;
+  - uses the same idempotency receipt;
+  - keeps the real offline `opened_at` and its location-local `date`;
+  - audits `BUSINESS_DAY_STARTED` / `BUSINESS_DAY_AUTO_OPENED` with `offline: true`.
+- **Two devices:**
+  - the location already has an open day from the **same location-local date** → the offline day **joins** it. It is audited `BUSINESS_DAY_OFFLINE_OPEN_JOINED` and never produces a second open day; the sales land in that day.
+  - the open day is from a **different date** → refused as `BUSINESS_DAY_CONFLICT`, and nothing is written. Its sales are held on the device as `BUSINESS_DAY_CONFLICT` with their own reason, never dropped or re-pointed.
+- **Row 78:** a later account or permission change still does not overwrite earlier reasons.
+- **Service worker:** cache is now `cauldra-shell-v14-offline-business-day`, so §14.2 QA step 4 now uses the v14 cache name.
+
+**Migrations / variables:** none. `CAULDRA_OFFLINE_SIGNING_KEY` is already required for Offline Access.
+
+**Tests.**
+- **New:**
+  - `tests/test_business_day_offline_postgres.py` — 5 tests, pass;
+  - `tests/test_business_day_offline.cjs` — static checks, pass; 21 of them fail on the old client;
+  - `tests/run_business_day_offline_e2e.js` — real app, local backend, Chromium; **28/28 pass**.
+- **The e2e covers:**
+  - open offline, sell, restart offline, unlock, sell again, reconnect;
+  - one open day, both sales in it, offline `opened_at` kept;
+  - the queue is sealed at rest;
+  - the two-device join;
+  - the other-date refusal;
+  - row 78 reasons kept after a permission change;
+  - Sync Details showing each reason separately;
+  - a user without permission denied.
+- **Regression:**
+  - offline harness 30/30, including the row 78 check;
+  - offline access, OFFLINE-QUEUE-001, REC-001 and X5 suites pass;
+  - all `tests/*.cjs` pass;
+  - QA bundle verification passes.
+- **Pre-existing failures:** `test_business_day`, `test_mutation_idempotency_postgres`, `test_rejected_checkout_state_postgres`, `test_sales_checkout_atomicity_postgres` and `test_location_authority` fail **identically** at `704b843` (same test names). The service-worker runner's old "first sign-in" wording check also fails at baseline.
+
+**Local follow-up checklist (cloud cannot do these).**
+1. Pull `remediation/batch-e-ai-forecast-brain` at `95b8470` or later. There are no migrations and no new variables.
+2. Deploy to QA: `railway up --service cauldra-qa`. Confirm the startup line reports the database matches the code (`0043` is expected at head).
+3. Rebuild the QA APK. It is **required**: `app.js`, `offline.js` and the i18n catalog changed. Record its SHA-256; `cauldra-qa-rc-704b843.apk` is superseded.
+4. Optional, before Android: run `tests/run_business_day_offline_e2e.js` against a **local** backend (see its header). It refuses non-localhost targets.
+5. Android: run the row 78 sequence below, plus the checklist additions.
+6. Clean-up: close the test Business Day, and remove QA test products and sales per the usual QA hygiene. Do not touch the 42 lost upload rows or Tenant B.
+
+**Row 78 Android sequence (replaces the "pre-open a day online" workaround).**
+1. Online, as a permitted user (Staff with `business_day.manage`, or Admin), confirm **no Business Day is open** for the location. Close it if one is. Offline Access must be enabled.
+2. Turn the device offline (airplane mode) and unlock the workspace with the PIN.
+3. The Dashboard shows **Business Day Closed / Open Business Day**. Tap it: "Business Day opened offline…", then the header reads *Opened offline at … · waiting to sync*.
+4. Make an offline sale. It is saved locally, and Sync Details shows 2 waiting.
+5. Force-stop the app, reopen it still offline, and unlock. The day is still open, and a second sale works.
+6. Set up the refusal on the server: another device lowers stock below the queued quantity (`STOCK_CHANGED`).
+7. Reconnect. The day syncs first; the sale is refused with "Server stock is lower…".
+8. Change the user's permissions on the other device, then trigger sync with a new queued change. The new change takes the permission reason, and the earlier sale **keeps** "Server stock is lower…".
+9. Sync Details lists the separate reasons.
+10. On QA, confirm exactly one open day for the location, with its opened time from step 3.
+
+**Android checklist additions.**
+- Offline open with no prior day:
+  - via the Dashboard, and via a sale;
+  - a user without `business_day.manage` is refused;
+  - English and Arabic.
+- Force-stop while offline: the day persists and the header text is correct.
+- Two devices: B opens the day online while A is offline with its own day. A reconnects → one open day, A's sales in it.
+- Stated honestly: browser e2e is not Android evidence; this cloud session ran no Android build or device.
+
+**Owner decisions (parked; everything around them is implemented).**
+1. **Permission for a sale-triggered offline open.** Implemented: needs `business_day.manage`, as the owner's requirement says. Online, a sale can auto-open a day with only `sales.create`. Default roles all have both, so this only matters when `business_day.manage` has been revoked. Keep the stricter offline rule, or mirror online?
+2. **Held sales from a different-date conflict.** Implemented: held on the device with a reason, and never dropped or joined, the same as every existing offline conflict (Sync Details has no resolve action today). Should there be a reviewed action to record them, for example into their own day for that date? That would be a later product change.
+
+**Not in scope, unchanged:** closing a Business Day offline (the Close control still needs a connection); AI and other provider-backed features stay online-only.
+
+**Tracker lines (new):**
+- `BUSINESS-DAY-OFFLINE-001 — Offline sales required a previously synchronized open Business Day → FIXED (a3609a6, 95b8470) — awaiting QA deploy + new APK + Android row 78 rerun`;
+- row 78 (OFFLINE-QUEUE-001): `Android evidence pending on the new APK with the owner-expected sequence (no online pre-open)`.
+
+**Triage file:** add row `BUSINESS-DAY-OFFLINE-001`: **launch-scoped, owner requirement 2026-09-27**, FIXED — awaiting QA/Android.
+
+**Retest log:**
+- 2026-09-27 cloud: server Postgres 5/5; e2e 28/28; offline harness 30/30; static suites all pass;
+- failing backend suites identical to `704b843`;
+- no QA deploy (no Railway access from cloud); no Android.
+
+**Manifest:** add `a3609a6`, `95b8470` after `704b843`; no migrations, no variables; the service-worker cache is v14.
+
+**Android/native checklist:** add the row 78 sequence and the additions above; mark `cauldra-qa-rc-704b843.apk` (SHA-256 `756fedb8…a035730`) as superseded for row 78.
+
+**Count:** one new launch-scoped finding opened and fixed in code. It stays open until QA and Android confirm it.
+
 ---
 
 *Handoff prepared 2026-09-26 from `remediation/batch-e-ai-forecast-brain` @ `2aeec3f`. Documentation only — no product code, QA, `main` or production change.*
