@@ -258,6 +258,21 @@ def install(g):
                 failure("HISTORY_TOO_LARGE", "The 90-day expense history exceeds this device limit.", 413)
         history = cached("/sales/history?period=custom&custom_start=" + since + "&custom_end=" + until,
                          g["sales_history"], "custom", since, until, None, user, db)
+        # G2: the device's trusted list of recent synchronized sales it may
+        # refund offline, with what is still refundable on each line. Bounded
+        # by the refund list's own 500-line cap; when the cap was reached, the
+        # oldest transaction may be incomplete, so it is left out (a sale not
+        # on this list needs the internet to refund).
+        refundable = []
+        if permissions(user).get("sales.refund"):
+            refundable = g["list_sale_transactions"](None, "custom", since, until, user, db) or []
+            if sum(len(t["items"]) for t in refundable) >= 500 and refundable:
+                refundable = refundable[:-1]
+                freshness["refundable_sales"] = "most recent sales only"
+            else:
+                freshness["refundable_sales"] = "synchronized"
+        else:
+            freshness["refundable_sales"] = "permission unavailable"
         cached("/purchase-orders/", g["get_purchase_orders"], None, user, db)
         cached("/subscription/usage", g["subscription_usage"], user, db)
         cached("/business-brain", g["business_brain"], None, user, db)
@@ -271,7 +286,7 @@ def install(g):
             "business": g["serialize_business"](business, db), "permissions": permissions(user),
             "products": products, "suppliers": suppliers, "stocks": stocks,
             "warehouses": warehouses, "locations": locations,
-            "days": days, "sales": [], "sales_history": history, "expenses": expenses,
+            "days": days, "sales": [], "refundable_sales": refundable, "sales_history": history, "expenses": expenses,
             "cache": cache, "freshness": freshness, "history_since": since})
 
     def open_business_day(db, user, payload, captured, ref):
@@ -347,6 +362,138 @@ def install(g):
                                           audit_extra={"offline": True, "offline_ref": ref, "offline_closed_at": closed_at.isoformat()})
         return {"business_day_id": day.id, "already_closed": False, "business_day": result["business_day"]}
 
+    # ---- G1/G2: stock and refunds recorded offline (OFFLINE-STOCK-REFUND-001) ----
+    def active_warehouse(db, user, warehouse_id):
+        warehouse = db.query(g["Warehouse"]).filter_by(id=warehouse_id, business_id=user.business_id, is_active=True).first()
+        if warehouse and warehouse.location_id is not None:
+            if not db.query(g["Location"]).filter_by(id=warehouse.location_id, business_id=user.business_id, is_active=True).first():
+                warehouse = None
+        return warehouse
+
+    def locked_stock(db, user, product, warehouse):
+        WS = g["WarehouseStock"]
+        return db.query(WS).filter(WS.business_id == user.business_id, WS.product_id == product.id,
+            (WS.warehouse_id == warehouse.id) | (WS.warehouse_id.is_(None) & (WS.warehouse == warehouse.name))
+        ).order_by(WS.id).with_for_update().first()
+
+    def locked_product(db, user, product_id, what):
+        product = db.query(g["Product"]).filter_by(id=product_id, business_id=user.business_id).with_for_update().first()
+        if not product:
+            failure("RESOURCE_DELETED", f"The product in this {what} no longer exists. Nothing was changed.")
+        return product
+
+    def adjust_stock(db, user, payload, captured, ref):
+        """A stock adjustment recorded offline: a DELTA on one named warehouse,
+        exactly like the online +/- adjustment. Applied on top of whatever
+        other devices did meanwhile (never an absolute overwrite); refused
+        with the current figure if it would make stock negative."""
+        change = int(payload.get("quantity_change") or 0)
+        if change == 0:
+            failure("VALIDATION_ERROR", "The saved stock adjustment has no quantity.", 422)
+        product = locked_product(db, user, payload.get("product_id"), "stock adjustment")
+        warehouse = active_warehouse(db, user, payload.get("warehouse_id"))
+        if not warehouse:
+            failure("LOCATION_CHANGED", "The warehouse this stock adjustment was recorded for is no longer active. Nothing was changed.")
+        stock = locked_stock(db, user, product, warehouse)
+        available = int(stock.quantity if stock else 0)
+        if available + change < 0:
+            failure("STOCK_CHANGED", f"{product.name} now has {available} in {warehouse.name}, so removing {-change} would make stock negative. "
+                    "Nothing was changed; count the stock and adjust it online.", 409,
+                    {"product_id": product.id, "product": product.name, "warehouse_id": warehouse.id, "warehouse": warehouse.name,
+                     "available_quantity": available, "quantity_change": change, "quantity_seen_offline": payload.get("base_quantity")})
+        if not stock:
+            stock = g["WarehouseStock"](business_id=user.business_id, product_id=product.id, warehouse=warehouse.name, warehouse_id=warehouse.id, quantity=0)
+            db.add(stock); db.flush()
+        elif stock.warehouse_id is None:
+            stock.warehouse_id = warehouse.id
+        before = int(stock.quantity)
+        g["_apply_stock_adjustment"](db, user, product, stock, warehouse.name, change, audit_extra={
+            "offline": True, "offline_ref": ref, "offline_captured_at": captured.isoformat(),
+            "reason": (payload.get("reason") or None), "warehouse_id": warehouse.id,
+            "quantity_seen_offline": payload.get("base_quantity"), "warehouse_quantity_before": before})
+        return {"product_id": product.id, "warehouse_id": warehouse.id, "quantity_change": change,
+                "warehouse_quantity": int(stock.quantity), "quantity": product.quantity}
+
+    def transfer_stock(db, user, payload, captured, ref):
+        """A stock transfer recorded offline: both warehouse rows move in this
+        one transaction or neither does; refused whole if the source no longer
+        holds enough."""
+        quantity = int(payload.get("quantity") or 0)
+        if quantity < 1 or payload.get("from_warehouse_id") == payload.get("to_warehouse_id"):
+            failure("VALIDATION_ERROR", "The saved transfer needs two different warehouses and a positive quantity.", 422)
+        product = locked_product(db, user, payload.get("product_id"), "transfer")
+        source_wh = active_warehouse(db, user, payload.get("from_warehouse_id"))
+        target_wh = active_warehouse(db, user, payload.get("to_warehouse_id"))
+        if not source_wh or not target_wh:
+            failure("LOCATION_CHANGED", "A warehouse in this transfer is no longer active. Nothing was moved.")
+        rows = {}
+        for wh in sorted((source_wh, target_wh), key=lambda w: w.id):  # fixed lock order
+            rows[wh.id] = locked_stock(db, user, product, wh)
+        source, target = rows[source_wh.id], rows[target_wh.id]
+        available = int(source.quantity if source else 0)
+        if available < quantity:
+            failure("STOCK_CHANGED", f"{source_wh.name} now has only {available} of {product.name}, so {quantity} could not be transferred. "
+                    "Nothing was moved.", 409,
+                    {"product_id": product.id, "product": product.name, "from_warehouse": source_wh.name, "to_warehouse": target_wh.name,
+                     "available_quantity": available, "requested_quantity": quantity})
+        if source.warehouse_id is None:
+            source.warehouse_id = source_wh.id
+        if not target:
+            target = g["WarehouseStock"](business_id=user.business_id, product_id=product.id, warehouse=target_wh.name, warehouse_id=target_wh.id, quantity=0)
+            db.add(target); db.flush()
+        elif target.warehouse_id is None:
+            target.warehouse_id = target_wh.id
+        g["_apply_stock_transfer"](db, user, product, source, target, source_wh, target_wh, quantity, audit_extra={
+            "offline": True, "offline_ref": ref, "offline_captured_at": captured.isoformat(), "reason": (payload.get("reason") or None)})
+        return {"product_id": product.id, "quantity_transferred": quantity, "from_warehouse_id": source_wh.id,
+                "to_warehouse_id": target_wh.id, "from_quantity": int(source.quantity), "to_quantity": int(target.quantity),
+                "quantity": product.quantity}
+
+    def refund_sale(db, user, payload, captured, ref, request):
+        """A refund recorded offline. Cauldra sale refunds are internal
+        (accounting plus optional restock; no payment provider is involved),
+        so the online refund itself runs here with the op id as its
+        idempotency key. Before that, with the sale rows locked, every line is
+        checked against what is STILL refundable: if another till refunded
+        some or all of it meanwhile, the whole offline refund is refused with
+        the figures, never partly applied or applied twice."""
+        Sale = g["SaleModel"]
+        key = str(payload.get("transaction_key") or "")
+        sales = g["_sales_for_transaction_key"](db, user.business_id, key) if key else []
+        if not sales:
+            failure("RESOURCE_DELETED", "The sale this refund is for was not found on the server. Nothing was refunded.")
+        sales = db.query(Sale).filter(Sale.id.in_([s.id for s in sales])).order_by(Sale.id).with_for_update().all()
+        day_ids = {s.business_day_id for s in sales if s.business_day_id}
+        original_day = db.query(g["BusinessDay"]).filter_by(id=next(iter(day_ids))).first() if len(day_ids) == 1 else None
+        if not original_day or original_day.location_id != payload.get("location_id"):
+            failure("LOCATION_CHANGED", "The original sale's location could not be confirmed, so this refund must be done online.")
+        by_id = {s.id: s for s in sales}
+        lines = []
+        for line in payload.get("lines") or []:
+            if line.get("sale_id") is not None:
+                sale = by_id.get(line.get("sale_id"))
+            else:
+                index = line.get("item_index")
+                sale = sales[index] if isinstance(index, int) and 0 <= index < len(sales) else None
+            if not sale or (line.get("product_id") is not None and sale.product_id != line.get("product_id")):
+                failure("VALIDATION_ERROR", "An item in this refund no longer matches the original sale. Nothing was refunded.", 422)
+            quantity = int(line.get("quantity") or 0)
+            already = db.query(g["func"].coalesce(g["func"].sum(g["RefundLine"].quantity), 0)).filter(
+                g["RefundLine"].original_sale_id == sale.id, g["RefundLine"].business_id == user.business_id).scalar() or 0
+            remaining = sale.quantity - int(already) - sum(l["quantity"] for l in lines if l["sale_id"] == sale.id)
+            name = sale.product_name_snapshot or "an item"
+            if quantity < 1 or quantity > remaining:
+                failure("REFUND_CONFLICT", f"This refund asks for {quantity} of {name}, but only {max(0, remaining)} of the {sale.quantity} sold "
+                        f"can still be refunded ({int(already)} already refunded). Nothing from this refund was applied.", 409,
+                        {"sale_id": sale.id, "product": name, "sold_quantity": sale.quantity, "already_refunded": int(already),
+                         "remaining_quantity": max(0, remaining), "requested_quantity": quantity})
+            lines.append({"sale_id": sale.id, "quantity": quantity, "restock": bool(line.get("restock", True))})
+        if not lines:
+            failure("VALIDATION_ERROR", "The saved refund has no items.", 422)
+        body = g["RefundRequest"](lines=lines, reason=payload.get("reason"), note=payload.get("note"), client_ref=ref)
+        result = g["create_refund"](key, body, user, DeferredCommit(db))
+        return {**result, "transaction_key": key, "offline": True}
+
     @app.post("/offline/replay")
     def replay(op: Replay, request: Request, user=Depends(g["get_current_user"]), db=Depends(g["get_db"])):
         if op.schema_version != 2:
@@ -367,19 +514,22 @@ def install(g):
         rules = {"product_create": "inventory.add_product", "product_update": "inventory.edit_product",
                  "product_delete": "inventory.delete_product", "sale_checkout": "sales.create",
                  "expense_create": "expenses.record", "supplier_create": "supplier.create",
-                 "business_day_open": "business_day.manage", "business_day_close": "business_day.manage"}
+                 "business_day_open": "business_day.manage", "business_day_close": "business_day.manage",
+                 "stock_adjust": "inventory.adjust_stock", "stock_transfer": "inventory.transfer_stock",
+                 "sale_refund": "sales.refund"}
         if op.type not in rules:
             failure("ONLINE_ONLY", "This operation requires an online workflow.", 400)
         if op.type == "business_day_open" and payload.get("auto"):
             # Same as online: a sale or expense that finds no open day opens
             # one with the permission that sale/expense itself needs.
-            rules["business_day_open"] = {"sale": "sales.create", "expense": "expenses.record"}.get(payload.get("trigger"), rules["business_day_open"])
+            rules["business_day_open"] = {"sale": "sales.create", "expense": "expenses.record", "refund": "sales.refund"}.get(payload.get("trigger"), rules["business_day_open"])
         g["require_permission"](user, rules[op.type])
-        if op.type in ("sale_checkout", "expense_create"):
+        if op.type in ("sale_checkout", "expense_create", "sale_refund"):
             day = db.query(g["BusinessDay"]).filter_by(id=payload.get("business_day_id"),
                 business_id=user.business_id, location_id=payload.get("location_id")).with_for_update().first()
             if not day or not day.is_open:
                 failure("BUSINESS_DAY_CLOSED", "The original Business Day is closed or unavailable.")
+        if op.type in ("sale_checkout", "expense_create"):
             location = db.query(g["Location"]).filter_by(id=payload.get("location_id"), business_id=user.business_id, is_active=True).first()
             if not location:
                 failure("LOCATION_CHANGED", "The original location is unavailable.")
@@ -448,6 +598,12 @@ def install(g):
                 result = open_business_day(db, user, payload, captured, ref)
             elif op.type == "business_day_close":
                 result = close_business_day(db, user, payload, captured, ref)
+            elif op.type == "stock_adjust":
+                result = adjust_stock(db, user, payload, captured, ref)
+            elif op.type == "stock_transfer":
+                result = transfer_stock(db, user, payload, captured, ref)
+            elif op.type == "sale_refund":
+                result = refund_sale(db, user, payload, captured, ref, request)
             else:
                 result = g["create_supplier"](g["SupplierCreate"](**payload), user, deferred)
             response = {"op_id": ref, "status": "synced", "result": jsonable_encoder(result),

@@ -9587,9 +9587,16 @@ def update_stock(product_id: int, data: StockUpdate, user: User = Depends(get_cu
         db.flush()
     elif stock.warehouse_id is None and p.warehouse_id is not None:
         stock.warehouse_id = p.warehouse_id  # opportunistic legacy backfill
-    if stock.quantity + data.quantity_change < 0:
+    _apply_stock_adjustment(db, user, p, stock, warehouse_name, data.quantity_change)
+    db.commit(); return {"message": "Stock updated successfully.", "quantity": p.quantity}
+
+def _apply_stock_adjustment(db, user: User, p: Product, stock: WarehouseStock, warehouse_name: str, quantity_change: int, audit_extra: Optional[dict] = None) -> None:
+    """One stock adjustment as a DELTA on one warehouse row: shared by the
+    online endpoint and offline replay (G1), so both refuse negative stock and
+    write the same totals, notifications and audit. Never commits."""
+    if stock.quantity + quantity_change < 0:
         raise HTTPException(status_code=400, detail=f"Stock in {warehouse_name} cannot become negative.")
-    stock.quantity += data.quantity_change
+    stock.quantity += quantity_change
     p.quantity = sum(
         int(row.quantity or 0) for row in db.query(WarehouseStock).filter(
             WarehouseStock.business_id == user.business_id, WarehouseStock.product_id == p.id,
@@ -9597,14 +9604,13 @@ def update_stock(product_id: int, data: StockUpdate, user: User = Depends(get_cu
     )
     mark_business_brain_dirty(db, user.business_id)
     check_inventory_notifications_for_product(db, user.business_id, p)
-    if data.quantity_change > 0:
+    if quantity_change > 0:
         resolve_purchase_order_requirements(db, user.business_id, p.id, warehouse_id=stock.warehouse_id)
     add_audit(
-        db, user, "STOCK_ADJUSTED", f"Adjusted stock for {p.name} in {warehouse_name} by {data.quantity_change:+d}.",
+        db, user, "STOCK_ADJUSTED", f"Adjusted stock for {p.name} in {warehouse_name} by {quantity_change:+d}.",
         action_category="INVENTORY", resource_type="product", resource_id=p.id,
-        metadata={"warehouse": warehouse_name, "quantity_change": data.quantity_change, "new_quantity": p.quantity},
+        metadata={"warehouse": warehouse_name, "quantity_change": quantity_change, "new_quantity": p.quantity, **(audit_extra or {})},
     )
-    db.commit(); return {"message": "Stock updated successfully.", "quantity": p.quantity}
 
 @app.patch("/products/{product_id}/transfer")
 def transfer_stock(product_id: int, data: StockTransfer, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -9631,7 +9637,16 @@ def transfer_stock(product_id: int, data: StockTransfer, user: User = Depends(ge
     if not target: target=WarehouseStock(business_id=user.business_id,product_id=p.id,warehouse=data.to_warehouse,warehouse_id=to_warehouse_row.id,quantity=0); db.add(target); db.flush()
     elif target.warehouse_id is None:
         target.warehouse_id = to_warehouse_row.id
-    source.quantity-=data.quantity; target.quantity+=data.quantity
+    _apply_stock_transfer(db, user, p, source, target, from_warehouse_row, to_warehouse_row, data.quantity)
+    db.commit(); return {"message":"Stock transfer completed successfully.","quantity_transferred":data.quantity,"from_warehouse":data.from_warehouse,"to_warehouse":data.to_warehouse,"total_quantity":p.quantity}
+
+def _apply_stock_transfer(db, user: User, p: Product, source: WarehouseStock, target: WarehouseStock, from_warehouse_row, to_warehouse_row, quantity: int, audit_extra: Optional[dict] = None) -> None:
+    """Moves stock between two warehouse rows: both writes or neither (the
+    caller's one transaction). Shared by the online endpoint and offline
+    replay (G1). Never commits."""
+    if quantity < 1 or source.quantity < quantity:
+        raise HTTPException(status_code=400, detail=f"Only {units_label(source.quantity)} are recorded in {from_warehouse_row.name}.")
+    source.quantity-=quantity; target.quantity+=quantity
     p.quantity=sum(w.quantity for w in db.query(WarehouseStock).filter(WarehouseStock.product_id==p.id).all())
     # NOTE (section 26): a transfer NEVER changes Product.warehouse/
     # warehouse_id (the product's primary/default pointer) — that would
@@ -9649,18 +9664,18 @@ def transfer_stock(product_id: int, data: StockTransfer, user: User = Depends(ge
         cross_location_note = f" (cross-branch: {from_location.name} → {to_location.name})"
     add_audit(
         db, user, "STOCK_TRANSFER",
-        f"Transferred {units_label(data.quantity)} of {p.name} from {data.from_warehouse} to {data.to_warehouse}{cross_location_note}.",
+        f"Transferred {units_label(quantity)} of {p.name} from {from_warehouse_row.name} to {to_warehouse_row.name}{cross_location_note}.",
         action_category="INVENTORY", resource_type="product", resource_id=p.id,
         metadata={
-            "product_id": p.id, "product_name": p.name, "quantity": data.quantity,
+            "product_id": p.id, "product_name": p.name, "quantity": quantity,
             "source_warehouse_id": from_warehouse_row.id, "source_warehouse_name": from_warehouse_row.name,
             "source_location_id": from_location.id if from_location else None, "source_location_name": from_location.name if from_location else None,
             "destination_warehouse_id": to_warehouse_row.id, "destination_warehouse_name": to_warehouse_row.name,
             "destination_location_id": to_location.id if to_location else None, "destination_location_name": to_location.name if to_location else None,
+            **(audit_extra or {}),
         },
     )
     check_inventory_notifications_for_product(db, user.business_id, p)
-    db.commit(); return {"message":"Stock transfer completed successfully.","quantity_transferred":data.quantity,"from_warehouse":data.from_warehouse,"to_warehouse":data.to_warehouse,"total_quantity":p.quantity}
 
 @app.get("/products/{product_id}/warehouse-stocks")
 def product_warehouse_stocks(product_id:int,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
@@ -12556,6 +12571,11 @@ def create_refund(transaction_key: str, payload: RefundRequest, user: User = Dep
 
     transaction_sales = _sales_for_transaction_key(db, user.business_id, transaction_key)
     if not transaction_sales: raise HTTPException(status_code=404, detail="Transaction not found.")
+    # Lock the original sale rows before reading how much is already
+    # refunded: two refunds of the same sale (two tills, or an offline refund
+    # replayed while another is recorded) run one after the other, so the
+    # second always sees the first's lines and can never over-refund.
+    db.query(SaleModel).filter(SaleModel.id.in_([s.id for s in transaction_sales])).order_by(SaleModel.id).with_for_update().all()
     transaction_sale_ids = {s.id for s in transaction_sales}
     sales_by_id = {s.id: s for s in transaction_sales}
 
