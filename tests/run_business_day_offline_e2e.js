@@ -10,8 +10,16 @@
 //   3. the location's open day is from another date -> the offline day and its
 //      sale are refused with their own reason (nothing added to that day) ->
 //      a later permission change does not overwrite those reasons (row 78).
-//   Also: the queue stays sealed at rest, and a user without
-//   business_day.manage cannot open a day offline.
+//   4. closing offline: open -> sales -> close offline -> restart offline -> the
+//      day is still closed -> a new sale opens a new day that waits for the
+//      close -> reconnect -> open, sales, close, next open reach the server in
+//      that order; a synced day closed offline; a day closed on the server
+//      first (its sale and the close are held with reasons); another device
+//      opened the day (joined and closed) or kept selling after the offline
+//      close (close refused, day left open).
+//   Also: the queue stays sealed at rest; without business_day.manage the
+//   Open/Close controls are refused, while a sale still opens a day with the
+//   sale permission, as online.
 //
 // Needs: a backend with CAULDRA_OFFLINE_SIGNING_KEY, `playwright` resolvable,
 // psql, and an admin account whose business has one location with a currency.
@@ -66,7 +74,7 @@ async function signIn(page) {
 
 // Online: one location with a warehouse and a product in stock, NO open day,
 // app shell cached, Offline Access provisioned with a PIN.
-async function prepareOnline(page) {
+async function prepareOnline(page, { openDay = false } = {}) {
   await page.goto(BASE + '/', { waitUntil: 'networkidle' });
   await signIn(page);
   const setup = await page.evaluate(async () => {
@@ -85,8 +93,13 @@ async function prepareOnline(page) {
       name = products.find((p) => p.name.startsWith('Offline Day Probe') && p.warehouse === wh.name && p.quantity >= 5)?.name;
     }
     const current = (await j(await fetch(`${API_URL}/sales/current-day?location_id=${loc.id}`, { headers: H }))).b;
-    return { locationId: loc.id, productName: name, created: created.s, openBefore: current.open, token: authToken };
+    return { locationId: loc.id, productName: name, created: created.s, openBefore: current.open, token: authToken, warehouseName: wh.name };
   });
+  if (openDay) {
+    const r = await fetch(`${BASE}/sales/start-business-day?location_id=${setup.locationId}`, { method: 'POST', headers: { Authorization: `Bearer ${setup.token}` } });
+    setup.dayId = (await r.json()).business_day?.id;
+    await page.evaluate(() => loadData());
+  }
   await page.evaluate(async () => { await navigator.serviceWorker.register('/sw.js'); await navigator.serviceWorker.ready; });
   for (let i = 0; i < 4 && !(await page.evaluate(() => !!navigator.serviceWorker.controller)); i++) { await page.reload({ waitUntil: 'networkidle' }); await pause(1500); }
   if (await page.$('#offline-opt-in-dialog[open]')) await page.click('#offline-opt-in-not-now');
@@ -124,6 +137,21 @@ async function sellOffline(page, productName) {
   await pause(800);
 }
 
+async function closeFromDashboard(page, locationId) {
+  await page.evaluate(async (id) => { selectedBusinessDayLocationId = id; showCustomConfirm = async () => true; await loadBusinessDayControl(); await openBusinessDayHeaderClose(); }, locationId);
+  await pause(800);
+}
+
+const q = (v) => `'${String(v).replace(/'/g, "''")}'`;
+const dayRow = (id) => sql(`select is_open, to_char(opened_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'), coalesce(to_char(closed_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') from business_days where id=${Number(id)}`).split('|');
+
+async function sellOnlineAsOtherDevice(s) {
+  const productId = sql(`select id from products where name=${q(s.productName)} order by id desc limit 1`);
+  const r = await fetch(`${BASE}/sales/checkout`, { method: 'POST', headers: { Authorization: `Bearer ${s.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: [{ product_id: Number(productId), quantity: 1, price_mode: 'retail' }], location_id: s.locationId, client_ref: `e2e-b-${Date.now()}` }) });
+  return r.status;
+}
+
 async function reconnect(ctx, page) {
   await ctx.setOffline(false);
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
@@ -154,7 +182,7 @@ async function scenario1() {
   await page.evaluate(() => openBusinessDayHeaderOpen());
   await pause(800);
   const opened = await header(page, s.locationId);
-  check('opened offline: shown open, waiting to sync, no Close button yet', opened.label === 'Business Day Open' && /^Opened offline at .+ · waiting to sync$/.test(opened.sub) && opened.button === null, JSON.stringify(opened));
+  check('opened offline: shown open, waiting to sync, and it can be closed offline', opened.label === 'Business Day Open' && /^Opened offline at .+ · waiting to sync$/.test(opened.sub) && opened.button === 'Close Business Day', JSON.stringify(opened));
   await sellOffline(page, s.productName);
   let rows = await outbox(page);
   const day = rows.find((r) => r.type === 'business_day_open');
@@ -174,18 +202,114 @@ async function scenario1() {
   const sales = rows.filter((r) => r.type === 'sale_checkout');
   check('second sale reuses the same offline day (one day change queued)', rows.filter((r) => r.type === 'business_day_open').length === 1 && sales.length === 2 && sales.every((r) => r.business_day_id === day.local_id), JSON.stringify(rows));
 
-  const openedWhileOffline = Date.now();
+  await closeFromDashboard(page, s.locationId);
+  const closedLocally = await header(page, s.locationId);
+  check('closed offline: shown closed, waiting to sync, Open offered again', closedLocally.label === 'Business Day Closed' && /^Closed offline at .+ · waiting to sync$/.test(closedLocally.sub) && closedLocally.button === 'Open Business Day', JSON.stringify(closedLocally));
+  rows = await outbox(page);
+  const close = rows.find((r) => r.type === 'business_day_close');
+  check('the close waits for the day\'s open and both sales', !!close && close.business_day_id === day.local_id && [day.op_id, ...sales.map((r) => r.op_id)].every((id) => close.depends_on_op_ids.includes(id)), JSON.stringify(close));
+
+  await ctx.close();
+  ({ ctx, page } = await launch(dir, true));
+  await unlockOffline(page);
+  const closedAfterRestart = await header(page, s.locationId);
+  check('after another offline restart the day is still closed', closedAfterRestart.label === 'Business Day Closed' && /^Closed offline at/.test(closedAfterRestart.sub), JSON.stringify(closedAfterRestart));
+  const raw2 = await page.evaluate(() => new Promise((resolve) => { const req = indexedDB.open('cauldra_offline'); req.onsuccess = () => { const all = req.result.transaction('secure_outbox').objectStore('secure_outbox').getAll(); all.onsuccess = () => resolve(all.result); }; }));
+  check('open, sales and close are all still queued and sealed at rest', raw2.length === 4 && raw2.every((r) => r.sealed && !('payload' in r)) && !JSON.stringify(raw2).includes('own_refs') && !JSON.stringify(raw2).includes('location_id'));
+  await sellOffline(page, s.productName);
+  rows = await outbox(page);
+  const day2 = rows.find((r) => r.type === 'business_day_open' && r.op_id !== day.op_id);
+  const sale3 = rows.find((r) => r.type === 'sale_checkout' && !sales.some((x) => x.op_id === r.op_id));
+  check('no new sale attaches to the closed day: it opens a new day that waits for the close', !!day2 && day2.depends_on_op_ids.includes(close.op_id) && sale3?.business_day_id === day2.local_id && sale3.business_day_id !== day.local_id, JSON.stringify(rows));
+
+  const reconnectAt = Date.now();
   const synced = await reconnect(ctx, page);
-  check('reconnect: day and both sales synchronized', synced.length === 0, JSON.stringify(synced));
-  const days = openDays(s.locationId);
-  check('exactly one open day at the location', days.length === 1, days.join(','));
-  check('both offline sales belong to that day', JSON.stringify(salesFor(sales.map((r) => r.op_id))) === JSON.stringify(days), `${salesFor(sales.map((r) => r.op_id))} vs ${days}`);
-  const openedAt = Date.parse(sql(`select to_char(opened_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') from business_days where id=${days[0]}`));
-  check('the day keeps the time it was opened offline, not the sync time', openedAt < openedWhileOffline - 1000, `${new Date(openedAt).toISOString()} vs reconnect ${new Date(openedWhileOffline).toISOString()}`);
-  const audit = sql(`select metadata_json from audit_logs where business_day_id=${days[0]} and action='BUSINESS_DAY_STARTED'`);
-  check('audit records a deliberate open made offline', /"offline": true/.test(audit) && /"auto": false/.test(audit), audit);
+  check('reconnect: open, sales, close and the next day all synchronized', synced.length === 0, JSON.stringify(synced));
+  const [firstDay] = salesFor(sales.map((r) => r.op_id));
+  check('both earlier sales belong to one day', salesFor(sales.map((r) => r.op_id)).length === 1, salesFor(sales.map((r) => r.op_id)).join(','));
+  const [isOpen1, opened1, closed1] = dayRow(firstDay);
+  check('that day is closed, keeping the offline open and close times', isOpen1 === 'f' && Date.parse(opened1) < Date.parse(closed1) && Date.parse(closed1) < reconnectAt - 1000, `${opened1} ${closed1}`);
+  const [secondDay] = salesFor([sale3.op_id]);
+  const [isOpen2, opened2] = dayRow(secondDay);
+  check('the later sale is in a second day, opened after the first closed', secondDay !== firstDay && isOpen2 === 't' && Date.parse(opened2) >= Date.parse(closed1), `${closed1} -> ${opened2}`);
+  check('exactly one open day at the location', JSON.stringify(openDays(s.locationId)) === JSON.stringify([secondDay]), openDays(s.locationId).join(','));
+  const closeAudit = sql(`select metadata_json from audit_logs where business_day_id=${firstDay} and action='BUSINESS_DAY_CLOSED'`);
+  check('audit: deliberate open, offline close, auto-opened second day', /"offline": true/.test(closeAudit)
+    && /"auto": false/.test(sql(`select metadata_json from audit_logs where business_day_id=${firstDay} and action='BUSINESS_DAY_STARTED'`))
+    && sql(`select count(*) from audit_logs where business_day_id=${secondDay} and action='BUSINESS_DAY_AUTO_OPENED'`) === '1', closeAudit.slice(0, 200));
   const online = await header(page, s.locationId);
-  check('after sync the Dashboard shows the server day with its Close control', online.label === 'Business Day Open' && online.button === 'Close Business Day' && !/waiting to sync/.test(online.sub), JSON.stringify(online));
+  check('after sync the Dashboard shows the second day from the server', online.label === 'Business Day Open' && online.button === 'Close Business Day' && !/waiting to sync/.test(online.sub), JSON.stringify(online));
+  await fetch(`${BASE}/sales/end-business-day?location_id=${s.locationId}`, { method: 'POST', headers: { Authorization: `Bearer ${s.token}` } });
+  await ctx.close();
+}
+
+async function scenarioSyncedDayClose() {
+  console.log('\n# 5. a synchronized day is closed offline');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cauldra-bd5-'));
+  const { ctx, page } = await launch(dir, false);
+  const s = await prepareOnline(page, { openDay: true });
+  await ctx.setOffline(true);
+  await unlockOffline(page);
+  const shown = await header(page, s.locationId);
+  check('offline, the synchronized day is open and can be closed', shown.label === 'Business Day Open' && shown.button === 'Close Business Day', JSON.stringify(shown));
+  await sellOffline(page, s.productName);
+  await closeFromDashboard(page, s.locationId);
+  const rows = await outbox(page);
+  const sale = rows.find((r) => r.type === 'sale_checkout'), close = rows.find((r) => r.type === 'business_day_close');
+  check('sale and close go to the synchronized day; the close waits for the sale', sale?.business_day_id === s.dayId && close?.business_day_id === s.dayId && close.depends_on_op_ids.includes(sale.op_id), JSON.stringify(rows));
+  const reconnectAt = Date.now();
+  const synced = await reconnect(ctx, page);
+  const [isOpen, , closedAt] = dayRow(s.dayId);
+  check('reconnect: the day is closed at the offline close time, with its sale', synced.length === 0 && isOpen === 'f' && Date.parse(closedAt) < reconnectAt - 1000 && JSON.stringify(salesFor([sale.op_id])) === JSON.stringify([String(s.dayId)]), `${JSON.stringify(synced)} ${closedAt}`);
+  await ctx.close();
+}
+
+async function scenarioServerClosedFirst() {
+  console.log('\n# 6. the day is closed on the server before this device reconnects');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cauldra-bd6-'));
+  const { ctx, page } = await launch(dir, false);
+  const s = await prepareOnline(page, { openDay: true });
+  await ctx.setOffline(true);
+  await unlockOffline(page);
+  await sellOffline(page, s.productName);
+  await closeFromDashboard(page, s.locationId);
+  await fetch(`${BASE}/sales/end-business-day?location_id=${s.locationId}`, { method: 'POST', headers: { Authorization: `Bearer ${s.token}` } });
+  const [, , serverClosed] = dayRow(s.dayId);
+  const rows = await reconnect(ctx, page);
+  const sale = rows.find((r) => r.type === 'sale_checkout'), close = rows.find((r) => r.type === 'business_day_close');
+  check('the pending sale is kept with its own reason (day closed)', sale?.status === 'conflict' && sale.conflict_code === 'BUSINESS_DAY_CLOSED', JSON.stringify(sale));
+  check('the offline close is held, not sent over unresolved work', close?.status === 'conflict' && close.conflict_code === 'BUSINESS_DAY_CONFLICT' && /needs review first/.test(close.last_error), JSON.stringify(close));
+  const [isOpen, , closedNow] = dayRow(s.dayId);
+  check('the server day is untouched: closed once, at the other device\'s time', isOpen === 'f' && closedNow === serverClosed && salesFor([sale.op_id]).length === 0, `${serverClosed} ${closedNow}`);
+  for (const r of rows) await page.evaluate((id) => window.CauldraOffline.removeOutbox(id), r.op_id);
+  await ctx.close();
+}
+
+async function scenarioJoinedAndClosed(otherDeviceKeepsSelling) {
+  console.log(`\n# 7. another device opened today's day; this one closes it offline${otherDeviceKeepsSelling ? ', but the other device keeps selling' : ''}`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cauldra-bd7-'));
+  const { ctx, page } = await launch(dir, false);
+  const s = await prepareOnline(page);
+  await ctx.setOffline(true);
+  await unlockOffline(page);
+  await header(page, s.locationId);
+  await sellOffline(page, s.productName);
+  await closeFromDashboard(page, s.locationId);
+  const queued = await outbox(page);
+  const other = await (await fetch(`${BASE}/sales/start-business-day?location_id=${s.locationId}`, { method: 'POST', headers: { Authorization: `Bearer ${s.token}` } })).json();
+  const otherDay = String(other.business_day.id);
+  if (otherDeviceKeepsSelling) check('device B sells in its day after A closed offline', (await sellOnlineAsOtherDevice(s)) === 200);
+  const rows = await reconnect(ctx, page);
+  const mySales = queued.filter((r) => r.type === 'sale_checkout').map((r) => r.op_id);
+  check('A\'s sale joined B\'s day (never a second day)', JSON.stringify(salesFor(mySales)) === JSON.stringify([otherDay]) && sql(`select count(*) from business_days where location_id=${s.locationId} and id > ${Number(otherDay)}`) === '0');
+  if (otherDeviceKeepsSelling) {
+    const close = rows.find((r) => r.type === 'business_day_close');
+    check('A\'s close is refused and held; the day stays open for B', close?.status === 'conflict' && close.conflict_code === 'BUSINESS_DAY_CONFLICT' && /after it was closed offline/.test(close.last_error) && dayRow(otherDay)[0] === 't', JSON.stringify(close));
+    for (const r of rows) await page.evaluate((id) => window.CauldraOffline.removeOutbox(id), r.op_id);
+    await fetch(`${BASE}/sales/end-business-day?location_id=${s.locationId}`, { method: 'POST', headers: { Authorization: `Bearer ${s.token}` } });
+  } else {
+    check('with no later work by B, A\'s offline close closes that day', rows.length === 0 && dayRow(otherDay)[0] === 'f' && openDays(s.locationId).length === 0, JSON.stringify(rows));
+  }
   await ctx.close();
 }
 
@@ -278,11 +402,21 @@ async function scenarioDenied() {
   check('a user without business_day.manage cannot open a day offline', /Ask someone who can open the Business Day/.test(result.error || '') && result.queued === 0, JSON.stringify(result));
   const hidden = await header(page, s.locationId);
   check('and the Dashboard does not offer the button', hidden.button === null, JSON.stringify(hidden));
+  await sellOffline(page, s.productName);
+  const rows = await outbox(page);
+  check('matches online: a sale still opens a day with the sale permission', rows.some((r) => r.type === 'business_day_open') && rows.some((r) => r.type === 'sale_checkout'), JSON.stringify(rows));
+  const closeResult = await page.evaluate(async (id) => { try { await closeBusinessDayOffline(id); return null; } catch (e) { return e.message; } }, s.locationId);
+  const afterSale = await header(page, s.locationId);
+  check('without business_day.manage the day cannot be closed offline, and no Close is offered', /do not have permission to close/.test(closeResult || '') && afterSale.button === null && (await outbox(page)).every((r) => r.type !== 'business_day_close'), `${closeResult} ${JSON.stringify(afterSale)}`);
+  for (const r of rows) await page.evaluate((id) => window.CauldraOffline.removeOutbox(id), r.op_id);
   await ctx.close();
 }
 
 (async () => {
-  for (const run of [scenario1, scenario2, scenario3, scenarioDenied]) {
+  const only = process.env.CAULDRA_E2E_ONLY;
+  const runs = [scenario1, scenario2, scenario3, scenarioSyncedDayClose, scenarioServerClosedFirst,
+    function scenarioJoinedClosed() { return scenarioJoinedAndClosed(false); }, function scenarioJoinedOtherKeepsSelling() { return scenarioJoinedAndClosed(true); }, scenarioDenied];
+  for (const run of runs.filter((r) => !only || only.split(',').includes(r.name))) {
     try { await run(); } catch (e) { check(`${run.name} completed`, false, e.stack); }
   }
   console.log(failures ? `\n${failures} FAILED` : '\nALL PASS');

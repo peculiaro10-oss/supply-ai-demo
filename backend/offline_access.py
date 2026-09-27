@@ -370,12 +370,11 @@ def install(g):
                  "business_day_open": "business_day.manage", "business_day_close": "business_day.manage"}
         if op.type not in rules:
             failure("ONLINE_ONLY", "This operation requires an online workflow.", 400)
-        required = rules[op.type]
         if op.type == "business_day_open" and payload.get("auto"):
             # Same as online: a sale or expense that finds no open day opens
             # one with the permission that sale/expense itself needs.
-            required = {"sale": "sales.create", "expense": "expenses.record"}.get(payload.get("trigger"), required)
-        g["require_permission"](user, required)
+            rules["business_day_open"] = {"sale": "sales.create", "expense": "expenses.record"}.get(payload.get("trigger"), rules["business_day_open"])
+        g["require_permission"](user, rules[op.type])
         if op.type in ("sale_checkout", "expense_create"):
             day = db.query(g["BusinessDay"]).filter_by(id=payload.get("business_day_id"),
                 business_id=user.business_id, location_id=payload.get("location_id")).with_for_update().first()
