@@ -2344,6 +2344,14 @@ def subscription_access_state(sub: Optional["BusinessSubscription"], now: Option
         return status, None
     return status, SUBSCRIPTION_BLOCKED_MESSAGES.get(status, SUBSCRIPTION_BLOCKED_FALLBACK)
 
+def effective_subscription_status(sub: Optional["BusinessSubscription"], now: Optional[datetime] = None) -> Optional[str]:
+    """TRIAL-EXPIRY-001: the status enforcement would apply right now. The stored
+    status only moves (refresh_subscription_status) when the business itself makes
+    a signed-in request, so a business nobody returns to keeps "trialing" in the
+    table after its trial ended. Anything reporting on OTHER businesses (Cauldra
+    Ops) reads this instead of the stored column. Never writes."""
+    return subscription_access_state(sub, now)[0]
+
 
 # Strict plan ordering used ONLY to decide whether a requested plan change is
 # a genuine upgrade (see /subscription/upgrade-quote). A billing-interval
@@ -17670,7 +17678,11 @@ def platform_overview(owner: PlatformOwner = Depends(get_platform_owner), db: Se
     revenue_month_kobo = _revenue_base_query(db, month_start, now).with_entities(func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
 
     paying_businesses = db.query(func.count(func.distinct(BusinessSubscription.business_id))).filter(BusinessSubscription.status == "active").scalar() or 0
-    trial_businesses = db.query(func.count(BusinessSubscription.id)).filter(BusinessSubscription.status == "trialing").scalar() or 0
+    # TRIAL-EXPIRY-001: a stored "trialing" row whose trial has ended is expired.
+    trial_businesses = db.query(func.count(BusinessSubscription.id)).filter(
+        BusinessSubscription.status == "trialing",
+        or_(BusinessSubscription.trial_end_at.is_(None), BusinessSubscription.trial_end_at > now),
+    ).scalar() or 0
 
     unresolved_alerts = db.query(func.count(PlatformAlert.id)).filter(PlatformAlert.acknowledged_at.is_(None)).scalar() or 0
     critical_alerts = db.query(func.count(PlatformAlert.id)).filter(PlatformAlert.acknowledged_at.is_(None), PlatformAlert.severity == "critical").scalar() or 0
@@ -17726,16 +17738,20 @@ def platform_businesses(
     subs = {s.business_id: s for s in db.query(BusinessSubscription).filter(BusinessSubscription.business_id.in_(biz_ids)).all()} if biz_ids else {}
 
     items = []
+    now = datetime.utcnow()
     for b in rows:
         sub = subs.get(b.id)
         cost_usd = cost_rows.get(b.id, 0.0)
+        # TRIAL-EXPIRY-001: the status access enforcement applies now, not the
+        # stored column (only updated when the business itself makes a request).
+        status = effective_subscription_status(sub, now)
         items.append({
             "id": b.id, "business_code": b.business_code, "company_name": b.company_name,
             "joined_at": to_utc_iso(b.trial_started_at),
             "plan": (sub.plan if sub else b.subscription_plan) or "starter",
             "plan_label": plan_label_for((sub.plan if sub else b.subscription_plan) or "starter"),
-            "subscription_status": sub.status if sub else None,
-            "is_trial": bool(sub and sub.status == "trialing"),
+            "subscription_status": status,
+            "is_trial": status == "trialing",
             "user_count": int(user_counts.get(b.id, 0)),
             "last_active_at": to_utc_iso(last_active_rows.get(b.id)),
             "lifetime_revenue_naira": round(revenue_rows.get(b.id, 0) / 100, 2),
@@ -17769,7 +17785,7 @@ def platform_business_detail(business_id: int, owner: PlatformOwner = Depends(ge
         "joined_at": to_utc_iso(biz.trial_started_at),
         "plan": (sub.plan if sub else biz.subscription_plan),
         "plan_label": plan_label_for(sub.plan if sub else biz.subscription_plan),
-        "subscription_status": sub.status if sub else None,
+        "subscription_status": effective_subscription_status(sub),  # TRIAL-EXPIRY-001
         "billing_interval": (sub.billing_interval if sub else biz.billing_interval),
         "trial_end_at": to_utc_iso(sub.trial_end_at) if sub else None,
         "current_period_end": to_utc_iso(sub.current_period_end) if sub else None,
@@ -17844,7 +17860,13 @@ def platform_subscriptions(owner: PlatformOwner = Depends(get_platform_owner), d
     """Uses Cauldra's OWN existing subscription states (BusinessSubscription.status)
     and plan ids (PLAN_CONFIG) - grouped straight from the database, never a
     separately invented status list."""
-    by_status = dict(db.query(BusinessSubscription.status, func.count(BusinessSubscription.id)).group_by(BusinessSubscription.status).all())
+    # TRIAL-EXPIRY-001: counted by the status enforcement applies now (a stored
+    # "trialing" row whose trial ended is expired), not the stored column.
+    by_status: Dict[str, int] = {}
+    now = datetime.utcnow()
+    for sub in db.query(BusinessSubscription).all():
+        status = effective_subscription_status(sub, now)
+        by_status[status] = by_status.get(status, 0) + 1
     by_plan = dict(db.query(BusinessSubscription.plan, func.count(BusinessSubscription.id)).group_by(BusinessSubscription.plan).all())
     total = db.query(func.count(BusinessSubscription.id)).scalar() or 0
     return {"total": total, "by_status": by_status, "by_plan": by_plan}
