@@ -11938,5 +11938,131 @@
   "El día comercial cerrado sin conexión ya no existe en esta ubicación.",
   "لم يعد يوم العمل الذي أُغلق دون اتصال موجودًا في هذا الموقع.",
   "O dia comercial fechado offline não existe mais neste local."
+ ],
+ "Needs attention": [
+  "Action requise",
+  "Requiere atención",
+  "يحتاج إلى مراجعة",
+  "Requer atenção"
+ ],
+ "Waiting to sync": [
+  "En attente de synchronisation",
+  "Esperando sincronización",
+  "في انتظار المزامنة",
+  "Aguardando sincronização"
+ ],
+ "Refund pending": [
+  "Remboursement en attente",
+  "Reembolso pendiente",
+  "الاسترداد قيد الانتظار",
+  "Reembolso pendente"
+ ],
+ "Transfer pending": [
+  "Transfert en attente",
+  "Transferencia pendiente",
+  "التحويل قيد الانتظار",
+  "Transferência pendente"
+ ],
+ "Adjustment pending": [
+  "Ajustement en attente",
+  "Ajuste pendiente",
+  "التعديل قيد الانتظار",
+  "Ajuste pendente"
+ ],
+ "Stock adjustment saved offline. It is pending until it syncs.": [
+  "Ajustement de stock enregistré hors ligne. Il reste en attente jusqu'à la synchronisation.",
+  "Ajuste de inventario guardado sin conexión. Queda pendiente hasta que se sincronice.",
+  "تم حفظ تعديل المخزون دون اتصال. يبقى قيد الانتظار حتى تتم المزامنة.",
+  "Ajuste de estoque salvo offline. Fica pendente até sincronizar."
+ ],
+ "Transfer pending: saved offline. It will be applied when it syncs.": [
+  "Transfert en attente : enregistré hors ligne. Il sera appliqué lors de la synchronisation.",
+  "Transferencia pendiente: guardada sin conexión. Se aplicará cuando se sincronice.",
+  "التحويل قيد الانتظار: تم حفظه دون اتصال. سيُطبَّق عند المزامنة.",
+  "Transferência pendente: salva offline. Será aplicada ao sincronizar."
+ ],
+ "Refund pending: saved offline. It is not complete until it syncs.": [
+  "Remboursement en attente : enregistré hors ligne. Il n'est pas terminé avant la synchronisation.",
+  "Reembolso pendiente: guardado sin conexión. No se completa hasta que se sincronice.",
+  "الاسترداد قيد الانتظار: تم حفظه دون اتصال. لا يكتمل حتى تتم المزامنة.",
+  "Reembolso pendente: salvo offline. Não está concluído até sincronizar."
+ ],
+ "You do not have permission to adjust stock.": [
+  "Vous n'avez pas l'autorisation d'ajuster le stock.",
+  "No tienes permiso para ajustar el inventario.",
+  "ليس لديك إذن بتعديل المخزون.",
+  "Você não tem permissão para ajustar o estoque."
+ ],
+ "You do not have permission to transfer stock.": [
+  "Vous n'avez pas l'autorisation de transférer du stock.",
+  "No tienes permiso para transferir inventario.",
+  "ليس لديك إذن بتحويل المخزون.",
+  "Você não tem permissão para transferir estoque."
+ ],
+ "You do not have permission to refund sales.": [
+  "Vous n'avez pas l'autorisation de rembourser des ventes.",
+  "No tienes permiso para reembolsar ventas.",
+  "ليس لديك إذن باسترداد المبيعات.",
+  "Você não tem permissão para reembolsar vendas."
+ ],
+ "This product is not in the offline catalogue on this device.": [
+  "Ce produit ne figure pas dans le catalogue hors ligne de cet appareil.",
+  "Este producto no está en el catálogo sin conexión de este dispositivo.",
+  "هذا المنتج غير موجود في الكتالوج غير المتصل على هذا الجهاز.",
+  "Este produto não está no catálogo offline deste dispositivo."
+ ],
+ "This product's warehouse is not synchronized to this device.": [
+  "L'entrepôt de ce produit n'est pas synchronisé sur cet appareil.",
+  "El almacén de este producto no está sincronizado en este dispositivo.",
+  "مستودع هذا المنتج غير متزامن مع هذا الجهاز.",
+  "O depósito deste produto não está sincronizado neste dispositivo."
+ ],
+ "Both warehouses must be synchronized to this device before a transfer can be saved offline.": [
+  "Les deux entrepôts doivent être synchronisés sur cet appareil avant d'enregistrer un transfert hors ligne.",
+  "Ambos almacenes deben estar sincronizados en este dispositivo antes de guardar una transferencia sin conexión.",
+  "يجب مزامنة المستودعين مع هذا الجهاز قبل حفظ تحويل دون اتصال.",
+  "Os dois depósitos precisam estar sincronizados neste dispositivo antes de salvar uma transferência offline."
+ ],
+ "Only {count} are recorded in {warehouse} on this device.": [
+  "Seulement {count} enregistré(s) dans {warehouse} sur cet appareil.",
+  "Solo hay {count} registrados en {warehouse} en este dispositivo.",
+  "المسجل في {warehouse} على هذا الجهاز {count} فقط.",
+  "Apenas {count} registrados em {warehouse} neste dispositivo."
+ ],
+ "This product hasn't finished syncing yet. Please try again in a moment.": [
+  "Ce produit n'est pas encore synchronisé. Réessayez dans un instant.",
+  "Este producto aún no ha terminado de sincronizarse. Inténtalo de nuevo en un momento.",
+  "لم تكتمل مزامنة هذا المنتج بعد. يرجى المحاولة بعد قليل.",
+  "Este produto ainda não terminou de sincronizar. Tente novamente em instantes."
+ ],
+ "This sale is not available offline on this device. Connect to the internet to refund it.": [
+  "Cette vente n'est pas disponible hors ligne sur cet appareil. Connectez-vous à Internet pour la rembourser.",
+  "Esta venta no está disponible sin conexión en este dispositivo. Conéctate a internet para reembolsarla.",
+  "هذه العملية غير متاحة دون اتصال على هذا الجهاز. اتصل بالإنترنت لاستردادها.",
+  "Esta venda não está disponível offline neste dispositivo. Conecte-se à internet para reembolsá-la."
+ ],
+ "The sale this refund is for needs attention in Sync Details, so it cannot be refunded yet.": [
+  "La vente concernée par ce remboursement requiert une action dans Détails de synchronisation ; elle ne peut pas encore être remboursée.",
+  "La venta de este reembolso requiere atención en Detalles de sincronización, así que aún no se puede reembolsar.",
+  "عملية البيع الخاصة بهذا الاسترداد تحتاج إلى مراجعة في تفاصيل المزامنة، لذا لا يمكن استردادها بعد.",
+  "A venda deste reembolso requer atenção em Detalhes de sincronização, então ainda não pode ser reembolsada."
+ ],
+ "No sales from this Business Day are available offline on this device. Sales not shown here need the internet to refund.": [
+  "Aucune vente de cette journée commerciale n'est disponible hors ligne sur cet appareil. Les ventes non affichées ici nécessitent Internet pour être remboursées.",
+  "No hay ventas de esta jornada disponibles sin conexión en este dispositivo. Las ventas que no aparecen aquí necesitan internet para reembolsarse.",
+  "لا توجد مبيعات من يوم العمل هذا متاحة دون اتصال على هذا الجهاز. المبيعات غير الظاهرة هنا تحتاج إلى الإنترنت لاستردادها.",
+  "Nenhuma venda deste dia comercial está disponível offline neste dispositivo. Vendas não mostradas aqui precisam da internet para reembolso."
+ ],
+ "The sale this refund is for could not be synchronized, so the refund was not sent: {reason}": [
+  "La vente concernée par ce remboursement n'a pas pu être synchronisée ; le remboursement n'a donc pas été envoyé : {reason}",
+  "La venta de este reembolso no se pudo sincronizar, así que el reembolso no se envió: {reason}",
+  "تعذرت مزامنة عملية البيع الخاصة بهذا الاسترداد، لذا لم يُرسل الاسترداد: {reason}",
+  "A venda deste reembolso não pôde ser sincronizada, então o reembolso não foi enviado: {reason}"
+ ],
+ "Part or all of this sale was already refunded elsewhere, so this refund was not applied. Check the sale online.": [
+  "Tout ou partie de cette vente a déjà été remboursé ailleurs ; ce remboursement n'a donc pas été appliqué. Vérifiez la vente en ligne.",
+  "Parte o toda esta venta ya se reembolsó en otro lugar, así que este reembolso no se aplicó. Revisa la venta en línea.",
+  "تم استرداد جزء من هذه العملية أو كلها في مكان آخر، لذا لم يُطبَّق هذا الاسترداد. تحقق من العملية عبر الإنترنت.",
+  "Parte ou toda esta venda já foi reembolsada em outro lugar, então este reembolso não foi aplicado. Verifique a venda online."
  ]
 }

@@ -332,7 +332,7 @@
         // synchronized (resolveOutboxDependenciesOnBusinessDaySynced), and a
         // refused day change holds whatever depends on it with a reason
         // (holdForRefusedDependency) - nothing is dropped or re-pointed.
-        const BUSINESS_DAY_WORK_TYPES = ["sale_checkout", "expense_create"];
+        const BUSINESS_DAY_WORK_TYPES = ["sale_checkout", "expense_create", "sale_refund"];
 
         async function pendingOfflineBusinessDays() {
             return (await getOutboxForCurrentBusiness())
@@ -371,7 +371,7 @@
             if (!locationId) throw new Error("Choose a synchronized location before opening a Business Day offline.");
             const existing = await findOfflineOpenBusinessDay(locationId);
             if (existing) return existing;
-            const needed = auto ? ({ sale: "sales.create", expense: "expenses.record" }[trigger]) : "business_day.manage";
+            const needed = auto ? ({ sale: "sales.create", expense: "expenses.record", refund: "sales.refund" }[trigger]) : "business_day.manage";
             if (!needed || !hasPermission(needed)) throw new Error("No Business Day is open for this location. Ask someone who can open the Business Day to start it.");
             const opId = generateOpId();
             const localId = -Date.now();
@@ -442,6 +442,7 @@
             if (dep.type === "business_day_open") return `The Business Day this change was recorded in could not be synchronized: ${reason}`;
             if (dep.type === "business_day_close") return `The previous Business Day at this location could not be closed on the server: ${reason}`;
             if (op.type === "business_day_close") return `This Business Day was closed offline, but a change recorded in it needs review first, so the day was not closed on the server: ${reason}`;
+            if (op.type === "sale_refund" && dep.type === "sale_checkout") return `The sale this refund is for could not be synchronized, so the refund was not sent: ${reason}`;
             return null;
         }
 
@@ -456,6 +457,222 @@
             for (const dependent of await getOutboxForCurrentBusiness()) {
                 if ((dependent.depends_on_op_ids || []).includes(dayOp.op_id)) await holdForRefusedDependency(dependent, dayOp);
             }
+        }
+
+        // ---- Stock and refunds offline (OFFLINE-STOCK-REFUND-001, G1/G2) ----
+        // Each is a sealed outbox change carrying its real local time.
+        //   stock_adjust   - a +/- DELTA on one warehouse, as online; the
+        //                    server applies it on top of other devices' work
+        //                    and refuses it (nothing changed) below zero;
+        //   stock_transfer - both warehouse rows move on the server in one
+        //                    transaction, or neither does;
+        //   sale_refund    - only a pending REQUEST until the server records
+        //                    it. Sale refunds are internal to Cauldra (no
+        //                    payment provider), the server rechecks what is
+        //                    still refundable, and stock is put back only by
+        //                    the server, never on this device beforehand.
+        // Stock changes update this device's cached stock at once, like an
+        // offline sale, so the same units cannot be sold or moved twice here.
+        // Offline is used only when this device is already offline, never
+        // after a request that may have reached the server.
+        function offlineWorkspaceActive() {
+            return !!(window.CauldraOffline?.isUnlocked() && ((offlineWorkspaceUnlocked && !authToken) || !navigator.onLine));
+        }
+
+        function primaryWarehouseFor(product) {
+            return (product.warehouse_id != null && warehouseRecords.find((w) => Number(w.id) === Number(product.warehouse_id)))
+                || warehouseRecords.find((w) => w.name === product.warehouse) || null;
+        }
+
+        async function productCreateDependency(productId) {
+            if (Number(productId) >= 0) return [];
+            const dep = (await getOutboxForCurrentBusiness()).find((op) => op.type === "product_create" && Number(op.meta?.local_id) === Number(productId));
+            if (!dep) throw new Error("This product hasn't finished syncing yet. Please try again in a moment.");
+            return [dep.op_id];
+        }
+
+        async function queueStockChange(type, endpoint, payload, label, nextStocks) {
+            const productId = payload.product_id;
+            const nextProducts = globalProducts.map((product) => ({ ...product }));
+            const product = nextProducts.find((row) => Number(row.id) === Number(productId));
+            if (product) product.quantity = nextStocks.filter((row) => Number(row.product_id) === Number(productId)).reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+            const opId = generateOpId();
+            await addOutboxOp({
+                op_id: opId, business_id: currentBusinessId(), user_id: currentUserProfile?.id || null,
+                auth_version: currentUserProfile?.auth_version ?? null,
+                type, endpoint, method: "PATCH", payload, client_ref: opId, meta: {},
+                depends_on_op_ids: await productCreateDependency(productId),
+                label, captured_at: new Date().toISOString(),
+                status: "pending", attempts: 0, next_retry_at: 0, created_at: Date.now(), last_error: null,
+            }, [{ kind: "products", value: nextProducts }, { kind: "warehouse_stocks", value: nextStocks }]);
+            globalProducts = nextProducts;
+            offlineWarehouseStocks = nextStocks;
+            updateDashboardMetrics();
+            refreshInventoryViewFromLocalState();
+        }
+
+        async function adjustStockOffline(productId, change) {
+            if (!hasPermission("inventory.adjust_stock")) throw new Error("You do not have permission to adjust stock.");
+            const product = globalProducts.find((row) => Number(row.id) === Number(productId));
+            if (!product) throw new Error("This product is not in the offline catalogue on this device.");
+            const warehouse = primaryWarehouseFor(product);
+            if (!warehouse) throw new Error("This product's warehouse is not synchronized to this device.");
+            const nextStocks = offlineWarehouseStocks.map((row) => ({ ...row }));
+            let row = nextStocks.find((r) => Number(r.product_id) === Number(productId) && Number(r.warehouse_id) === Number(warehouse.id));
+            const before = Number(row?.quantity || 0);
+            if (before + change < 0) throw new Error(`Stock in ${warehouse.name} cannot become negative.`);
+            if (!row) { row = { product_id: Number(productId), warehouse_id: warehouse.id, quantity: 0 }; nextStocks.push(row); }
+            row.quantity = before + change;
+            await queueStockChange("stock_adjust", `/products/${productId}/stock`,
+                { product_id: Number(productId), warehouse_id: warehouse.id, quantity_change: change, reason: change > 0 ? "RESTOCK" : "ADJUSTMENT", base_quantity: before },
+                `Stock adjustment: ${product.name} ${change > 0 ? "+" : ""}${change} (${warehouse.name})`, nextStocks);
+        }
+
+        async function transferStockOffline(productId, fromName, toName, quantity) {
+            if (!hasPermission("inventory.transfer_stock")) throw new Error("You do not have permission to transfer stock.");
+            const product = globalProducts.find((row) => Number(row.id) === Number(productId));
+            if (!product) throw new Error("This product is not in the offline catalogue on this device.");
+            const from = warehouseRecords.find((w) => w.name === fromName), to = warehouseRecords.find((w) => w.name === toName);
+            if (!from || !to) throw new Error("Both warehouses must be synchronized to this device before a transfer can be saved offline.");
+            const nextStocks = offlineWarehouseStocks.map((row) => ({ ...row }));
+            const source = nextStocks.find((r) => Number(r.product_id) === Number(productId) && Number(r.warehouse_id) === Number(from.id));
+            const available = Number(source?.quantity || 0);
+            if (available < quantity) throw new Error(`Only ${available} are recorded in ${from.name} on this device.`);
+            let target = nextStocks.find((r) => Number(r.product_id) === Number(productId) && Number(r.warehouse_id) === Number(to.id));
+            if (!target) { target = { product_id: Number(productId), warehouse_id: to.id, quantity: 0 }; nextStocks.push(target); }
+            source.quantity = available - quantity;
+            target.quantity = Number(target.quantity || 0) + quantity;
+            await queueStockChange("stock_transfer", `/products/${productId}/transfer`,
+                { product_id: Number(productId), from_warehouse_id: from.id, to_warehouse_id: to.id, quantity },
+                `Stock transfer: ${quantity} × ${product.name}, ${from.name} → ${to.name}`, nextStocks);
+        }
+
+        // Refundable sales this device can trust offline: recent synchronized
+        // sales from the sealed snapshot (with what the server said was still
+        // refundable), plus sales recorded offline on this device. A sale in
+        // neither needs the internet. Refunds already queued here are taken
+        // off, so the same units cannot be refunded twice on this device.
+        // Lines of a sale recorded offline are addressed by cart position
+        // (the server stores one line per cart item, in order); in the modal
+        // they carry negative keys (-1 = first line).
+        // A cached server line's cart position is its rank by sale id (one row
+        // per cart item, inserted in cart order), so a refund queued against a
+        // sale while it was still local matches the same line afterwards.
+        function withCartPositions(items) {
+            const order = items.map((item) => Number(item.sale_id)).sort((a, b) => a - b);
+            return items.map((item) => ({ ...item, item_index: Number(item.sale_id) > 0 ? order.indexOf(Number(item.sale_id)) : item.item_index }));
+        }
+
+        function refundLineMatches(item, line) {
+            return line.sale_id != null ? Number(item.sale_id) === Number(line.sale_id) : item.item_index === line.item_index;
+        }
+
+        async function offlineRefundableTransactions() {
+            const snapshot = window.CauldraOffline?.currentSnapshot?.() || {};
+            const outbox = await getOutboxForCurrentBusiness();
+            const byKey = new Map();
+            for (const txn of snapshot.refundable_sales || []) {
+                if (txn.location_id == null) continue; // legacy sale: its location is unknown, refund it online
+                byKey.set(txn.transaction_key, { ...txn, items: withCartPositions(txn.items), sale_op: null });
+            }
+            for (const receipt of snapshot.sales || []) {
+                if (!receipt?.client_ref || byKey.has(receipt.client_ref)) continue;
+                const saleOp = outbox.find((op) => op.op_id === receipt.client_ref) || null;
+                const items = (receipt.items || []).map((item, index) => {
+                    const refunded = Number(item.refunded_quantity || 0);
+                    return { sale_id: -(index + 1), item_index: index, product_id: item.product_id,
+                        product_name: globalProducts.find((p) => Number(p.id) === Number(item.product_id))?.name || item.product_name || "Item",
+                        quantity: Number(item.quantity), unit_price: Number(item.unit_price || 0), unit_cost_known: true,
+                        refunded_quantity: refunded, available_quantity: Math.max(0, Number(item.quantity) - refunded), product_exists: true };
+                });
+                byKey.set(receipt.client_ref, { transaction_key: receipt.client_ref, timestamp: receipt.occurred_at, business_day_id: receipt.business_day_id,
+                    location_id: receipt.location_id, currency: receipt.currency, items, sale_op: saleOp, local_sale: true });
+            }
+            for (const op of outbox) {
+                if (op.type !== "sale_refund" || op.status === "conflict") continue;
+                const txn = byKey.get(op.payload?.transaction_key);
+                if (!txn) continue;
+                txn.refund_pending = true;
+                for (const line of op.payload.lines || []) {
+                    const item = txn.items.find((i) => refundLineMatches(i, line));
+                    if (item) item.available_quantity = Math.max(0, item.available_quantity - Number(line.quantity || 0));
+                }
+            }
+            return [...byKey.values()].map((txn) => {
+                const original = txn.items.reduce((sum, i) => sum + i.quantity, 0);
+                const refundable = txn.items.reduce((sum, i) => sum + i.available_quantity, 0);
+                const refundedTotal = txn.items.reduce((sum, i) => sum + (i.quantity - i.available_quantity) * i.unit_price, 0);
+                const originalTotal = txn.original_total ?? txn.items.reduce((sum, i) => sum + i.quantity * i.unit_price, 0);
+                return { ...txn, original_total: originalTotal, refunded_total: refundedTotal, net_total: originalTotal - refundedTotal,
+                    status: refundable <= 0 ? "fully_refunded" : refundable === original ? "not_refunded" : "partially_refunded", _offline: true };
+            }).sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
+        }
+
+        function businessDayIdAliases(dayId) {
+            const ids = new Set([Number(dayId)]);
+            for (const day of offlineBusinessDays) {
+                if (Number(day.id) === Number(dayId) && day.local_id != null) ids.add(Number(day.local_id));
+                if (Number(day.local_id) === Number(dayId)) ids.add(Number(day.id));
+            }
+            return ids;
+        }
+
+        async function queueRefundOffline(transactionKey, lines, reason, note) {
+            if (!hasPermission("sales.refund")) throw new Error("You do not have permission to refund sales.");
+            const txn = (await offlineRefundableTransactions()).find((row) => row.transaction_key === transactionKey);
+            if (!txn) throw new Error("This sale is not available offline on this device. Connect to the internet to refund it.");
+            if (txn.sale_op?.status === "conflict") throw new Error("The sale this refund is for needs attention in Sync Details, so it cannot be refunded yet.");
+            const payloadLines = [];
+            for (const line of lines) {
+                const item = txn.items.find((i) => Number(i.sale_id) === Number(line.sale_id));
+                if (!item || line.quantity < 1) throw new Error("Select at least one item and quantity to refund.");
+                if (line.quantity > item.available_quantity) throw new Error(`Only ${item.available_quantity} unit(s) available to refund for ${item.product_name}.`);
+                payloadLines.push({ ...(Number(item.sale_id) > 0 ? { sale_id: item.sale_id } : { item_index: item.item_index }),
+                    product_id: item.product_id, quantity: line.quantity, restock: !!line.restock });
+            }
+            // A refund is recorded in the open day at the ORIGINAL sale's
+            // location, as online; with none open it opens one (as online).
+            const day = await openBusinessDayOffline(txn.location_id, { auto: true, trigger: "refund" });
+            const depends = [];
+            if (day.pending_sync) depends.push(day.op_id);
+            if (txn.sale_op) depends.push(txn.sale_op.op_id);
+            const opId = generateOpId();
+            const units = payloadLines.reduce((sum, l) => sum + l.quantity, 0);
+            await addOutboxOp({
+                op_id: opId, business_id: currentBusinessId(), user_id: currentUserProfile?.id || null,
+                auth_version: currentUserProfile?.auth_version ?? null,
+                type: "sale_refund", endpoint: `/sales/transactions/${transactionKey}/refund`, method: "POST",
+                payload: { transaction_key: transactionKey, lines: payloadLines, reason: reason || null, note: note || null,
+                    business_day_id: day.id, location_id: Number(txn.location_id) },
+                client_ref: opId, meta: {}, depends_on_op_ids: depends,
+                label: `Refund: ${units} item${units === 1 ? "" : "s"} from the sale of ${formatBusinessDateTime(txn.timestamp)}`,
+                captured_at: new Date().toISOString(),
+                status: "pending", attempts: 0, next_retry_at: 0, created_at: Date.now(), last_error: null,
+            });
+        }
+
+        // After the server recorded a refund, this device remembers it in its
+        // sealed data so the refunded units stay unavailable offline.
+        async function rememberSyncedRefund(op, serverData) {
+            const snapshot = window.CauldraOffline?.currentSnapshot?.();
+            if (!snapshot) return;
+            const key = op.payload?.transaction_key;
+            for (const line of op.payload?.lines || []) {
+                const txn = (snapshot.refundable_sales || []).find((t) => t.transaction_key === key);
+                const cached = txn ? withCartPositions(txn.items).map((i, n) => refundLineMatches(i, line) ? txn.items[n] : null).find(Boolean) : null;
+                if (cached) { cached.refunded_quantity += line.quantity; cached.available_quantity = Math.max(0, cached.available_quantity - line.quantity); }
+                const receipt = (snapshot.sales || []).find((r) => r.client_ref === key);
+                const item = line.item_index != null ? receipt?.items?.[line.item_index] : null;
+                if (item) item.refunded_quantity = Number(item.refunded_quantity || 0) + line.quantity;
+            }
+            (serverData?.updated_products || []).forEach((u) => {
+                const idx = globalProducts.findIndex((p) => p.id === u.id);
+                if (idx !== -1) globalProducts[idx].quantity = u.quantity;
+            });
+            try {
+                await window.CauldraOffline.cacheWrite("snapshot", snapshot);
+                if (Array.isArray(snapshot.sales)) await window.CauldraOffline.cacheWrite("sales", snapshot.sales);
+            } catch (_) {}
         }
 
         // ---- Products / Suppliers read cache --------------------------------
@@ -718,6 +935,13 @@
             try {
                 const rows = await getOutboxForCurrentBusiness();
                 for (const dependent of rows) {
+                    if ((dependent.type === "stock_adjust" || dependent.type === "stock_transfer") && Number(dependent.payload?.product_id) === Number(localId)) {
+                        await updateOutboxOp(dependent.op_id, {
+                            payload: { ...dependent.payload, product_id: serverId },
+                            depends_on_op_ids: (dependent.depends_on_op_ids || []).filter((id) => id !== createOpId),
+                        });
+                        continue;
+                    }
                     if (dependent.type !== "sale_checkout") continue;
                     if (!Array.isArray(dependent.payload?.items)) continue;
                     let changed = false;
@@ -748,6 +972,8 @@
                     await resolveOutboxDependenciesOnBusinessDaySynced(op.op_id, op.meta.local_id, serverId);
                     const known = offlineBusinessDays.find((day) => Number(day.id) === Number(serverId));
                     await rememberSyncedBusinessDay({ id: serverId, local_id: op.meta.local_id, location_id: op.payload?.location_id, is_open: known ? known.is_open : true });
+                } else if (op.type === "sale_refund") {
+                    await rememberSyncedRefund(op, serverData);
                 } else if (op.type === "business_day_close" && serverData?.business_day_id) {
                     await rememberSyncedBusinessDay({ id: serverData.business_day_id, location_id: op.payload?.location_id, is_open: false });
                 } else if (op.type === "product_create" && op.meta?.local_id && serverData?.id) {
@@ -24838,6 +25064,13 @@
         async function loadRefundTransactionsList() {
             const list = document.getElementById('refund-transactions-list');
             list.innerHTML = `<div class="text-center py-6 text-textSec">Loading…</div>`;
+            if (offlineWorkspaceActive()) {
+                const ids = businessDayIdAliases(refundTransactionsDayId);
+                const data = (await offlineRefundableTransactions().catch(() => [])).filter((txn) => ids.has(Number(txn.business_day_id)));
+                list.innerHTML = data.length ? data.map(renderRefundTransactionRow).join('')
+                    : `<div class="text-center py-8 text-textSec">No sales from this Business Day are available offline on this device. Sales not shown here need the internet to refund.</div>`;
+                return;
+            }
             try {
                 const res = await fetch(`${API_URL}/sales/transactions?business_day_id=${refundTransactionsDayId}`, { headers: { "Authorization": `Bearer ${authToken}` } });
                 const data = await res.json().catch(() => ([]));
@@ -24863,7 +25096,7 @@
             return `<div class="border border-borderCol rounded-xl p-3 bg-bgMain">
                 <div class="flex items-center justify-between gap-2">
                     <span class="text-textSec">${formatBusinessDateTime(txn.timestamp)}</span>
-                    <span class="font-semibold ${st.cls}">${st.label}</span>
+                    <span class="font-semibold ${st.cls}">${st.label}${txn.refund_pending ? ` · <span class="text-warning">Refund pending</span>` : ""}</span>
                 </div>
                 <div class="text-textMain font-medium mt-1 truncate" title="${escapeHtml(itemsLine)}">${itemsLine}</div>
                 <div class="flex items-center justify-between mt-2">
@@ -24892,6 +25125,16 @@
             document.getElementById('refund-note-input').value = '';
             document.getElementById('refund-reason-select').selectedIndex = 0;
             refundSubmitClientRef = null;
+            if (offlineWorkspaceActive()) {
+                const data = (await offlineRefundableTransactions().catch(() => [])).find((txn) => txn.transaction_key === transactionKey);
+                if (!data) { document.getElementById('refund-modal-lines').innerHTML = `<div class="text-center py-8 text-danger" role="alert">This sale is not available offline on this device. Connect to the internet to refund it.</div>`; return; }
+                refundModalData = data;
+                refundLineQty = {}; refundLineRestock = {};
+                data.items.forEach(i => { refundLineQty[i.sale_id] = 0; refundLineRestock[i.sale_id] = true; });
+                document.getElementById('refund-modal-subtitle').textContent = `${formatBusinessDateTime(data.timestamp)} · Original ${formatCurrency(data.original_total)} · Offline: the refund stays pending until it syncs`;
+                renderRefundModalLines();
+                return;
+            }
             try {
                 const res = await fetch(`${API_URL}/sales/transactions/${encodeURIComponent(transactionKey)}`, { headers: { "Authorization": `Bearer ${authToken}` } });
                 const data = await res.json();
@@ -24979,6 +25222,24 @@
             const originalLabel = btn.textContent;
             btn.textContent = 'Processing…';
             if (!refundSubmitClientRef) refundSubmitClientRef = `refund-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+            if (refundModalData._offline) {
+                try {
+                    const reason = document.getElementById('refund-reason-select').value;
+                    const note = (document.getElementById('refund-note-input').value || '').trim() || null;
+                    await queueRefundOffline(refundModalData.transaction_key, lines, reason, note);
+                    showToast("Refund pending: saved offline. It is not complete until it syncs.", "info");
+                    closeRefundModal();
+                    if (refundTransactionsDayId) await loadRefundTransactionsList();
+                    loadBusinessDayControl();
+                } catch (e) {
+                    showToast(e.message || "The refund could not be saved offline.", "error");
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = originalLabel;
+                }
+                return;
+            }
 
             try {
                 const reason = document.getElementById('refund-reason-select').value;
@@ -26511,7 +26772,7 @@
             document.body.classList.add("offline-mode");
             const onlineOnlyFragments = [
                 "Billing", "Paystack", "EmailVerify", "EmailChange", "ChangePassword", "Employee", "Permission",
-                "DeleteBusiness", "CreateWarehouse", "DeleteWarehouse", "LocationModal", "PriceMonitor", "Refund",
+                "DeleteBusiness", "CreateWarehouse", "DeleteWarehouse", "LocationModal", "PriceMonitor",
                 "sendPurchaseOrder", "sendPO", "toggleAIChat", "Invoice", "WhatsApp"
             ];
             document.querySelectorAll("button[onclick],a[onclick]").forEach((element) => {
@@ -28844,6 +29105,13 @@
         document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeRowActionMenu(); });
 
         async function adjustQuickStock(productId, change) {
+            if (offlineWorkspaceActive()) {
+                try {
+                    await adjustStockOffline(productId, change);
+                    showToast("Stock adjustment saved offline. It is pending until it syncs.", "info");
+                } catch (error) { showToast(error.message, "error"); }
+                return;
+            }
             if (!authToken) {
                 showToast(t("common.signInOrRegister"), "info");
                 openBusinessAuthModal();
@@ -30290,6 +30558,14 @@
             const qty = parseInt(document.getElementById("transfer-qty").value) || 0;
             if (fromWh === toWh) { showToast(t("warehouses.transferDifferentRequired"), "error"); return; }
             if (!productId || qty < 1) { showToast(t("warehouses.selectProductPositiveQty"), "error"); return; }
+            if (offlineWorkspaceActive()) {
+                try {
+                    await transferStockOffline(productId, fromWh, toWh, qty);
+                    closeWarehouseModal();
+                    showToast("Transfer pending: saved offline. It will be applied when it syncs.", "info");
+                } catch (error) { showToast(error.message, "error"); }
+                return;
+            }
             try {
                 const res = await fetch(`${API_URL}/products/${productId}/transfer`, {
                     method: "PATCH", credentials: "include",

@@ -21,8 +21,8 @@ check('sales and expenses no longer refuse for lack of a previously synchronized
 
 const openFn = between(app, 'async function openBusinessDayOffline', '\n        }\n');
 check('offline open reuses an open day before creating one', /findOfflineOpenBusinessDay\(locationId\)[\s\S]*if \(existing\) return existing;/.test(openFn));
-check('offline open: button needs business_day.manage, a sale/expense its own permission (as online)',
-  /const needed = auto \? \(\{ sale: "sales\.create", expense: "expenses\.record" \}\[trigger\]\) : "business_day\.manage";/.test(openFn) && /if \(!needed \|\| !hasPermission\(needed\)\) throw/.test(openFn));
+check('offline open: button needs business_day.manage, a sale/expense/refund its own permission (as online)',
+  /const needed = auto \? \(\{ sale: "sales\.create", expense: "expenses\.record", refund: "sales\.refund" \}\[trigger\]\) : "business_day\.manage";/.test(openFn) && /if \(!needed \|\| !hasPermission\(needed\)\) throw/.test(openFn));
 check('a day opened after a local close waits for that close', /depends_on_op_ids: \(await queuedBusinessDayCloses\(locationId\)\)\.map/.test(openFn));
 check('offline day is its own queued change with a negative local id', /type: "business_day_open"/.test(openFn) && /const localId = -Date\.now\(\);/.test(openFn) && /meta: \{ local_id: localId \}/.test(openFn));
 
@@ -68,7 +68,7 @@ check('Sync Details explains a Business Day conflict', /BUSINESS_DAY_CONFLICT: "
 check('quarantine still keeps earlier refusal reasons (row 78)', /if \(row\.status === "conflict"\) continue;/.test(offline));
 
 check('server: open/close need business_day.manage; an auto open needs its sale/expense permission',
-  /"business_day_open": "business_day\.manage", "business_day_close": "business_day\.manage"/.test(server) && /\{"sale": "sales\.create", "expense": "expenses\.record"\}/.test(server));
+  /"business_day_open": "business_day\.manage", "business_day_close": "business_day\.manage"/.test(server) && /\{"sale": "sales\.create", "expense": "expenses\.record", "refund": "sales\.refund"\}/.test(server));
 check('server: close is by id, already-closed is answered, later work by others refuses', /BUSINESS_DAY_OFFLINE_CLOSE_ALREADY_CLOSED/.test(server) && /records_after_offline_close/.test(server));
 check('server: same-date open day is joined, other dates refused', /if active\.date != local_date:[\s\S]*BUSINESS_DAY_CONFLICT[\s\S]*BUSINESS_DAY_OFFLINE_OPEN_JOINED/.test(server));
 

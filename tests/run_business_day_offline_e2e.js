@@ -257,6 +257,7 @@ async function scenarioSyncedDayClose() {
   const rows = await outbox(page);
   const sale = rows.find((r) => r.type === 'sale_checkout'), close = rows.find((r) => r.type === 'business_day_close');
   check('sale and close go to the synchronized day; the close waits for the sale', sale?.business_day_id === s.dayId && close?.business_day_id === s.dayId && close.depends_on_op_ids.includes(sale.op_id), JSON.stringify(rows));
+  await pause(2000); // closed_at is compared at whole-second precision: keep a clear gap before reconnecting
   const reconnectAt = Date.now();
   const synced = await reconnect(ctx, page);
   const [isOpen, , closedAt] = dayRow(s.dayId);
@@ -412,7 +413,11 @@ async function scenarioDenied() {
   await ctx.close();
 }
 
-(async () => {
+// Shared with tests/run_offline_stock_refund_e2e.js (which requires this file).
+module.exports = { launch, signIn, prepareOnline, unlockOffline, header, outbox, sellOffline, reconnect, sql, q, check, pause, BASE, PIN,
+  failures: () => failures };
+
+if (require.main === module) (async () => {
   const only = process.env.CAULDRA_E2E_ONLY;
   const runs = [scenario1, scenario2, scenario3, scenarioSyncedDayClose, scenarioServerClosedFirst,
     function scenarioJoinedClosed() { return scenarioJoinedAndClosed(false); }, function scenarioJoinedOtherKeepsSelling() { return scenarioJoinedAndClosed(true); }, scenarioDenied];

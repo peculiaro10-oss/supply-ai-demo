@@ -895,7 +895,7 @@
             <dialog id="offline-sync-dialog" class="offline-dialog offline-sync-dialog" aria-labelledby="offline-sync-title">
                 <form method="dialog"><button class="offline-dialog-close" value="cancel" aria-label="Close">×</button></form>
                 <h2 id="offline-sync-title">Sync details</h2><p id="offline-sync-summary" role="status"></p>
-                <div id="offline-conflict-list"></div><button type="button" id="offline-sync-retry" class="offline-primary">Retry sync</button>
+                <div id="offline-conflict-list"></div><div id="offline-pending-list"></div><button type="button" id="offline-sync-retry" class="offline-primary">Retry sync</button>
             </dialog>
             <dialog id="offline-remove-dialog" class="offline-dialog offline-remove-dialog" aria-labelledby="offline-remove-title">
                 <h2 id="offline-remove-title">Remove offline data?</h2>
@@ -1166,8 +1166,15 @@
         const conflicts = rows.filter((row) => row.status === "conflict");
         document.getElementById("offline-sync-summary").textContent = `${pending.length} waiting to sync · ${conflicts.length} need attention`;
         const list = document.getElementById("offline-conflict-list");
-        list.innerHTML = conflicts.length ? conflicts.map((row) => `<article><h3>Sync conflict · ${escapeText(row.type || "change")}</h3><p>${escapeText(row.last_error || conflictGuidance(row.conflict_code))}</p><small>${escapeText(new Date(row.created_at).toLocaleString())} · ${escapeText(row.op_id)}</small></article>`).join("") : "<p>No conflicts need attention.</p>";
+        list.innerHTML = conflicts.length ? conflicts.map((row) => `<article><h3><span>Needs attention</span> · ${escapeText(row.label || row.type || "change")}</h3><p>${escapeText(row.last_error || conflictGuidance(row.conflict_code))}</p><small>${escapeText(new Date(row.created_at).toLocaleString())} · ${escapeText(row.op_id)}</small></article>`).join("") : "<p>No conflicts need attention.</p>";
+        // Nothing waiting here has happened on the server yet: a refund,
+        // transfer or adjustment says "pending", never "done".
+        document.getElementById("offline-pending-list").innerHTML = pending.map((row) => `<article class="offline-pending"><h3><span>${escapeText(pendingStatus(row))}</span> · ${escapeText(row.label || row.type || "change")}</h3><small>${escapeText(new Date(row.created_at).toLocaleString())}</small></article>`).join("");
         document.getElementById("offline-sync-dialog").showModal();
+    }
+
+    function pendingStatus(row) {
+        return ({ sale_refund: "Refund pending", stock_transfer: "Transfer pending", stock_adjust: "Adjustment pending" })[row.type] || "Waiting to sync";
     }
 
     function conflictGuidance(code) {
@@ -1175,6 +1182,7 @@
             PERMISSION_CHANGED: "Your permissions changed while this device was offline.", LOCATION_CHANGED: "The original location or warehouse changed.",
             BUSINESS_DAY_CLOSED: "The original Business Day closed before this change synchronized.",
             BUSINESS_DAY_CONFLICT: "The Business Day opened offline could not be matched to this location's open Business Day. The work saved offline was kept for review.", AUTH_EXPIRED: "Sign in online as the original user to review this change.",
+            REFUND_CONFLICT: "Part or all of this sale was already refunded elsewhere, so this refund was not applied. Check the sale online.",
             VALIDATION_ERROR: "Review the saved values before retrying." };
         return guidance[code] || "This change needs review before it can synchronize.";
     }
