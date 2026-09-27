@@ -571,7 +571,14 @@
     async function quarantineActive(reason) {
         if (!active) return;
         const rows = await listOutbox();
-        for (const row of rows) await updateOutbox(row.op_id, { status: "conflict", conflict_code: "AUTH_EXPIRED", last_error: reason });
+        // OFFLINE-QUEUE-001: a change the server already refused keeps its own
+        // reason (e.g. "Server stock is lower…"); only work still waiting to
+        // sync takes the account/permission reason. Rows that failed their
+        // integrity check are conflicts too and cannot be re-sealed.
+        for (const row of rows) {
+            if (row.status === "conflict") continue;
+            await updateOutbox(row.op_id, { status: "conflict", conflict_code: "AUTH_EXPIRED", last_error: reason });
+        }
         active.record.revoked_locally_at = Date.now();
         await putIdentity(active.record);
         active = null;

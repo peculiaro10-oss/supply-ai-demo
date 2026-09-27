@@ -36,6 +36,24 @@ def failure(code, message, status=409, details=None):
     raise HTTPException(status, detail)
 
 
+def validation_reason(exc):
+    """OFFLINE-QUEUE-001: which saved value was refused and why, instead of one
+    generic sentence. Field paths and pydantic's problem text only - never the
+    submitted values themselves."""
+    fields = []
+    for error in exc.errors(include_url=False, include_input=False, include_context=False):
+        path = ".".join(str(part) for part in error.get("loc", ()))
+        problem = str(error.get("msg") or "is not valid").removeprefix("Value error, ")
+        fields.append({"field": path, "problem": problem})
+    if not fields:
+        return "The saved offline change contains a value the server does not accept.", fields
+    name = next((str(part) for part in reversed(fields[0]["field"].split(".")) if not part.isdigit()), "value")
+    message = f"The saved offline change has an invalid {name.replace('_', ' ')}: {fields[0]['problem']}."
+    if len(fields) > 1:
+        message += f" ({len(fields) - 1} more value{'s' if len(fields) > 2 else ''} also need review.)"
+    return message, fields
+
+
 class Provision(BaseModel):
     device_id: uuid.UUID
 
@@ -356,9 +374,10 @@ def install(g):
             g["complete_idempotent_mutation"](claim, response)
             db.commit()
             return response
-        except ValidationError:
+        except ValidationError as exc:
             db.rollback()
-            failure("VALIDATION_ERROR", "The original operation contains invalid values.", 422)
+            message, fields = validation_reason(exc)
+            failure("VALIDATION_ERROR", message, 422, {"fields": fields})
         except HTTPException as exc:
             db.rollback()
             if isinstance(exc.detail, dict):
