@@ -88,9 +88,9 @@ async function prepareOnline(page, { openDay = false } = {}) {
     await fetch(`${API_URL}/sales/end-business-day?location_id=${loc.id}`, { method: 'POST', headers: H });
     let name = 'Offline Day Probe ' + Math.random().toString(36).slice(2, 7);
     const created = await j(await fetch(`${API_URL}/products/`, { method: 'POST', headers: H, body: JSON.stringify({ name, category: 'Test', quantity: 30, min_stock_level: 1, cost_price: 50, retail_price: 100, wholesale_price: 90, warehouse: wh.name }) }));
-    if (created.s >= 400) { // e.g. the plan's product limit: reuse a stocked probe product
+    if (created.s >= 400) { // e.g. the plan's product limit: reuse a stocked product
       let products = (await j(await fetch(`${API_URL}/products/?limit=500`, { headers: H }))).b; products = products.products || products;
-      name = products.find((p) => p.name.startsWith('Offline Day Probe') && p.warehouse === wh.name && p.quantity >= 5)?.name;
+      name = products.find((p) => p.warehouse === wh.name && p.quantity >= 5)?.name; // any product stocked in that warehouse
     }
     const current = (await j(await fetch(`${API_URL}/sales/current-day?location_id=${loc.id}`, { headers: H }))).b;
     return { locationId: loc.id, productName: name, created: created.s, openBefore: current.open, token: authToken, warehouseName: wh.name };

@@ -917,6 +917,178 @@ This assumes the 15 Batch F rows are confirmed on QA. `75cb2f59` contains their 
 
 **Count:** one new launch-scoped finding opened and fixed in code. It stays open until QA and Android confirm it.
 
+
+### 14.4 BUSINESS-DAY-OFFLINE-001 part 2 — close offline, implicit-open parity, offline capability matrix (2026-09-27, cloud session)
+
+**Owner rule (2026-09-27).** Any workflow Cauldra itself controls should keep working offline where it can be made safe and deterministic. External-service actions stay online-only and are never faked. Two owner decisions also apply:
+- **Implicit open matches online.** The explicit Open Business Day control needs `business_day.manage`; a sale or expense that finds no open day opens one with its own permission.
+- **Different-date conflicts keep the safe hold.** No manual-resolution feature for launch.
+
+**Branch and commits** (`remediation/batch-e-ai-forecast-brain`, from `bc585ab`):
+- `7c84a82` server: `business_day_close` replay; implicit-open permission;
+- `45e5f54` client: offline close, lifecycle ordering, closed state, holds, tests.
+
+**Offline close behaviour.**
+- **Who and where:** a user with `business_day.manage` (as online) can close a synced day or an offline-opened day from the same Dashboard control. Without the permission, the control is hidden and the action is refused.
+- **What is queued:** a `business_day_close` change (sealed like the rest of the queue) with the real close time. It names the day's own work in `own_refs`.
+- **What the user sees:** "Business Day Closed — Closed offline at … · waiting to sync", with Open offered again. This state survives an offline restart.
+- **New work after the close:** a closed day never takes new work. A later sale opens a **new** day, exactly as online checkout does after a close, and that open waits for the close.
+
+**Ordering** (existing `depends_on_op_ids`, no new framework): open → the day's sales/expenses → close → the next day's open → its work. The local-to-server id swap covers the close too. Once the close syncs, the device remembers the day as closed in the sealed snapshot, so an offline restart before the next full refresh cannot resurrect it.
+
+**Conflicts.**
+- **A — B opened the same-date day while A was offline:** A's open joins B's day, and A's sales land there. With no later work by B, A's close closes that day (the same result as A pressing Close online).
+- **B kept selling after A's offline close time:** closing at A's time would put B's sales after the close, so the server refuses (`BUSINESS_DAY_CONFLICT`, "Other work was recorded … after it was closed offline") and the day stays open. A's close is held with that reason.
+- **B closed the day before A reconnected, with no pending A work:** answered, and audited as `BUSINESS_DAY_OFFLINE_CLOSE_ALREADY_CLOSED`. The day is never re-closed or re-timed.
+- **C — A has pending work for a day the server already closed:** the work keeps its own reason (`BUSINESS_DAY_CLOSED`). A's close is **held** ("a change recorded in it needs review first, so the day was not closed on the server"). It is never sent over unresolved work.
+- **D — different date:** the safe hold, as decided. The open is refused; its work and its close are held with reasons; nothing is moved to another accounting day.
+- **A refused close:** holds the next day's open, and in turn that day's work.
+- **Row 78:** a later permission/account change still never overwrites these reasons.
+
+**Permissions.** Explicit Open or Close needs `business_day.manage`. An implicit open needs `sales.create` for a sale or `expenses.record` for an expense; this matches online `ensure_open_business_day`. The server re-checks on sync through the single replay rule map, and the permission-coverage guard still passes. A permission change before reconnect is refused as `PERMISSION_CHANGED`, the day is untouched and the queue is quarantined.
+
+**Migrations / variables:** none. The service-worker cache is now `cauldra-shell-v15-offline-business-day-close`.
+
+**Tests.**
+- **Server:** `tests/test_business_day_offline_postgres.py`, **12/12**:
+  - synced-day close keeps the offline time;
+  - open → sale → close;
+  - already closed on the server;
+  - others' later work keeps the day open;
+  - close without permission;
+  - permission changed;
+  - implicit open with the sale permission; an explicit or trigger-less open without `business_day.manage` is refused.
+- **Static:** `tests/test_business_day_offline.cjs`, all pass.
+- **End to end:** `tests/run_business_day_offline_e2e.js`, 8 scenarios and 48 checks, all passing, on the real app with a local backend:
+  - open → 2 sales → close offline → offline restart (still closed, queue intact and sealed) → new sale opens day 2 waiting for the close → reconnect: day 1 closed at the offline time with both sales, day 2 open, one open day, audits correct;
+  - synced day closed offline;
+  - server closed first (sale and close held);
+  - joined and closed;
+  - other device keeps selling (close refused, day open);
+  - different date plus the row 78 reasons;
+  - permission denied (Open/Close refused, a sale still opens a day).
+- **Regression:**
+  - offline harness 30/30;
+  - offline access, OFFLINE-QUEUE-001, X5, REC-001 and staff product permissions pass;
+  - `test_business_day`, `test_mutation_idempotency_postgres`, `test_rejected_checkout_state_postgres` and `test_sales_checkout_atomicity_postgres` fail with **identical** failure sets to `704b843`;
+  - `test_native_bundle.cjs` needs a prepared source bundle and fails identically without these changes;
+  - all other `tests/*.cjs` pass; QA bundle verification passes.
+
+**Local follow-up.**
+1. Pull `45e5f54` or later. No migrations, no new variables.
+2. Deploy QA (`railway up --service cauldra-qa`) and check the startup database line.
+3. **A new APK is required** (`app.js`, i18n catalog). It supersedes both `704b843` and any build of `95b8470`.
+4. Optional: run the e2e runner against a **local** backend (see its header).
+5. Android:
+   - row 78 sequence (§14.3) — it now ends by closing the day offline before reconnecting;
+   - offline close of a synced day and of an offline-opened day;
+   - force-stop while closed offline;
+   - a sale after the offline close opens a new day;
+   - two devices: B keeps selling after A's offline close → A's close held with its reason, day open;
+   - a user without `business_day.manage`: no Open/Close control, but a sale still opens a day;
+   - English and Arabic.
+6. Clean-up: close any QA test day and remove test products per QA hygiene. Do not touch the 42 lost uploads or Tenant B.
+
+**First-party offline capability matrix** (one focused audit: every mutating API call in `app.js`, the offline replay rule map and the offline action policy).
+
+| Workflow | Status | Notes |
+|---|---|---|
+| Offline sign-in (unlock with PIN/biometric), restart | WORKS OFFLINE | First-ever sign-in on a device needs the server, by design (identity). |
+| Business Day open / close | WORKS OFFLINE WITH SYNC | This task. |
+| Sales (POS checkout) | WORKS OFFLINE WITH SYNC | Stock/price re-validated on sync. |
+| Expenses (record) | WORKS OFFLINE WITH SYNC | |
+| Products: add / edit (non-stock fields) | WORKS OFFLINE WITH SYNC | Admin delete also queues. Staff deletion *requests* are online. |
+| Suppliers: add | WORKS OFFLINE WITH SYNC | |
+| Dashboard, Today's Sales, 90-day sales/expense history, inventory, suppliers, POs, Business Brain (read) | WORKS OFFLINE | Reads the sealed snapshot. |
+| Barcode scan → own catalogue match | WORKS OFFLINE | The UPCitemdb lookup is external. |
+| CSV exports built in the browser (inventory, suppliers, etc.) | WORKS OFFLINE | |
+| AI chat, invoice scan, margin advice | INTENTIONALLY ONLINE — EXTERNAL | |
+| Subscription, plan changes, Paystack | INTENTIONALLY ONLINE — EXTERNAL | |
+| Email verify/change, forgot/reset password | INTENTIONALLY ONLINE — EXTERNAL | Email provider. |
+| PO dispatch (email/WhatsApp), push subscribe, price-source *checks* | INTENTIONALLY ONLINE — EXTERNAL | |
+| Employees: create, permissions, disable, reset password, delete, account-action approvals | INTENTIONALLY ONLINE — AUTHORITY | Changes who may act on *other* devices; cannot be made safe while this device is offline. Recommend keeping online. |
+| Business registration, business deletion, full reset | INTENTIONALLY ONLINE — AUTHORITY | |
+| **Stock adjustment (quick stock) and warehouse transfer** | FIRST-PARTY OFFLINE GAP | See G1. |
+| **Refunds** | FIRST-PARTY OFFLINE GAP | See G2. |
+| **Supplier edit / delete** | FIRST-PARTY OFFLINE GAP | See G3. |
+| **Purchase-order drafts: generate / edit / delete** | FIRST-PARTY OFFLINE GAP | See G4. |
+| **Historical Business Day: reopen, reopen request/approval, close by id** | FIRST-PARTY OFFLINE GAP | See G5. |
+| **Excel exports; sales/expense exports** | FIRST-PARTY OFFLINE GAP | See G6. |
+| **Settings: company profile, own profile/avatar, notification preferences; language preference persistence** | FIRST-PARTY OFFLINE GAP | See G7. |
+| **Notifications: mark read** | FIRST-PARTY OFFLINE GAP | See G7. |
+| **Price Monitor: manual price entry, add/remove source, upload price list** | FIRST-PARTY OFFLINE GAP | See G8. Source *checks* are external. |
+| **Warehouses/locations: create, delete, activate/deactivate** | FIRST-PARTY OFFLINE GAP | See G9. |
+| Business Brain: act on a recommendation | FIRST-PARTY OFFLINE GAP (minor) | See G7. |
+| Product deletion approval (admin resolving a staff request) | FIRST-PARTY OFFLINE GAP (minor) | Approval authority; recommend keeping online. |
+
+Common current behaviour for every gap: the action tries the network, then shows a generic "could not…/failed" message (or the button is marked online-only). The existing queue already supports ordering, dependencies, idempotent replay, permission re-checks and held conflicts.
+
+**Gap details** (current behaviour / why online / queue fit / risk / scope / launch-critical?):
+- **G1 Stock adjustment and transfer.**
+  - *Current / why online:* a generic failure; the replay explicitly refuses stock changes on `product_update`.
+  - *Queue fit:* yes, as delta operations (like sales), re-validated on sync.
+  - *Risk:* medium (concurrent stock; a transfer must never go negative).
+  - *Scope:* **medium.**
+  - *Launch-critical: likely YES*: receiving or correcting stock during an outage is ordinary counter work.
+- **G2 Refunds.**
+  - *Current / why online:* online-only in the offline policy; money and stock plus a link to the original sale.
+  - *Queue fit:* yes, with a dependency on the original sale's sync. Refunds of offline sales need the sale's server id, and remap works.
+  - *Risk:* high (money, restock, double refund; server idempotency via `client_ref` exists).
+  - *Scope:* **medium–architectural.**
+  - *Launch-critical: owner call; probably YES* for retail counters under the stated rule.
+- **G3 Supplier edit/delete.**
+  - *Current / why online:* not implemented in replay.
+  - *Queue fit:* yes (mirror product update/delete with `base_updated_at`).
+  - *Risk:* low. *Scope:* **small.** *Launch-critical:* no.
+- **G4 Purchase-order drafts.**
+  - *Current / why online:* generation runs server logic (reorder calculation).
+  - *Queue fit:* edit/delete of existing drafts queues easily; offline *generation* would need the calculation on the client.
+  - *Risk:* low. *Scope:* **small** (edit/delete) / **medium** (generate). *Launch-critical:* no.
+- **G5 Historical day reopen/close by id.**
+  - *Current / why online:* an approval workflow over closed accounting periods.
+  - *Queue fit:* possible, but it reopens finalised periods with multi-user approval.
+  - *Risk:* high (accounting). *Scope:* **architectural.**
+  - *Launch-critical:* no; recommend keeping online.
+- **G6 Excel / sales / expense exports.**
+  - *Current / why online:* files are built on the server.
+  - *Queue fit:* not a queue item; build locally from the cached 90-day data.
+  - *Risk:* low (the export must say it excludes unsynced/unsnapshotted data). *Scope:* **small–medium.** *Launch-critical:* no.
+- **G7 Settings/profile/preferences, notifications read, Brain actions.**
+  - *Queue fit:* simple last-writer updates; company profile edits touch currency/tax display, so conflict rules are needed.
+  - *Risk:* low (profile) to medium (company currency). *Scope:* **small** each. *Launch-critical:* no.
+- **G8 Price Monitor first-party actions.**
+  - *Queue fit:* manual price entry and source add/remove queue easily; the price-list upload parses a file on the server.
+  - *Risk:* low. *Scope:* **small** (manual/sources) / **medium** (upload). *Launch-critical:* no.
+- **G9 Warehouses/locations structure.**
+  - *Current / why online:* stock, currency and Business Day scoping hang off them.
+  - *Queue fit:* possible, with local-id remap chains (products → warehouse).
+  - *Risk:* medium–high (location currency and day scoping). *Scope:* **medium–architectural.**
+  - *Launch-critical:* no.
+
+Also a small UX gap across all of the above: offline failures show generic "failed" wording instead of a clear "needs internet — nothing was saved" message. It is **small** and recommended alongside any G1/G2 work.
+
+**Launch-critical under the owner rule (recommendation, for the owner to confirm):** **G1** (stock adjustment/transfer) and **G2** (refunds). Everything else can follow launch.
+
+**Tracker lines:**
+- `BUSINESS-DAY-OFFLINE-001 — part 2: offline close + implicit-open parity → FIXED (7c84a82, 45e5f54) — awaiting QA + new APK + Android`;
+- new: `OFFLINE-CAP-G1 stock adjust/transfer — FIRST-PARTY OFFLINE GAP (medium) — owner: launch-critical?`;
+- new: `OFFLINE-CAP-G2 refunds — FIRST-PARTY OFFLINE GAP (medium–architectural) — owner: launch-critical?`;
+- new: `OFFLINE-CAP-G3…G9 — FIRST-PARTY OFFLINE GAP — post-launch candidates (see handoff §14.4)`.
+
+**Triage file:**
+- update `BUSINESS-DAY-OFFLINE-001` (part 2 fixed);
+- add `OFFLINE-CAP-G1` and `-G2` as **owner decision: launch scope**;
+- add `OFFLINE-CAP-G3…G9` as post-launch.
+
+**Retest log:**
+- 2026-09-27 cloud: server 12/12; e2e 48/48 checks (8 scenarios); offline harness 30/30; static suites pass;
+- failing backend suites identical to `704b843`;
+- no QA deploy, no Android.
+
+**Manifest:** add `7c84a82`, `45e5f54`; no migrations, no variables; service-worker cache v15.
+
+**Android/native checklist:** add the step-5 checks above. Mark any APK built before `45e5f54` as superseded.
+
 ---
 
 *Handoff prepared 2026-09-26 from `remediation/batch-e-ai-forecast-brain` @ `2aeec3f`. Documentation only — no product code, QA, `main` or production change.*
