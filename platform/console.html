@@ -49,28 +49,50 @@
             <!-- OVERVIEW -->
             <div data-view="overview" class="space-y-4">
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                    <div class="stat-card"><div class="stat-label">Total Businesses</div><div class="stat-value" data-ov="businesses.total">&mdash;</div><div class="text-[10px] text-textSec mt-1"><span data-ov="businesses.new_this_month">0</span> new this month</div></div>
-                    <div class="stat-card"><div class="stat-label">Total User Accounts</div><div class="stat-value" data-ov="users.total">&mdash;</div><div class="text-[10px] text-textSec mt-1"><span data-ov="users.new_this_month">0</span> new this month</div></div>
-                    <div class="stat-card"><div class="stat-label">Active Now</div><div class="stat-value" data-ov="users.active_now">&mdash;</div><div class="text-[10px] text-textSec mt-1"><span data-ov="users.active_today">0</span> active today</div></div>
-                    <div class="stat-card"><div class="stat-label">Paying Businesses</div><div class="stat-value" data-ov="businesses.paying">&mdash;</div><div class="text-[10px] text-textSec mt-1"><span data-ov="businesses.trial">0</span> on trial</div></div>
+                    <div class="stat-card" title="Every business on Cauldra."><div class="stat-label">Total Businesses</div><div class="stat-value" data-ov="businesses.total">&mdash;</div><div class="text-[10px] text-textSec mt-1"><span data-ov="businesses.new_this_month">0</span> new this month</div></div>
+                    <div class="stat-card" data-ov-title="definitions.active_business"><div class="stat-label">Active Businesses</div><div class="stat-value" data-ov="businesses.active_30d">&mdash;</div><div class="text-[10px] text-textSec mt-1">last 30 days &middot; <span data-ov="businesses.active_today">0</span> active today</div></div>
+                    <div class="stat-card" data-ov-title="definitions.trialing"><div class="stat-label">Trialing</div><div class="stat-value" data-ov="businesses.trial">&mdash;</div><div class="text-[10px] text-textSec mt-1"><span data-ov="businesses.trial_ending_7d">0</span> ending within 7 days</div></div>
+                    <div class="stat-card" data-ov-title="definitions.paying"><div class="stat-label">Paying Businesses</div><div class="stat-value" data-ov="businesses.paying">&mdash;</div><div class="text-[10px] text-textSec mt-1 truncate" id="ov-plan-split">&nbsp;</div></div>
                 </div>
-                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div class="stat-card">
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div class="stat-card" title="Cauldra subscription payments collected since the 1st of this month (UTC). Never merchant sales.">
                         <div class="stat-label">Revenue This Month</div>
                         <div class="stat-value" data-ov-money="revenue.this_month_naira">&mdash;</div>
                         <button type="button" data-nav-link="revenue" class="text-[10px] text-primary font-semibold mt-2 cursor-pointer">View Revenue &rarr;</button>
                     </div>
-                    <div class="stat-card">
+                    <div class="stat-card" data-ov-title="definitions.trial_conversion">
+                        <div class="stat-label">Trial Conversion</div>
+                        <div class="stat-value" id="ov-conversion">&mdash;</div>
+                        <div class="text-[10px] text-textSec mt-1" id="ov-conversion-sub">&nbsp;</div>
+                    </div>
+                    <div class="stat-card" title="Cauldra's estimated AI provider cost this month: provider-reported tokens × the prices set under AI & Costs.">
                         <div class="stat-label">AI Spend This Month</div>
-                        <div class="stat-value" data-ov-money-usd="ai_spend.this_month_usd">&mdash;</div>
-                        <div class="text-[10px] text-textSec mt-1" data-ov-money="ai_spend.this_month_ngn">&nbsp;</div>
+                        <div class="stat-value" id="ov-ai-spend">&mdash;</div>
+                        <div class="text-[10px] text-textSec mt-1" id="ov-ai-spend-sub">&nbsp;</div>
                         <button type="button" data-nav-link="ai-costs" class="text-[10px] text-primary font-semibold mt-2 cursor-pointer">View AI &amp; Costs &rarr;</button>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Unresolved Alerts</div>
-                        <div class="stat-value" data-ov="alerts.unresolved">&mdash;</div>
-                        <div class="text-[10px] text-textSec mt-1"><span data-ov="alerts.critical">0</span> critical</div>
+                    <div class="stat-card" title="Open alerts (unresolved or watching) of medium severity or above. Low-severity notices stay on the Alerts page.">
+                        <div class="stat-label">Needs Attention</div>
+                        <div class="stat-value" data-ov="attention.total">&mdash;</div>
+                        <div class="text-[10px] text-textSec mt-1"><span data-ov="attention.critical">0</span> critical &middot; <span data-ov="attention.warning">0</span> warning</div>
                         <button type="button" data-nav-link="alerts" class="text-[10px] text-primary font-semibold mt-2 cursor-pointer">View Alerts &rarr;</button>
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div class="stat-card">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="stat-label">Business Growth</div>
+                            <div class="flex gap-1" id="ov-growth-range">
+                                <button type="button" data-growth-months="6" class="period-btn px-2.5 py-1 rounded-lg text-[10px] font-semibold border cursor-pointer">6 mo</button>
+                                <button type="button" data-growth-months="12" class="period-btn px-2.5 py-1 rounded-lg text-[10px] font-semibold border cursor-pointer">12 mo</button>
+                            </div>
+                        </div>
+                        <div id="ov-growth" class="space-y-2"></div>
+                        <p class="text-[10px] text-textSec mt-3">New businesses per month (UTC, by join date) and the running total.</p>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label mb-3">Recent Attention</div>
+                        <div id="ov-attention" class="space-y-2"></div>
                     </div>
                 </div>
                 <p class="text-[10px] text-textSec" id="overview-generated-at"></p>
@@ -78,15 +100,29 @@
 
             <!-- BUSINESSES -->
             <div data-view="businesses" class="space-y-3">
-                <div class="flex flex-col sm:flex-row gap-2">
-                    <input type="text" id="biz-search" placeholder="Search business name, code, or email&hellip;" class="flex-1 bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
-                    <select id="biz-plan-filter" class="bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
-                        <option value="">All plans</option>
-                        <option value="core">Starter</option><option value="starter">Business</option><option value="business">Premium</option><option value="enterprise">Enterprise</option>
-                    </select>
+                <div class="flex flex-col lg:flex-row gap-2">
+                    <input type="text" id="biz-search" placeholder="Search name, ID, owner email or owner name&hellip;" class="flex-1 bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
+                    <div class="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                        <select id="biz-plan-filter" class="ops-select">
+                            <option value="">All plans</option>
+                            <option value="core">Starter</option><option value="starter">Business</option><option value="business">Premium</option><option value="enterprise">Enterprise</option>
+                        </select>
+                        <select id="biz-status-filter" class="ops-select">
+                            <option value="">All statuses</option><option value="trialing">Trialing</option><option value="active">Active</option><option value="past_due">Past due</option><option value="expired">Expired</option><option value="cancelled">Cancelled</option><option value="pending_payment_method">Awaiting card</option>
+                        </select>
+                        <select id="biz-health-filter" class="ops-select">
+                            <option value="">Any health</option><option value="any">Needs attention</option><option value="healthy">Healthy</option><option value="trial_ending">Trial ending soon</option><option value="payment_issue">Payment issue</option><option value="payment_review">Payment needs review</option><option value="subscription_mismatch">Active without payment</option><option value="inactive_30d">Inactive 30d</option><option value="never_active">Never active</option><option value="email_unverified">Owner email unverified</option><option value="ai_failures">Repeated AI failures</option>
+                        </select>
+                        <select id="biz-activity-filter" class="ops-select">
+                            <option value="">Any activity</option><option value="active_30d">Active in 30 days</option><option value="inactive_30d">Inactive 30+ days</option><option value="never">Never active</option>
+                        </select>
+                        <select id="biz-sort" class="ops-select col-span-2 sm:col-span-1">
+                            <option value="newest">Newest joined</option><option value="oldest">Oldest joined</option><option value="recently_active">Recently active</option><option value="least_active">Least recently active</option><option value="trial_ending">Trial ending soon</option><option value="highest_paid">Highest paid</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="table-scroll"><table class="data-table" id="businesses-table">
-                    <thead><tr><th>Business</th><th>Joined</th><th>Plan</th><th>Status</th><th>Users</th><th>Last Active</th><th>Lifetime Rev.</th><th>AI Credits</th><th>AI Cost</th></tr></thead>
+                    <thead><tr><th>Business</th><th class="hidden lg:table-cell">Joined</th><th>Plan</th><th class="hidden md:table-cell">Status</th><th class="hidden lg:table-cell">Health</th><th title="Enabled user accounts">Users</th><th>Last Active</th><th>Billing</th><th class="hidden md:table-cell" title="Successful subscription payments to Cauldra, lifetime">Paid to Cauldra</th></tr></thead>
                     <tbody></tbody>
                 </table></div>
                 <div id="businesses-empty" class="hidden text-center py-8 text-textSec text-xs">No businesses found.</div>
@@ -94,6 +130,7 @@
                     <span id="businesses-count"></span>
                     <div class="flex gap-2"><button type="button" id="businesses-prev" class="px-3 py-1.5 rounded-lg bg-cardBg border border-borderCol cursor-pointer">Prev</button><button type="button" id="businesses-next" class="px-3 py-1.5 rounded-lg bg-cardBg border border-borderCol cursor-pointer">Next</button></div>
                 </div>
+                <p class="text-[10px] text-textSec leading-relaxed" id="businesses-definitions"></p>
             </div>
 
             <!-- BUSINESS DETAIL -->
@@ -105,21 +142,23 @@
             <!-- USERS -->
             <div data-view="users" class="space-y-3">
                 <div class="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                    <div class="stat-card !p-2.5"><div class="stat-label text-[9px]">Total</div><div class="stat-value !text-base" data-users-summary="total_users">&mdash;</div></div>
-                    <div class="stat-card !p-2.5"><div class="stat-label text-[9px]">New (mo.)</div><div class="stat-value !text-base" data-users-summary="new_this_month">&mdash;</div></div>
-                    <div class="stat-card !p-2.5"><div class="stat-label text-[9px]">Active Today</div><div class="stat-value !text-base" data-users-summary="active_today">&mdash;</div></div>
-                    <div class="stat-card !p-2.5"><div class="stat-label text-[9px]">Active (mo.)</div><div class="stat-value !text-base" data-users-summary="active_this_month">&mdash;</div></div>
-                    <div class="stat-card !p-2.5"><div class="stat-label text-[9px]">Returning</div><div class="stat-value !text-base" data-users-summary="returning">&mdash;</div></div>
+                    <div class="stat-card !p-2.5" data-users-title="total_users"><div class="stat-label text-[9px]">Total Users</div><div class="stat-value !text-base" data-users-summary="total_users">&mdash;</div><div class="text-[9px] text-textSec"><span data-users-summary="disabled_users">0</span> disabled</div></div>
+                    <div class="stat-card !p-2.5" data-users-title="new_this_month"><div class="stat-label text-[9px]">New Users</div><div class="stat-value !text-base" data-users-summary="new_this_month">&mdash;</div><div class="text-[9px] text-textSec">this month</div></div>
+                    <div class="stat-card !p-2.5" data-users-title="active_today"><div class="stat-label text-[9px]">Active Today</div><div class="stat-value !text-base" data-users-summary="active_today">&mdash;</div><div class="text-[9px] text-textSec">since 00:00 UTC</div></div>
+                    <div class="stat-card !p-2.5" data-users-title="active_30d"><div class="stat-label text-[9px]">Active 30D</div><div class="stat-value !text-base" data-users-summary="active_30d">&mdash;</div><div class="text-[9px] text-textSec">last 30 days</div></div>
+                    <div class="stat-card !p-2.5" data-users-title="returning"><div class="stat-label text-[9px]">Returning</div><div class="stat-value !text-base" data-users-summary="returning">&mdash;</div><div class="text-[9px] text-textSec">active 30D, used before</div></div>
                 </div>
-                <div class="flex flex-col sm:flex-row gap-2">
-                    <input type="text" id="users-search" placeholder="Search name, username, or email&hellip;" class="flex-1 bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
-                    <select id="users-role-filter" class="bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
-                        <option value="">All roles</option><option value="admin">Admin</option><option value="manager">Manager</option><option value="staff">Staff</option>
-                    </select>
-                    <label class="flex items-center gap-1.5 bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textSec cursor-pointer"><input type="checkbox" id="users-active-only"> Active now only</label>
+                <div class="flex flex-col lg:flex-row gap-2">
+                    <input type="text" id="users-search" placeholder="Search name, username, email, business name or ID&hellip;" class="flex-1 bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-xs text-textMain focus:outline-none focus:border-primary">
+                    <div class="grid grid-cols-3 gap-2">
+                        <select id="users-role-filter" class="ops-select"><option value="">All roles</option><option value="admin">Admin</option><option value="manager">Manager</option><option value="staff">Staff</option></select>
+                        <select id="users-status-filter" class="ops-select"><option value="">All statuses</option><option value="active">Active</option><option value="disabled">Disabled</option></select>
+                        <select id="users-activity-filter" class="ops-select"><option value="">Any activity</option><option value="now">Active now</option><option value="today">Active today</option><option value="active_30d">Active 30 days</option><option value="inactive_30d">Inactive 30+ days</option><option value="never">Never active</option></select>
+                    </div>
                 </div>
+                <div id="users-business-filter" class="hidden text-[11px] text-textSec"></div>
                 <div class="table-scroll"><table class="data-table" id="users-table">
-                    <thead><tr><th>Name</th><th>Username</th><th>Email</th><th>Business</th><th>Role</th><th>Joined</th><th>Last Active</th><th></th></tr></thead>
+                    <thead><tr><th>Name</th><th class="hidden md:table-cell">Username</th><th class="hidden sm:table-cell">Email</th><th>Business</th><th>Role</th><th class="hidden md:table-cell">Status</th><th class="hidden lg:table-cell">Joined</th><th>Last Active</th></tr></thead>
                     <tbody></tbody>
                 </table></div>
                 <div id="users-empty" class="hidden text-center py-8 text-textSec text-xs">No users found.</div>
@@ -127,6 +166,13 @@
                     <span id="users-count"></span>
                     <div class="flex gap-2"><button type="button" id="users-prev" class="px-3 py-1.5 rounded-lg bg-cardBg border border-borderCol cursor-pointer">Prev</button><button type="button" id="users-next" class="px-3 py-1.5 rounded-lg bg-cardBg border border-borderCol cursor-pointer">Next</button></div>
                 </div>
+                <p class="text-[10px] text-textSec leading-relaxed" id="users-definitions"></p>
+            </div>
+
+            <!-- USER DETAIL -->
+            <div data-view="user-detail" class="space-y-4">
+                <button type="button" data-nav-link="users" class="text-[11px] text-primary font-semibold cursor-pointer"><i class="fa-solid fa-arrow-left mr-1"></i> Back to Users</button>
+                <div id="user-detail-content"></div>
             </div>
 
             <!-- SUBSCRIPTIONS -->
@@ -141,29 +187,56 @@
                         <div id="subs-by-plan" class="space-y-2"></div>
                     </div>
                 </div>
+                <div class="flex flex-col sm:flex-row gap-2">
+                    <select id="subs-status-filter" class="ops-select"><option value="">All statuses</option><option value="trialing">Trialing</option><option value="active">Active</option><option value="past_due">Past due</option><option value="expired">Expired</option><option value="cancelled">Cancelled</option><option value="pending_payment_method">Awaiting card</option></select>
+                    <select id="subs-plan-filter" class="ops-select"><option value="">All plans</option><option value="core">Starter</option><option value="starter">Business</option><option value="business">Premium</option><option value="enterprise">Enterprise</option></select>
+                    <select id="subs-special-filter" class="ops-select"><option value="">No extra filter</option><option value="trial_ending">Trial ending soon</option><option value="payment_issue">Payment issue</option><option value="cancelled">Cancelled or cancelling</option></select>
+                    <select id="subs-sort" class="ops-select"><option value="trial_ending">Trial ending soon</option><option value="renewal_soon">Renewal soon</option><option value="recently_changed">Recently changed</option><option value="newest">Newest</option></select>
+                </div>
+                <div class="table-scroll"><table class="data-table">
+                    <thead><tr><th>Business</th><th>Plan</th><th>Status</th><th class="hidden md:table-cell">Trial Ends</th><th class="hidden lg:table-cell">Current Period</th><th>Next Billing</th><th class="hidden md:table-cell">Last Payment</th><th class="hidden sm:table-cell">Billing Health</th></tr></thead>
+                    <tbody id="subs-table-body"></tbody>
+                </table></div>
+                <div id="subs-table-empty" class="hidden text-center py-6 text-textSec text-xs">No subscriptions match.</div>
+                <div class="flex items-center justify-between text-[11px] text-textSec">
+                    <span id="subs-count"></span>
+                    <div class="flex gap-2"><button type="button" id="subs-prev" class="px-3 py-1.5 rounded-lg bg-cardBg border border-borderCol cursor-pointer">Prev</button><button type="button" id="subs-next" class="px-3 py-1.5 rounded-lg bg-cardBg border border-borderCol cursor-pointer">Next</button></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label mb-2">Recent Subscription Changes (30 days)</div>
+                    <div id="subs-changes" class="space-y-1.5"></div>
+                </div>
             </div>
 
             <!-- REVENUE -->
             <div data-view="revenue" class="space-y-4">
                 <div id="revenue-period-bar"></div>
+                <p class="text-[10px] text-textSec">Cauldra subscription revenue only (successful Paystack payments, excluding the refundable card-verification charge). Never merchant sales.</p>
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
                     <div class="stat-card"><div class="stat-label">Revenue (period)</div><div class="stat-value" data-rev-money="revenue_naira">&mdash;</div></div>
                     <div class="stat-card"><div class="stat-label">Successful Payments</div><div class="stat-value" data-rev="successful_payments">&mdash;</div></div>
-                    <div class="stat-card"><div class="stat-label">Paying Businesses</div><div class="stat-value" data-rev="paying_businesses">&mdash;</div></div>
-                    <div class="stat-card"><div class="stat-label">Avg / Business</div><div class="stat-value" data-rev-money="average_revenue_per_business_naira">&mdash;</div></div>
+                    <div class="stat-card" title="Businesses with at least one successful payment in the period."><div class="stat-label">Paying Businesses</div><div class="stat-value" data-rev="paying_businesses">&mdash;</div><div class="text-[10px] text-textSec mt-1">paid in this period</div></div>
+                    <div class="stat-card" title="Period revenue ÷ businesses that paid in the period. Trials and non-paying businesses are not in the denominator."><div class="stat-label">Avg / Paying Business</div><div class="stat-value" data-rev-money="average_revenue_per_business_naira">&mdash;</div></div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-label mb-1">All-Time Revenue</div>
-                    <div class="text-2xl font-extrabold text-primary" data-rev-money="all_time_revenue_naira">&mdash;</div>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div class="stat-card"><div class="stat-label mb-1">All-Time Revenue</div><div class="text-2xl font-extrabold text-primary" data-rev-money="all_time_revenue_naira">&mdash;</div></div>
+                    <div class="stat-card" id="rev-mrr-card"><div class="stat-label mb-1">MRR <span class="prov-tag">Calculated</span></div><div class="text-2xl font-extrabold text-textMain" id="rev-mrr">&mdash;</div><div class="text-[10px] text-textSec mt-1" id="rev-mrr-sub"></div></div>
+                    <div class="stat-card"><div class="stat-label mb-1">Refunds / Reversals <span class="prov-tag">Unavailable</span></div><div class="text-sm font-bold text-textSec">Not tracked</div><div class="text-[10px] text-textSec mt-1 leading-relaxed" id="rev-refunds-note"></div></div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-label mb-2">Revenue by Plan</div>
-                    <div id="revenue-by-plan" class="space-y-2.5"></div>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div class="stat-card">
+                        <div class="stat-label mb-2">Revenue by Plan</div>
+                        <div id="revenue-by-plan" class="space-y-2.5"></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label mb-2">Payment Health (attempts in period)</div>
+                        <div id="revenue-payment-health" class="grid grid-cols-2 gap-2 text-[11px]"></div>
+                    </div>
                 </div>
                 <div>
                     <div class="stat-label mb-2">Revenue by Business (top 50, this period)</div>
                     <div class="table-scroll"><table class="data-table">
-                        <thead><tr><th>Business</th><th>Revenue</th><th>Payments</th><th>Last Payment</th></tr></thead>
+                        <thead><tr><th>Business</th><th class="hidden sm:table-cell">Plan</th><th>Revenue</th><th>Payments</th><th class="hidden md:table-cell">Refunds</th><th>Last Payment</th></tr></thead>
                         <tbody id="revenue-by-business-body"></tbody>
                     </table></div>
                     <div id="revenue-by-business-empty" class="hidden text-center py-8 text-textSec text-xs">No revenue recorded for this period.</div>
@@ -173,21 +246,42 @@
             <!-- AI & COSTS -->
             <div data-view="ai-costs" class="space-y-4">
                 <div id="ai-period-bar"></div>
+                <div class="stat-label pt-1">Monitoring</div>
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div class="stat-card"><div class="stat-label">AI Requests</div><div class="stat-value" id="ai-sum-requests">&mdash;</div><div class="text-[10px] text-textSec mt-1" id="ai-sum-requests-sub">&nbsp;</div></div>
+                    <div class="stat-card" title="Cauldra AI credits charged to plan allowances (successful requests)."><div class="stat-label">Cauldra Credits Used</div><div class="stat-value" id="ai-sum-credits">&mdash;</div></div>
+                    <div class="stat-card"><div class="stat-label">Estimated Provider Cost</div><div class="stat-value" id="ai-sum-cost">&mdash;</div><div class="text-[10px] text-textSec mt-1" id="ai-sum-cost-sub">&nbsp;</div></div>
+                    <div class="stat-card"><div class="stat-label">Avg Cost / Request</div><div class="stat-value" id="ai-sum-avg">&mdash;</div><div class="text-[10px] text-textSec mt-1">priced requests only</div></div>
+                    <div class="stat-card"><div class="stat-label">Failed AI Requests</div><div class="stat-value" id="ai-sum-failed">&mdash;</div><div class="text-[10px] text-textSec mt-1" id="ai-sum-failed-sub">&nbsp;</div></div>
+                    <div class="stat-card"><div class="stat-label">Businesses Using AI</div><div class="stat-value" id="ai-sum-businesses">&mdash;</div></div>
+                    <div class="stat-card col-span-2" title="Estimated provider cost (NGN) ÷ Cauldra subscription revenue in the same period."><div class="stat-label">AI Cost as % of Subscription Revenue</div><div class="stat-value" id="ai-sum-pct">&mdash;</div><div class="text-[10px] text-textSec mt-1" id="ai-sum-pct-sub">&nbsp;</div></div>
+                </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4" id="ai-provider-cards"></div>
 
                 <div class="stat-card">
-                    <div class="flex items-center justify-between mb-2">
-                        <div class="stat-label">By Feature</div>
-                    </div>
+                    <div class="stat-label mb-2">By Feature</div>
                     <div class="table-scroll"><table class="data-table">
-                        <thead><tr><th>Feature</th><th>Provider</th><th>Requests</th><th>Cauldra Credits</th><th>Provider Cost</th><th>Avg / Request</th></tr></thead>
+                        <thead><tr><th>Feature</th><th>Provider</th><th>Requests</th><th class="hidden sm:table-cell">Credits</th><th>Provider Cost</th><th class="hidden md:table-cell">Avg / Request</th><th>Failed</th></tr></thead>
                         <tbody id="ai-by-operation-body"></tbody>
                     </table></div>
                     <div id="ai-by-operation-empty" class="hidden text-center py-6 text-textSec text-xs">No AI usage recorded for this period.</div>
                 </div>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div class="stat-card">
+                        <div class="stat-label mb-2">By Business</div>
+                        <div class="table-scroll"><table class="data-table">
+                            <thead><tr><th>Business</th><th>Requests</th><th class="hidden sm:table-cell">Credits</th><th>Cost</th><th class="hidden md:table-cell">Last AI Use</th></tr></thead>
+                            <tbody id="ai-by-business-body"></tbody>
+                        </table></div>
+                        <div id="ai-by-business-empty" class="hidden text-center py-6 text-textSec text-xs">No AI usage recorded for this period.</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label mb-2">Failed AI Requests by Reason</div>
+                        <div id="ai-failures" class="space-y-2"></div>
+                    </div>
+                </div>
 
-                <div class="stat-card"><div class="stat-label">Failed AI Requests (period)</div><div class="stat-value" id="ai-failed-count">&mdash;</div></div>
-
+                <div class="stat-label pt-2">Configuration</div>
                 <div class="stat-card space-y-2">
                     <div class="flex items-center justify-between">
                         <div class="stat-label">Exchange Rate</div>
@@ -203,13 +297,13 @@
                         <span>Source: <span id="fx-source" class="text-textMain">&mdash;</span></span>
                         <span>Updated: <span id="fx-updated" class="text-textMain">&mdash;</span></span>
                     </div>
-                    <div id="fx-override-banner" class="hidden text-[10px] font-semibold text-amber-300">Manual override active — automatic rate is not being used.</div>
+                    <div id="fx-override-banner" class="hidden text-[10px] font-semibold text-amber-300">MANUAL override active — the automatic rate is not being used.</div>
                     <div id="fx-error-banner" class="hidden text-[10px] text-danger"></div>
                 </div>
 
                 <div class="stat-card space-y-3">
                     <div class="stat-label">Settings &amp; Budgets</div>
-                    <p class="text-[10px] text-textSec leading-relaxed">Internal monitoring budgets and the manual USD&rarr;NGN override used only when Exchange Rate mode above is set to Manual. These are NOT customer AI-credit allowances.</p>
+                    <p class="text-[10px] text-textSec leading-relaxed">Internal monitoring budgets for Cauldra's own provider spend, and the manual USD&rarr;NGN override. These are NOT customer AI-credit allowances.</p>
                     <form id="platform-settings-form" class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                         <div class="sm:col-span-2 flex items-center gap-2">
                             <input type="checkbox" id="setting-fx-override-enabled" class="rounded border-borderCol cursor-pointer">
@@ -226,52 +320,55 @@
 
                 <div class="stat-card space-y-3">
                     <div class="stat-label">Provider Pricing ($ per 1,000 tokens)</div>
-                    <p class="text-[10px] text-textSec leading-relaxed">The ONLY inputs used to estimate provider cost from real token usage. Unconfigured models show no cost until set here.</p>
+                    <p class="text-[10px] text-textSec leading-relaxed">The ONLY inputs used to estimate provider cost from real token usage. Edit the price on a model's row; a model with no price shows its requests as unpriced, never a guessed cost.</p>
                     <div id="ai-pricing-list" class="space-y-2"></div>
-                    <form id="ai-pricing-form" class="grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs pt-2 border-t border-borderCol">
-                        <input type="text" id="pricing-provider" placeholder="provider (e.g. gemini)" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
-                        <input type="text" id="pricing-model" placeholder="model" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
-                        <input type="number" step="0.0001" min="0" id="pricing-input-rate" placeholder="$/1k input" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
-                        <input type="number" step="0.0001" min="0" id="pricing-output-rate" placeholder="$/1k output" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
-                        <button type="submit" class="sm:col-span-4 bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-semibold transition cursor-pointer text-xs">Save Pricing</button>
-                    </form>
+                    <details class="pt-2 border-t border-borderCol">
+                        <summary class="text-[11px] text-primary font-semibold cursor-pointer">Add a custom model</summary>
+                        <form id="ai-pricing-form" class="grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs pt-2">
+                            <select id="pricing-provider" class="ops-select"><option value="gemini">gemini</option><option value="openai">openai</option></select>
+                            <input type="text" id="pricing-model" placeholder="exact model id" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                            <input type="number" step="0.0001" min="0" id="pricing-input-rate" placeholder="$/1k input" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                            <input type="number" step="0.0001" min="0" id="pricing-output-rate" placeholder="$/1k output" class="bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                            <button type="submit" class="sm:col-span-4 bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-semibold transition cursor-pointer text-xs">Save Custom Model</button>
+                        </form>
+                    </details>
                 </div>
             </div>
 
             <!-- ALERTS -->
             <div data-view="alerts" class="space-y-3">
-                <div class="flex gap-2 text-xs">
-                    <button type="button" data-alert-filter="unresolved" class="alert-filter-btn px-3 py-1.5 rounded-lg border border-borderCol cursor-pointer">Unresolved</button>
+                <div class="flex flex-wrap gap-2 text-xs">
+                    <button type="button" data-alert-filter="unresolved" class="alert-filter-btn px-3 py-1.5 rounded-lg border border-borderCol cursor-pointer">Unresolved <span data-alert-count="unresolved"></span></button>
+                    <button type="button" data-alert-filter="watching" class="alert-filter-btn px-3 py-1.5 rounded-lg border border-borderCol cursor-pointer">Watching <span data-alert-count="watching"></span></button>
+                    <button type="button" data-alert-filter="resolved" class="alert-filter-btn px-3 py-1.5 rounded-lg border border-borderCol cursor-pointer">Resolved <span data-alert-count="resolved"></span></button>
                     <button type="button" data-alert-filter="all" class="alert-filter-btn px-3 py-1.5 rounded-lg border border-borderCol cursor-pointer">All</button>
                 </div>
+                <p class="text-[10px] text-textSec" id="alerts-sources"></p>
                 <div id="alerts-list" class="space-y-2"></div>
                 <div id="alerts-empty" class="hidden text-center py-8 text-textSec text-xs">No alerts.</div>
             </div>
 
             <!-- SYSTEM HEALTH -->
             <div data-view="system-health" class="space-y-3">
-                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                    <div class="stat-card"><div class="stat-label">Database</div><div class="stat-value" id="health-db-status">&mdash;</div></div>
-                    <div class="stat-card"><div class="stat-label">Failed AI (24h)</div><div class="stat-value" id="health-ai-failed">&mdash;</div></div>
-                    <div class="stat-card"><div class="stat-label">Failed Payments (24h)</div><div class="stat-value" id="health-payments-failed">&mdash;</div></div>
-                    <div class="stat-card"><div class="stat-label">Webhooks (24h)</div><div class="stat-value" id="health-webhooks">&mdash;</div></div>
-                    <div class="stat-card"><div class="stat-label">Critical Alerts</div><div class="stat-value" id="health-critical-alerts">&mdash;</div></div>
-                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3" id="health-cards"></div>
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3" id="health-counters"></div>
                 <p class="text-[10px] text-textSec" id="health-checked-at"></p>
             </div>
 
             <!-- INFRASTRUCTURE -->
             <div data-view="infrastructure" class="space-y-3">
-                <div id="infra-note" class="px-3 py-2.5 rounded-xl border border-borderCol bg-cardBg text-[11px] text-textSec leading-relaxed"></div>
-                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                    <div class="stat-card"><div class="stat-label">Storage Used</div><div class="stat-value" id="infra-storage">&mdash;</div></div>
-                    <div class="stat-card"><div class="stat-label">Files Stored</div><div class="stat-value" id="infra-files">&mdash;</div></div>
-                    <div class="stat-card"><div class="stat-label">Database</div><div class="stat-value !text-sm" id="infra-db-host">&mdash;</div></div>
+                <div class="px-3 py-2.5 rounded-xl border border-borderCol bg-cardBg text-[11px] text-textSec leading-relaxed">Every figure says where it comes from: <span class="prov-tag">Live provider</span> read from the provider now, <span class="prov-tag">Calculated</span> from Cauldra's own records, <span class="prov-tag">Configuration</span> from this deployment's settings, <span class="prov-tag">Unavailable</span> when Cauldra cannot know it.</div>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                    <div class="stat-card" id="infra-storage"></div>
+                    <div class="stat-card" id="infra-database"></div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-label mb-2">AI Providers Configured</div>
-                    <div class="flex gap-3 text-xs" id="infra-ai-providers"></div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div class="stat-card" id="infra-ai"></div>
+                    <div class="stat-card" id="infra-email"></div>
+                    <div class="stat-card" id="infra-payments"></div>
+                    <div class="stat-card" id="infra-hosting"></div>
                 </div>
+                <div class="stat-card" id="infra-backups"></div>
             </div>
         </main>
     </div>

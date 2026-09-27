@@ -5,24 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow, noarchive">
 <title>Cauldra Ops Console</title>
-<script src="/assets/vendor/tailwindcss-3.4.17.js"></script>
+<!-- Prebuilt Tailwind for the console (scripts/build-tailwind-css.js). The
+     in-browser compiler this page used to load was removed with row 73. -->
+<link rel="stylesheet" href="ops.css">
 <link rel="stylesheet" href="/assets/vendor/fontawesome/css/all.min.css">
-<script>
-    tailwind.config = {
-        darkMode: 'class',
-        theme: {
-            extend: {
-                colors: {
-                    bgMain: '#070B14', sidebarBg: '#0A0F1D', cardBg: '#0D1322', cardHover: '#131C31',
-                    borderCol: '#172033', primary: '#436BEE', primaryHover: '#375BCC',
-                    textMain: '#E2E8F0', textSec: '#7C8BA1',
-                    success: '#1CA850', warning: '#EAB308', danger: '#D94141',
-                },
-                fontFamily: { sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'] },
-            },
-        },
-    };
-</script>
 <style>
     body { background: #070B14; color: #E2E8F0; font-family: Inter, system-ui, -apple-system, sans-serif; }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -40,6 +26,10 @@
     table.data-table td { padding: 9px 10px; border-bottom: 1px solid #131C31; color: #E2E8F0; vertical-align: middle; }
     table.data-table tbody tr:hover { background: #0D1322; }
     .table-scroll { overflow-x: auto; border: 1px solid #172033; border-radius: .85rem; }
+    .ops-select { background: #0D1322; border: 1px solid #172033; border-radius: .75rem; padding: .5rem .75rem; font-size: 12px; color: #E2E8F0; min-width: 0; }
+    .ops-select:focus { outline: none; border-color: #436BEE; }
+    .prov-tag { display: inline-block; padding: 1px 6px; border-radius: 6px; font-size: 9px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; background: #131C31; color: #7C8BA1; border: 1px solid #172033; vertical-align: middle; }
+    .muted-dash { color: #4B5870; }
     .pill { display: inline-flex; align-items: center; gap: .3rem; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .02em; }
     /* #sidebar is `position:fixed` on mobile (see index.html), so it is NOT
        part of the page's normal scroll flow - if its own height is taller

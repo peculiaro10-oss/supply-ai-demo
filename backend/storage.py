@@ -56,6 +56,16 @@ class StorageProvider:
     def delete(self, key: str) -> None:
         raise NotImplementedError
 
+    # --- read-only operations for Cauldra Ops (OPS-ACCURACY-001) -------------
+    def health_check(self) -> None:
+        """A live, read-only round-trip to the provider. Raises on failure."""
+        self.verify()
+
+    def list_objects(self, limit: int = 20000) -> tuple[dict, bool]:
+        """({object key: size in bytes or None}, complete). Read-only: keys and
+        sizes only, never contents. `complete` is False when `limit` was hit."""
+        raise NotImplementedError
+
 
 class LocalStorage(StorageProvider):
     name = "local"
@@ -93,6 +103,19 @@ class LocalStorage(StorageProvider):
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
 
+    def health_check(self) -> None:
+        if not self.root.is_dir():
+            raise RuntimeError("Upload directory is missing")
+
+    def list_objects(self, limit: int = 20000) -> tuple[dict, bool]:
+        found = {}
+        for path in self.root.rglob("*"):
+            if path.is_file() and not path.name.endswith(".tmp"):
+                if len(found) >= limit:
+                    return found, False
+                found[path.relative_to(self.root).as_posix()] = path.stat().st_size
+        return found, True
+
 
 class S3CompatibleStorage(StorageProvider):
     """Private S3-compatible storage, enabled only through explicit config."""
@@ -128,6 +151,25 @@ class S3CompatibleStorage(StorageProvider):
 
     def delete(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=self._object_key(key))
+
+    def health_check(self) -> None:
+        self.client.head_bucket(Bucket=self.bucket)
+
+    def list_objects(self, limit: int = 20000) -> tuple[dict, bool]:
+        found, token = {}, None
+        prefix = f"{self.prefix}/" if self.prefix else ""
+        while True:
+            kwargs = {"Bucket": self.bucket, "Prefix": prefix, "MaxKeys": 1000}
+            if token:
+                kwargs["ContinuationToken"] = token
+            page = self.client.list_objects_v2(**kwargs)
+            for obj in page.get("Contents", []):
+                if len(found) >= limit:
+                    return found, False
+                found[obj["Key"][len(prefix):]] = obj.get("Size")
+            if not page.get("IsTruncated"):
+                return found, True
+            token = page.get("NextContinuationToken")
 
 
 class SupabaseStorage(StorageProvider):
@@ -175,6 +217,33 @@ class SupabaseStorage(StorageProvider):
 
     def delete(self, key: str) -> None:
         self._bucket_client().remove([_validate_object_key(key)])
+
+    def list_objects(self, limit: int = 20000) -> tuple[dict, bool]:
+        """Supabase lists one folder level at a time; folders have no id."""
+        bucket = self._bucket_client()
+        found, pending = {}, [""]
+        while pending:
+            folder = pending.pop()
+            offset = 0
+            while True:
+                page = bucket.list(folder, {"limit": 1000, "offset": offset, "sortBy": {"column": "name", "order": "asc"}}) or []
+                for item in page:
+                    name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+                    if not name or name == ".emptyFolderPlaceholder":
+                        continue
+                    path = f"{folder}/{name}" if folder else name
+                    item_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
+                    if item_id is None:
+                        pending.append(path)
+                        continue
+                    if len(found) >= limit:
+                        return found, False
+                    meta = (item.get("metadata") if isinstance(item, dict) else getattr(item, "metadata", None)) or {}
+                    found[path] = meta.get("size") if isinstance(meta, dict) else None
+                if len(page) < 1000:
+                    break
+                offset += 1000
+        return found, True
 
 
 def build_storage_provider(root: Path) -> StorageProvider:

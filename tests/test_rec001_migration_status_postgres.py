@@ -9,7 +9,7 @@ import unittest
 
 from tests.postgres_test_support import ADMIN_URL, create_postgres_test_schema, drop_postgres_test_schema
 
-HEAD = "0042_business_brain_forecast_recompute"
+HEAD = "0043_ops_accuracy_telemetry"
 PREFIX = "cauldra_rec001"
 
 

@@ -2,6 +2,7 @@ import os
 import re
 import unicodedata
 import time
+import threading
 import asyncio
 import math
 import csv
@@ -34,7 +35,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import AliasChoices, BaseModel, EmailStr, ConfigDict, Field, field_validator
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, ForeignKey, Text, Boolean,
-    DateTime as SQLDateTime, and_, or_, func, UniqueConstraint, inspect,
+    DateTime as SQLDateTime, and_, or_, func, UniqueConstraint, inspect, case,
     cast, literal, text as sql_text, event, Index
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
@@ -1909,6 +1910,9 @@ class AIUsageLedger(Base):
     input_tokens = Column(Integer, nullable=True)
     output_tokens = Column(Integer, nullable=True)
     estimated_provider_cost = Column(Float, nullable=True)
+    # OPS-ACCURACY-001 (migration 0043): why a failed request failed - one of
+    # AI_FAILURE_CATEGORIES. NULL on successes and on failures recorded before it.
+    failure_category = Column(String, nullable=True)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
 
 class BusinessSubscription(Base):
@@ -2750,13 +2754,14 @@ def check_location_after_state(db: Session, business: BusinessProfile, *, exclud
         if maximum is not None and after[resource] > maximum and after[resource] > before:
             raise_limit_reached(db, business, resource, before, maximum, after[resource] - before)
 
-def record_ai_usage(db: Session, user: User, operation_type: str, success: bool, provider: str, model: str, **metadata):
+def record_ai_usage(db: Session, user: User, operation_type: str, success: bool, provider: str, model: str, failure_category: Optional[str] = None, **metadata):
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     _, _, period = billing_period_for(db, business)
     credits = AI_CREDIT_WEIGHTS[operation_type] if success else 0
     db.add(AIUsageLedger(business_id=user.business_id, user_id=user.id, operation_type=operation_type, credits_consumed=credits,
                          billing_period=period, provider=provider, model=model, success=success,
-                         input_tokens=metadata.get("input_tokens"), output_tokens=metadata.get("output_tokens"), estimated_provider_cost=metadata.get("estimated_provider_cost")))
+                         input_tokens=metadata.get("input_tokens"), output_tokens=metadata.get("output_tokens"), estimated_provider_cost=metadata.get("estimated_provider_cost"),
+                         failure_category=None if success else (failure_category or "other")))
     return credits
 
 # Audit actions that change a subscription's plan in the middle of a billing
@@ -6070,6 +6075,8 @@ async def notification_sweep_loop():
                         db.rollback()
             finally:
                 db.close()
+            # OPS-ACCURACY-001: System Health reads when the sweep last completed.
+            record_ops_signal("ops_sweep_last_run_at", datetime.utcnow().isoformat())
         except Exception:
             pass  # a sweep-loop error must never kill the background task permanently
 
@@ -7212,6 +7219,9 @@ def log_email_delivery_failure(purpose: str, category: str, **fields) -> None:
     record = {"event": "email_delivery_failed", "provider": "resend", "purpose": purpose, "category": category}
     record.update(fields)
     print("[email-delivery] " + json.dumps(record, sort_keys=True, default=str))
+    # OPS-ACCURACY-001: the Email health card and alert read these two signals.
+    record_ops_signal("ops_email_last_failure_at", datetime.utcnow().isoformat())
+    record_ops_signal("ops_email_last_failure_category", category)
 
 def send_resend_email(*, purpose: str, to_email: str, subject: str, html: str) -> None:
     api_key = os.getenv("RESEND_API_KEY", "").strip()
@@ -7234,6 +7244,7 @@ def send_resend_email(*, purpose: str, to_email: str, subject: str, html: str) -
         log_email_delivery_failure(purpose, category, exception_type=type(exc).__name__)
         raise EmailDeliveryError(category) from None
     if r.ok:
+        record_ops_signal("ops_email_last_success_at", datetime.utcnow().isoformat())
         return
     try:
         body = r.json()
@@ -13619,7 +13630,10 @@ def presence_heartbeat(payload: PresenceHeartbeatRequest, user: User = Depends(g
     if payload.activity:
         row.last_activity_at = now
     row.signed_out_at = None
-    user.last_active_at = now   # V31: the one write platform-wide "active users" reads
+    # OPS-ACCURACY-001: Ops "Last Active" means meaningful use - a sign-in or a
+    # heartbeat reporting a real click/tap/key press - not an idle open tab.
+    if payload.activity:
+        user.last_active_at = now   # V31: the one write platform-wide "active users" reads
     db.commit(); return {"session_id": session_id}
 
 @app.post("/presence/logout")
@@ -16745,8 +16759,8 @@ def run_billable_ai(db: Session, user: User, operation: str, provider: str, mode
     usage: dict = {}
     try:
         result = callback(usage)
-    except Exception:
-        record_ai_usage(db, user, operation, False, provider, model)
+    except Exception as exc:
+        record_ai_usage(db, user, operation, False, provider, model, failure_category=classify_ai_failure(exc))
         db.commit()
         raise
     cost_usd = estimate_ai_cost_usd(db, provider, model, usage.get("input_tokens"), usage.get("output_tokens"))
@@ -17150,6 +17164,21 @@ class PlatformAlert(Base):
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False, index=True)
     acknowledged_at = Column(SQLDateTime, nullable=True)
     acknowledged_by_id = Column(Integer, nullable=True)
+    # OPS-ACCURACY-001 (migration 0043): the grouped, plain-English inbox. One
+    # row per condition (dedup_key); a repeat bumps occurrences/last_seen_at
+    # instead of adding a row. NULLs on older rows read as source "cauldra",
+    # one occurrence, state from acknowledged_at.
+    source = Column(String, nullable=True)
+    state = Column(String, nullable=True)  # unresolved | watching | resolved
+    occurrences = Column(Integer, nullable=True)
+    last_seen_at = Column(SQLDateTime, nullable=True)
+    impact = Column(Text, nullable=True)
+    why_it_matters = Column(Text, nullable=True)
+    technical_detail = Column(Text, nullable=True)
+    affected_businesses = Column(Integer, nullable=True)
+    resolved_at = Column(SQLDateTime, nullable=True)
+    resolved_by_id = Column(Integer, nullable=True)
+    external_url = Column(String, nullable=True)
 
 class AIProviderPricing(Base):
     """THE single, central place a $/1,000-token rate lives for one exact
@@ -17416,8 +17445,11 @@ def check_ai_budget_alerts(db: Session, provider: str) -> None:
         if db.query(PlatformAlert).filter(PlatformAlert.dedup_key == dedup_key).first():
             continue
         db.add(PlatformAlert(
-            alert_type="ai_budget_threshold", provider=provider,
-            severity="critical" if threshold >= 95 else "important",
+            alert_type="ai_budget_threshold", provider=provider, source="AI providers", state="unresolved",
+            occurrences=1, last_seen_at=now,
+            impact="Cauldra's own AI provider spend, not any customer's allowance.",
+            why_it_matters="Spend beyond the budget is paid by Cauldra.",
+            severity="critical" if threshold >= 95 else "high",
             title=f"{provider.title()} spend at {threshold}% of budget",
             message=(f"{provider.title()} AI expenditure has reached {threshold}% of the configured "
                      f"monthly budget (\u20a6{budget_ngn:,.0f}). Estimated spend so far this month: \u20a6{spent_ngn:,.0f}."),
@@ -17657,259 +17689,987 @@ def platform_logout(response: Response, token: str = Depends(oauth2_scheme), own
     response.delete_cookie(PLATFORM_PANEL_COOKIE, path=PLATFORM_PANEL_PATH)
     return {"message": "Signed out."}
 
+# =============================================================================
+# OPS-ACCURACY-001 - one definition per Private Ops number.
+# Every figure below is computed from a named source, labelled with its
+# provenance (LIVE PROVIDER / CAULDRA CALCULATED / CONFIGURATION / UNAVAILABLE)
+# and never written back while being read. Businesses, Subscriptions, the
+# Overview cards and Business Detail all read ops_business_rows(), so they
+# cannot disagree with each other or with access enforcement.
+# =============================================================================
+OPS_ACTIVE_WINDOW_DAYS = 30          # "Active" = meaningful activity within 30 days
+OPS_TRIAL_ENDING_DAYS = 7            # "Trial ending soon" / "expiring within 7 days"
+OPS_HEALTH_FRESH_SECONDS = 300       # a System Health result older than this reads STALE
+OPS_PROCESS_STARTED_AT = datetime.utcnow()
+OPS_PROVENANCE = {"live": "LIVE PROVIDER", "calculated": "CAULDRA CALCULATED",
+                  "configuration": "CONFIGURATION", "unavailable": "UNAVAILABLE"}
+OPS_DEFINITIONS = {
+    "last_active": ("Latest sign-in, or latest app heartbeat that reported a real click, tap or key press. "
+                    "An idle open tab does not count. Before 2026-09-27 an idle heartbeat also counted."),
+    "active_business": "A business with at least one user whose Last Active is within the last 30 days.",
+    "trialing": "Effective status 'trialing': a trial whose end time has not passed (the rule access enforcement applies).",
+    "paying": "Effective status 'active': a paid billing period is running now.",
+    "paid_to_cauldra": ("Successful Cauldra subscription payments (payment_records.status = success), "
+                        "excluding the refundable card-verification charge. Never merchant sales."),
+    "trial_conversion": ("Of businesses whose trial has ended (trial over, cancelled or paid early), the share "
+                         "with at least one successful subscription payment. Trials still running are excluded."),
+    "users": "User accounts linked to the business that are not disabled.",
+    "returning_users": ("Users active in the last 30 days who also had a signed-in app session that began "
+                        "before those 30 days (presence history)."),
+    "mrr": ("Sum of the monthly price (annual price / 12 for annual billing) of every effectively active "
+            "subscription not scheduled to cancel, at current PLAN_CONFIG prices."),
+}
+
+AI_FAILURE_CATEGORIES = {
+    "provider_unavailable": "Provider unavailable",
+    "provider_auth": "Provider rejected Cauldra's key",
+    "rate_limited": "Rate limited",
+    "insufficient_provider_credit": "Insufficient provider credit",
+    "timeout": "Timed out",
+    "malformed_response": "Malformed response",
+    "validation_failure": "Internal validation failure",
+    "not_configured": "Provider not configured",
+    "other": "Other error",
+}
+
+def classify_ai_failure(exc: BaseException) -> str:
+    """Why an AI call failed, from the exception chain only (type, status, the
+    provider's own error text). Never inspects prompts or payloads."""
+    chain, seen, cur = [], set(), exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur)); chain.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    provider_exc = next((e for e in chain if not isinstance(e, HTTPException)), None)
+    if provider_exc is None:
+        first = chain[0]
+        if isinstance(first, HTTPException) and first.status_code == 503:
+            return "not_configured"
+        if isinstance(first, HTTPException) and first.status_code < 500:
+            return "validation_failure"
+        return "other"
+    name = type(provider_exc).__name__.lower()
+    text = " ".join(str(provider_exc).split()).lower()
+    status = getattr(provider_exc, "status_code", None) or getattr(provider_exc, "code", None) or getattr(provider_exc, "status", None)
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        status = None
+    if "timeout" in name or "timed out" in text or "deadline" in text:
+        return "timeout"
+    if "insufficient_quota" in text or "billing" in text or "credit balance" in text or status == 402:
+        return "insufficient_provider_credit"
+    if status == 429 or "ratelimit" in name or "rate limit" in text or "resource_exhausted" in text or "resource exhausted" in text:
+        return "rate_limited"
+    if status in (401, 403) or "permission" in name or "authentication" in name or "api key" in text or "permission_denied" in text:
+        return "provider_auth"
+    if (status is not None and status >= 500) or "connection" in name or "unavailable" in text or "overloaded" in text:
+        return "provider_unavailable"
+    if isinstance(provider_exc, (ValueError, KeyError, TypeError)) or "json" in name or "empty" in text or "parse" in text:
+        return "malformed_response"
+    return "other"
+
+# --- small, durable operational signals (PlatformSetting rows) --------------
+def record_ops_signal(key: str, value: str) -> None:
+    """Best-effort write of one operational signal on its own session and
+    thread, so a signal can never slow, break or be rolled back with the
+    request that raised it (an email failure while the database is down must
+    not add a connection timeout to that request)."""
+    threading.Thread(target=_write_ops_signal, args=(key, value), daemon=True).start()
+
+def _write_ops_signal(key: str, value: str) -> None:
+    db = SessionLocal()
+    try:
+        set_platform_setting(db, key, value)
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+def _setting_time(db: Session, key: str) -> Optional[datetime]:
+    raw = get_platform_setting(db, key)
+    try:
+        return datetime.fromisoformat(raw) if raw else None
+    except ValueError:
+        return None
+
+# --- businesses: one snapshot every Ops page reads ---------------------------
+def ops_billing_context(sub: Optional["BusinessSubscription"], status: Optional[str], now: datetime) -> Dict[str, Any]:
+    """The one lifecycle date that matters for this status, in words the UI renders."""
+    if sub is None:
+        return {"kind": "none", "date": None, "days_left": None}
+    def days_until(dt):
+        return max(0, math.ceil((dt - now).total_seconds() / 86400)) if dt else None
+    if status == "trialing":
+        return {"kind": "trial_ends", "date": to_utc_iso(sub.trial_end_at), "days_left": days_until(sub.trial_end_at)}
+    if status == "active":
+        if sub.cancel_at_period_end:
+            return {"kind": "access_until", "date": to_utc_iso(sub.current_period_end), "days_left": days_until(sub.current_period_end)}
+        renews = sub.next_billing_at or sub.current_period_end
+        return {"kind": "renews", "date": to_utc_iso(renews), "days_left": days_until(renews),
+                "pending_downgrade_plan": plan_label_for(sub.pending_downgrade_plan) if sub.pending_downgrade_plan else None}
+    if status == "past_due":
+        return {"kind": "grace_until", "date": to_utc_iso(sub.grace_period_ends_at), "days_left": days_until(sub.grace_period_ends_at)}
+    if status == "expired":
+        if sub.grace_period_ends_at and sub.grace_period_ends_at <= now:
+            ended = sub.grace_period_ends_at
+        elif sub.trial_end_at and sub.trial_end_at <= now and not sub.paid_at:
+            ended = sub.trial_end_at
+        else:
+            ended = sub.current_period_end or sub.trial_end_at
+        return {"kind": "expired", "date": to_utc_iso(ended), "days_left": None}
+    if status == "cancelled":
+        ended = sub.current_period_end if (sub.current_period_end and sub.current_period_end <= now) else (sub.cancelled_at or sub.current_period_end)
+        return {"kind": "ended", "date": to_utc_iso(ended), "days_left": None}
+    if status == "pending_payment_method":
+        return {"kind": "awaiting_card", "date": None, "days_left": None}
+    return {"kind": "other", "date": None, "days_left": None}
+
+def _ops_payment_facts(db: Session) -> Dict[int, Dict[str, Any]]:
+    """Per business: lifetime paid, payment count, last successful payment, and
+    whether anything is failing or waiting for review. Grouped queries only."""
+    facts: Dict[int, Dict[str, Any]] = {}
+    for bid, kobo, count, last_paid in _revenue_base_query(db, None, None).with_entities(
+            PaymentRecord.business_id, func.coalesce(func.sum(PaymentRecord.amount_kobo), 0),
+            func.count(PaymentRecord.id), func.max(PaymentRecord.paid_at)).group_by(PaymentRecord.business_id).all():
+        facts[bid] = {"paid_kobo": int(kobo or 0), "payments": int(count or 0), "last_paid_at": last_paid}
+    for bid, last_failed in db.query(PaymentRecord.business_id, func.max(PaymentRecord.created_at)).filter(
+            PaymentRecord.status == "failed", PaymentRecord.purpose != "card_verification").group_by(PaymentRecord.business_id).all():
+        facts.setdefault(bid, {"paid_kobo": 0, "payments": 0, "last_paid_at": None})["last_failed_at"] = last_failed
+    for bid, flagged in db.query(PaymentRecord.business_id, func.count(PaymentRecord.id)).filter(
+            PaymentRecord.status.like("flagged_%")).group_by(PaymentRecord.business_id).all():
+        facts.setdefault(bid, {"paid_kobo": 0, "payments": 0, "last_paid_at": None})["flagged"] = int(flagged)
+    return facts
+
+def ops_business_rows(db: Session, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Every business with its effective status, health, billing context and
+    support-level aggregates. Read-only; a handful of grouped queries."""
+    now = now or datetime.utcnow()
+    active_cutoff = now - timedelta(days=OPS_ACTIVE_WINDOW_DAYS)
+    businesses = db.query(BusinessProfile).all()
+    subs = {s.business_id: s for s in db.query(BusinessSubscription).all()}
+    users_by_biz: Dict[int, List[Any]] = {}
+    for u in db.query(User.id, User.business_id, User.role, User.disabled, User.last_active_at, User.email,
+                      User.firstname, User.lastname, User.username, User.email_verified_at).order_by(User.id).all():
+        users_by_biz.setdefault(u.business_id, []).append(u)
+    pay = _ops_payment_facts(db)
+    ai_failed_7d = dict(db.query(AIUsageLedger.business_id, func.count(AIUsageLedger.id)).filter(
+        AIUsageLedger.success == False, AIUsageLedger.created_at >= now - timedelta(days=7)).group_by(AIUsageLedger.business_id).all())
+    rows = []
+    for b in businesses:
+        sub = subs.get(b.id)
+        status = effective_subscription_status(sub, now)
+        members = users_by_biz.get(b.id, [])
+        enabled = [u for u in members if not u.disabled]
+        admins = [u for u in members if u.role == "admin"]
+        owner_user = next((u for u in admins if not u.disabled), admins[0] if admins else None)
+        last_active = max((u.last_active_at for u in members if u.last_active_at), default=None)
+        facts = pay.get(b.id, {})
+        health = []
+        if status == "trialing" and sub.trial_end_at and sub.trial_end_at - now <= timedelta(days=OPS_TRIAL_ENDING_DAYS):
+            days = max(0, math.ceil((sub.trial_end_at - now).total_seconds() / 86400))
+            health.append({"code": "trial_ending", "label": f"Trial ends in {days} day{'s' if days != 1 else ''}", "severity": "warning"})
+        if facts.get("flagged"):
+            health.append({"code": "payment_review", "label": "Payment needs review", "severity": "critical"})
+        if status == "past_due":
+            health.append({"code": "payment_issue", "label": "Payment overdue", "severity": "critical"})
+        elif facts.get("last_failed_at") and facts["last_failed_at"] >= now - timedelta(days=30) and (
+                not facts.get("last_paid_at") or facts["last_failed_at"] > facts["last_paid_at"]):
+            health.append({"code": "payment_issue", "label": "Payment failed", "severity": "warning"})
+        if status == "active" and not facts.get("payments"):
+            health.append({"code": "subscription_mismatch", "label": "Active without a recorded payment", "severity": "warning"})
+        if status in ("trialing", "active", "past_due"):
+            if last_active is None and b.trial_started_at and b.trial_started_at < now - timedelta(days=1):
+                health.append({"code": "never_active", "label": "Never active", "severity": "info"})
+            elif last_active is not None and last_active < active_cutoff:
+                health.append({"code": "inactive_30d", "label": "Inactive 30d", "severity": "info"})
+        if owner_user is not None and owner_user.email_verified_at is None:
+            health.append({"code": "email_unverified", "label": "Owner email unverified", "severity": "info"})
+        if ai_failed_7d.get(b.id, 0) >= 3:
+            health.append({"code": "ai_failures", "label": "Repeated AI failures", "severity": "warning"})
+        plan_id = (sub.plan if sub else b.subscription_plan) or "starter"
+        rows.append({
+            "id": b.id, "business_code": b.business_code, "company_name": b.company_name,
+            "joined_at": b.trial_started_at, "plan": plan_id, "plan_label": plan_label_for(plan_id),
+            "billing_interval": (sub.billing_interval if sub else b.billing_interval),
+            "status": status, "stored_status": sub.status if sub else None, "sub": sub,
+            "health": health, "billing": ops_billing_context(sub, status, now),
+            "user_count": len(enabled), "user_count_disabled": len(members) - len(enabled),
+            "last_active_at": last_active,
+            "owner": ({"name": " ".join(p for p in (owner_user.firstname, owner_user.lastname) if p) or owner_user.username,
+                       "email": owner_user.email, "email_verified": owner_user.email_verified_at is not None} if owner_user else None),
+            "search_text": " ".join(str(x or "") for x in (
+                b.company_name, b.business_code, b.email,
+                *[f"{u.email} {u.firstname or ''} {u.lastname or ''} {u.username}" for u in admins])).lower(),
+            "paid_kobo": facts.get("paid_kobo", 0), "payments": facts.get("payments", 0),
+            "last_paid_at": facts.get("last_paid_at"),
+            "updated_at": sub.updated_at if sub else None,
+        })
+    return rows
+
+def ops_business_row_json(r: Dict[str, Any]) -> Dict[str, Any]:
+    sub = r["sub"]
+    return {
+        "id": r["id"], "business_code": r["business_code"], "company_name": r["company_name"],
+        "joined_at": to_utc_iso(r["joined_at"]), "plan": r["plan"], "plan_label": r["plan_label"],
+        "billing_interval": r["billing_interval"],
+        "subscription_status": r["status"], "is_trial": r["status"] == "trialing",
+        "health": r["health"], "billing": r["billing"],
+        "user_count": r["user_count"], "user_count_disabled": r["user_count_disabled"],
+        "last_active_at": to_utc_iso(r["last_active_at"]),
+        "paid_to_cauldra_naira": round(r["paid_kobo"] / 100, 2), "successful_payments": r["payments"],
+        "last_payment_at": to_utc_iso(r["last_paid_at"]),
+        "trial_end_at": to_utc_iso(sub.trial_end_at) if sub else None,
+        "current_period_start": to_utc_iso(sub.current_period_start) if sub else None,
+        "current_period_end": to_utc_iso(sub.current_period_end) if sub else None,
+        "next_billing_at": to_utc_iso(None if (sub is None or sub.cancel_at_period_end or r["status"] != "active") else (sub.next_billing_at or sub.current_period_end)),
+        "owner_email": (r["owner"] or {}).get("email"),
+    }
+
+OPS_BUSINESS_SORTS = {
+    "newest": (lambda r: r["joined_at"] or datetime.min, True),
+    "oldest": (lambda r: r["joined_at"] or datetime.max, False),
+    "recently_active": (lambda r: r["last_active_at"] or datetime.min, True),
+    "least_active": (lambda r: r["last_active_at"] or datetime.min, False),
+    "trial_ending": (lambda r: r["sub"].trial_end_at if (r["status"] == "trialing" and r["sub"] and r["sub"].trial_end_at) else datetime.max, False),
+    "renewal_soon": (lambda r: (r["sub"].next_billing_at or r["sub"].current_period_end or datetime.max) if (r["status"] == "active" and r["sub"]) else datetime.max, False),
+    "recently_changed": (lambda r: r["updated_at"] or datetime.min, True),
+    "highest_paid": (lambda r: r["paid_kobo"], True),
+}
+
+def ops_filter_business_rows(rows, *, q=None, plan=None, status=None, health=None, activity=None, now=None):
+    now = now or datetime.utcnow()
+    cutoff = now - timedelta(days=OPS_ACTIVE_WINDOW_DAYS)
+    if q:
+        needle = q.strip().lower()
+        rows = [r for r in rows if needle in r["search_text"]]
+    if plan:
+        rows = [r for r in rows if r["plan"] == plan.strip().lower()]
+    if status:
+        rows = [r for r in rows if (r["status"] or "none") == status.strip().lower()]
+    if health:
+        h = health.strip().lower()
+        if h == "any":
+            rows = [r for r in rows if any(x["severity"] in ("critical", "warning") for x in r["health"])]
+        elif h == "healthy":
+            rows = [r for r in rows if not r["health"]]
+        else:
+            rows = [r for r in rows if any(x["code"] == h for x in r["health"])]
+    if activity:
+        a = activity.strip().lower()
+        if a == "active_30d":
+            rows = [r for r in rows if r["last_active_at"] and r["last_active_at"] >= cutoff]
+        elif a == "inactive_30d":
+            rows = [r for r in rows if r["last_active_at"] and r["last_active_at"] < cutoff]
+        elif a == "never":
+            rows = [r for r in rows if not r["last_active_at"]]
+    return rows
+
+def ops_sort_rows(rows, sort: Optional[str], default: str = "newest"):
+    key, reverse = OPS_BUSINESS_SORTS.get((sort or default).strip().lower(), OPS_BUSINESS_SORTS[default])
+    return sorted(rows, key=lambda r: (key(r), r["id"]), reverse=reverse)
+
+def ops_trial_conversion(rows) -> Dict[str, Any]:
+    ended = converted = 0
+    for r in rows:
+        sub = r["sub"]
+        if sub is None or sub.trial_start_at is None or r["status"] in ("trialing", "pending_payment_method"):
+            continue
+        ended += 1
+        if r["payments"] > 0:
+            converted += 1
+    return {"converted": converted, "ended_trials": ended,
+            "rate_pct": round(converted / ended * 100, 1) if ended else None}
+
+# --- alerts: one grouped, plain-English inbox ---------------------------------
+ALERT_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+_LEGACY_ALERT_SEVERITY = {"critical": "critical", "important": "high", "info": "low"}
+ALERT_STATES = ("unresolved", "watching", "resolved")
+# Conditions that clear by themselves once fixed: they cannot be resolved by
+# hand while still true (resolving would hide a live problem).
+OPS_SELF_CLEARING_ALERTS = {"db_migration_behind", "db_migration_unreadable", "storage_unreachable",
+                            "background_sweep_stale", "fx_unavailable", "email_not_configured", "ai_pricing_missing"}
+
+def alert_state(a: "PlatformAlert") -> str:
+    if a.state in ALERT_STATES:
+        return a.state
+    return "resolved" if a.acknowledged_at else "unresolved"
+
+def alert_severity(a: "PlatformAlert") -> str:
+    return a.severity if a.severity in ALERT_SEVERITY_ORDER else _LEGACY_ALERT_SEVERITY.get(a.severity or "", "low")
+
+def upsert_ops_alert(db: Session, key: str, *, present: bool, source: str = "cauldra", severity: str = "medium",
+                     title: str = "", message: str = "", impact: str = "", why: str = "", technical: str = "",
+                     occurrences: Optional[int] = None, last_seen: Optional[datetime] = None,
+                     affected: Optional[int] = None, now: Optional[datetime] = None, external_url: Optional[str] = None) -> bool:
+    """Create, refresh, reopen or auto-resolve the one alert row for `key`.
+    Returns True when something changed. A repeat never adds a row."""
+    now = now or datetime.utcnow()
+    row = db.query(PlatformAlert).filter(PlatformAlert.dedup_key == key).first()
+    if not present:
+        if row is not None and alert_state(row) != "resolved":
+            row.state = "resolved"; row.resolved_at = now; row.resolved_by_id = None
+            row.technical_detail = ((row.technical_detail or "") + f"\nCleared automatically {now:%Y-%m-%d %H:%M} UTC: the condition is no longer present.").strip()
+            return True
+        return False
+    last_seen = last_seen or now
+    if row is None:
+        db.add(PlatformAlert(alert_type=key.split(":", 1)[0], provider=None, severity=severity, title=title, message=message,
+                             dedup_key=key, source=source, state="unresolved", occurrences=occurrences or 1,
+                             last_seen_at=last_seen, impact=impact, why_it_matters=why, technical_detail=technical,
+                             affected_businesses=affected, external_url=external_url, created_at=now))
+        return True
+    changed = False
+    if alert_state(row) == "resolved":
+        # Reopen only for NEW evidence after it was resolved.
+        if row.resolved_at is None or last_seen > row.resolved_at:
+            row.state = "unresolved"; row.resolved_at = None; row.resolved_by_id = None; row.acknowledged_at = None
+            changed = True
+        else:
+            return False
+    for attr, val in (("severity", severity), ("title", title), ("message", message), ("impact", impact),
+                      ("why_it_matters", why), ("technical_detail", technical), ("occurrences", occurrences or row.occurrences or 1),
+                      ("last_seen_at", last_seen), ("affected_businesses", affected), ("source", source), ("external_url", external_url)):
+        if getattr(row, attr) != val:
+            setattr(row, attr, val); changed = True
+    return changed
+
+def run_ops_detectors(db: Session, now: Optional[datetime] = None, rows=None) -> None:
+    """Turns what Cauldra's own records say into grouped owner alerts. Cheap
+    (a few grouped queries, no network). Commits only when something changed."""
+    now = now or datetime.utcnow()
+    day_ago = now - timedelta(hours=24)
+    changed = False
+    # Database migration level (REC-001 diagnostics, read live).
+    mig = read_database_migration_status()
+    behind = mig.get("state") == "behind"
+    changed |= upsert_ops_alert(db, "db_migration_behind", present=behind, source="Database", severity="critical",
+        title="Database is behind the deployed code",
+        message=f"{len(mig.get('pending') or [])} database migration(s) have not been applied.",
+        impact="Any screen or action that uses the missing tables or columns fails for every business.",
+        why="Sales, sign-in or billing requests can fail until the migration runs.",
+        technical=describe_migration_status(mig), now=now)
+    changed |= upsert_ops_alert(db, "db_migration_unreadable", present=mig.get("state") == "unreadable", source="Database",
+        severity="high", title="Database migration level cannot be read",
+        message="Cauldra could not read which migrations the database has.",
+        impact="A database behind the code would not be detected.", why="Schema problems would surface only as request failures.",
+        technical=describe_migration_status(mig), now=now)
+    # Payments.
+    failed = db.query(PaymentRecord.business_id, PaymentRecord.created_at).filter(
+        PaymentRecord.status == "failed", PaymentRecord.purpose != "card_verification", PaymentRecord.created_at >= day_ago).all()
+    nbiz = len({f[0] for f in failed})
+    changed |= upsert_ops_alert(db, "payments_failed_24h", present=bool(failed), source="Payments",
+        severity="high" if (len(failed) >= 3 or nbiz >= 2) else "medium",
+        title="Subscription payments are failing",
+        message=f"{len(failed)} subscription payment(s) failed in the last 24 hours.",
+        impact=f"{nbiz} business(es) may lose access when their grace period ends.",
+        why="Failed renewals turn into lost revenue and locked-out customers.",
+        technical="payment_records.status = failed (card-verification charges excluded).",
+        occurrences=len(failed), last_seen=max((f[1] for f in failed), default=now), affected=nbiz, now=now)
+    flagged = db.query(PaymentRecord.business_id, PaymentRecord.created_at, PaymentRecord.status).filter(PaymentRecord.status.like("flagged_%")).all()
+    changed |= upsert_ops_alert(db, "payments_flagged", present=bool(flagged), source="Payments", severity="critical",
+        title="Payments need manual review",
+        message=f"{len(flagged)} payment(s) did not match what Cauldra expected and were held for review.",
+        impact=f"{len({f[0] for f in flagged})} business(es): their subscription was not activated from these payments.",
+        why="A customer may have paid without getting access, or a charge amount was wrong.",
+        technical="payment_records.status: " + ", ".join(sorted({f[2] for f in flagged})) if flagged else "",
+        occurrences=len(flagged), last_seen=max((f[1] for f in flagged), default=now),
+        affected=len({f[0] for f in flagged}), now=now)
+    rows = rows if rows is not None else ops_business_rows(db, now)
+    past_due = [r for r in rows if r["status"] == "past_due"]
+    changed |= upsert_ops_alert(db, "subscriptions_past_due", present=bool(past_due), source="Payments",
+        severity="high" if len(past_due) >= 5 else "medium",
+        title="Businesses with an overdue payment",
+        message=f"{len(past_due)} business(es) are past due and inside their grace period.",
+        impact="They lose access when the grace period ends unless the renewal succeeds.",
+        why="Each one is revenue at risk.", technical="Effective subscription status past_due.",
+        occurrences=len(past_due), last_seen=max((r["updated_at"] or now for r in past_due), default=now),
+        affected=len(past_due), now=now)
+    # AI providers: failures in the last 24h, grouped per provider.
+    for provider in ("gemini", "openai"):
+        total = db.query(func.count(AIUsageLedger.id)).filter(AIUsageLedger.provider == provider, AIUsageLedger.created_at >= day_ago).scalar() or 0
+        fails = db.query(AIUsageLedger.business_id, AIUsageLedger.failure_category, AIUsageLedger.created_at).filter(
+            AIUsageLedger.provider == provider, AIUsageLedger.success == False, AIUsageLedger.created_at >= day_ago).all()
+        cats: Dict[str, int] = {}
+        for f in fails:
+            cats[f[1] or "unrecorded"] = cats.get(f[1] or "unrecorded", 0) + 1
+        top = max(cats, key=cats.get) if cats else None
+        nbiz = len({f[0] for f in fails})
+        present = len(fails) >= 3
+        sev = "critical" if (present and total and len(fails) == total and nbiz >= 3) else ("high" if (len(fails) >= 10 or nbiz >= 3) else "medium")
+        changed |= upsert_ops_alert(db, f"ai_failures:{provider}", present=present, source="AI providers", severity=sev,
+            title=f"{provider.title()} AI requests are failing",
+            message=f"{len(fails)} of {total} {provider.title()} request(s) failed in the last 24 hours"
+                    + (f". Most common reason: {AI_FAILURE_CATEGORIES.get(top, 'reason not recorded')}." if top else "."),
+            impact=f"{nbiz} business(es) saw an AI feature fail ({'invoice scanning' if provider == 'openai' else 'AI chat, advisors and insights'}).",
+            why="Customers pay for AI features through their plan; failing features erode trust.",
+            technical="By reason: " + ", ".join(f"{AI_FAILURE_CATEGORIES.get(k, 'reason not recorded')}: {v}" for k, v in sorted(cats.items(), key=lambda kv: -kv[1])),
+            occurrences=len(fails), last_seen=max((f[2] for f in fails), default=now), affected=nbiz, now=now)
+    configured = {(r.provider, r.model) for r in db.query(AIProviderPricing).all()
+                  if r.input_price_per_1k_usd is not None or r.output_price_per_1k_usd is not None}
+    missing = [f"{p}/{m}" for p, m, on in (("gemini", GEMINI_MODEL, gemini_client), ("openai", OPENAI_MODEL, openai_client))
+               if on and (p, m) not in configured]
+    changed |= upsert_ops_alert(db, "ai_pricing_missing", present=bool(missing), source="AI providers", severity="medium",
+        title="AI cost is not being measured for a model in use",
+        message="No price is set for: " + ", ".join(missing) + "." if missing else "",
+        impact="AI Spend and AI cost figures leave out this model's requests.",
+        why="You cannot see what AI is costing you.", technical="Set it under AI & Costs → Provider pricing.", now=now)
+    # Email (Resend): failures recorded by send_resend_email().
+    email_fail = _setting_time(db, "ops_email_last_failure_at")
+    email_ok = _setting_time(db, "ops_email_last_success_at")
+    failing = bool(email_fail and email_fail >= day_ago and (not email_ok or email_fail > email_ok))
+    changed |= upsert_ops_alert(db, "email_delivery_failing", present=failing, source="Email", severity="high",
+        title="Emails are not being delivered",
+        message="The most recent email Cauldra tried to send failed"
+                + (f" ({get_platform_setting(db, 'ops_email_last_failure_category') or 'unknown reason'})." if failing else "."),
+        impact="Sign-up codes, password recovery and security notices may not arrive.",
+        why="Customers who cannot receive codes cannot sign up or recover their account.",
+        technical="Recorded by the Resend sender; see the service log line [email-delivery] for the exact provider response.",
+        last_seen=email_fail, now=now)
+    email_ready = bool(os.getenv("RESEND_API_KEY", "").strip()) and bool(RESEND_FROM)
+    changed |= upsert_ops_alert(db, "email_not_configured", present=not email_ready, source="Email", severity="critical",
+        title="Email sending is not configured", message="The email provider key or sender address is missing.",
+        impact="No email can be sent: sign-up codes, password recovery, receipts.", why="Customers cannot sign up or recover access.",
+        technical="Required variables: RESEND_API_KEY, RESEND_FROM" + (f" (invalid: {RESEND_SENDER_CONFIG_ERROR})" if RESEND_SENDER_CONFIG_ERROR else "") + ".", now=now)
+    # Background job heartbeat.
+    sweep = _setting_time(db, "ops_sweep_last_run_at")
+    limit = timedelta(seconds=NOTIFICATION_SWEEP_INTERVAL_SECONDS * 2 + 300)
+    stale = (now - OPS_PROCESS_STARTED_AT) > limit and (sweep is None or now - sweep > limit)
+    changed |= upsert_ops_alert(db, "background_sweep_stale", present=stale, source="Background jobs", severity="medium",
+        title="Background reminders have stopped",
+        message="The scheduled job that sends trial and renewal reminders has not run on time.",
+        impact="Businesses may not get their 7/3/1-day subscription reminders.", why="Missed reminders lead to surprise lock-outs.",
+        technical=f"Last run: {sweep:%Y-%m-%d %H:%M} UTC." if sweep else "No run recorded since this check was added.", now=now)
+    fx = _fx_status_block(db)
+    changed |= upsert_ops_alert(db, "fx_unavailable", present=fx.get("effective_rate") is None, source="Exchange rate",
+        severity="medium", title="No USD→NGN exchange rate",
+        message="Neither an automatic nor a manual rate is available.",
+        impact="AI costs cannot be shown in naira and budgets cannot be checked.", why="Budget alerts are silently disabled.",
+        technical=f"Last automatic error: {fx.get('auto_last_error') or 'none recorded'}", now=now)
+    changed |= sync_sentry_alerts(db, now)
+    if changed:
+        db.commit()
+
+# --- Sentry (one source among several; connected only when configured) -----
+def sentry_api_settings() -> Optional[Dict[str, str]]:
+    token = os.getenv("SENTRY_API_TOKEN", "").strip()
+    org = os.getenv("SENTRY_ORG_SLUG", "").strip()
+    project = os.getenv("SENTRY_PROJECT_SLUG", "").strip()
+    if not (token and org and project):
+        return None
+    return {"token": token, "org": org, "project": project,
+            "base": os.getenv("SENTRY_API_BASE_URL", "https://sentry.io").strip().rstrip("/")}
+
+SENTRY_SYNC_SECONDS = 300
+
+def sentry_issue_to_alert(issue: Dict[str, Any]) -> Dict[str, Any]:
+    """Plain-English grouping of one Sentry issue. Fatal/error issues seen by
+    several users become high/critical; warnings and one-off browser noise stay low."""
+    level = (issue.get("level") or "error").lower()
+    count = int(issue.get("count") or 0)
+    users = int(issue.get("userCount") or 0)
+    if level == "fatal" or (level == "error" and users >= 10):
+        severity = "critical"
+    elif level == "error" and (users >= 3 or count >= 20):
+        severity = "high"
+    elif level == "error":
+        severity = "medium"
+    else:
+        severity = "low"
+    culprit = issue.get("culprit") or "an unknown place"
+    return {"key": f"sentry:{issue.get('id')}", "severity": severity,
+            "title": f"Error in {culprit}"[:200],
+            "message": f"Sentry recorded this error {count} time(s)" + (f", affecting {users} user(s)." if users else "."),
+            "impact": "The screen or request where it happens may fail for the affected users.",
+            "why": "Repeated errors mean a feature is broken for someone.",
+            "technical": (issue.get("title") or "")[:500], "occurrences": count or 1,
+            "last_seen": issue.get("lastSeen"), "url": issue.get("permalink")}
+
+def sync_sentry_alerts(db: Session, now: datetime) -> bool:
+    cfg = sentry_api_settings()
+    if not cfg:
+        return False
+    last = _setting_time(db, "ops_sentry_synced_at")
+    if last and (now - last).total_seconds() < SENTRY_SYNC_SECONDS:
+        return False
+    import requests
+    set_platform_setting(db, "ops_sentry_synced_at", now.isoformat())
+    try:
+        r = requests.get(f"{cfg['base']}/api/0/projects/{cfg['org']}/{cfg['project']}/issues/",
+                         params={"query": "is:unresolved", "statsPeriod": "24h", "limit": 25},
+                         headers={"Authorization": f"Bearer {cfg['token']}"}, timeout=8)
+        r.raise_for_status()
+        issues = r.json() if isinstance(r.json(), list) else []
+        set_platform_setting(db, "ops_sentry_last_error", "")
+    except Exception as exc:
+        set_platform_setting(db, "ops_sentry_last_error", type(exc).__name__)
+        return True
+    seen = set()
+    for issue in issues:
+        a = sentry_issue_to_alert(issue)
+        try:
+            last_seen = datetime.fromisoformat(str(a["last_seen"]).replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            last_seen = now
+        seen.add(a["key"])
+        upsert_ops_alert(db, a["key"], present=True, source="Sentry", severity=a["severity"], title=a["title"],
+                         message=a["message"], impact=a["impact"], why=a["why"], technical=a["technical"],
+                         occurrences=a["occurrences"], last_seen=last_seen, now=now, external_url=a["url"])
+    for row in db.query(PlatformAlert).filter(PlatformAlert.dedup_key.like("sentry:%")).all():
+        if row.dedup_key not in seen:
+            upsert_ops_alert(db, row.dedup_key, present=False, now=now)
+    return True
+
+def ops_alert_json(a: "PlatformAlert") -> Dict[str, Any]:
+    return {
+        "id": a.id, "type": a.alert_type, "title": a.title, "message": a.message,
+        "impact": a.impact, "why_it_matters": a.why_it_matters, "technical_detail": a.technical_detail,
+        "severity": alert_severity(a), "source": a.source or ("AI providers" if a.alert_type == "ai_budget_threshold" else "Cauldra"),
+        "state": alert_state(a), "occurrences": a.occurrences or 1,
+        "first_seen": to_utc_iso(a.created_at), "last_seen": to_utc_iso(a.last_seen_at or a.created_at),
+        "affected_businesses": a.affected_businesses, "external_url": a.external_url,
+        "resolved_at": to_utc_iso(a.resolved_at or (a.acknowledged_at if alert_state(a) == "resolved" else None)),
+        "self_clearing": (a.dedup_key or "").split(":", 1)[0] in OPS_SELF_CLEARING_ALERTS,
+    }
+
+def ops_open_alerts(db: Session) -> List["PlatformAlert"]:
+    rows = [a for a in db.query(PlatformAlert).all() if alert_state(a) != "resolved"]
+    return sorted(rows, key=lambda a: (ALERT_SEVERITY_ORDER[alert_severity(a)], -(a.last_seen_at or a.created_at).timestamp()))
+
+# --- fresh health checks --------------------------------------------------------
+def _timed(fn):
+    started = time.perf_counter()
+    result = fn()
+    return result, int((time.perf_counter() - started) * 1000)
+
+def storage_health_check() -> Dict[str, Any]:
+    """A real provider round-trip: the private bucket must answer, and be private."""
+    now = datetime.utcnow()
+    provider = UPLOAD_STORAGE.name
+    try:
+        _, ms = _timed(UPLOAD_STORAGE.health_check)
+        return {"status": "healthy", "summary": f"{provider.title()} storage answered • {ms} ms", "latency_ms": ms,
+                "provenance": OPS_PROVENANCE["live"], "checked_at": to_utc_iso(now)}
+    except Exception as exc:
+        return {"status": "down", "summary": f"{provider.title()} storage did not answer", "latency_ms": None,
+                "detail": type(exc).__name__, "provenance": OPS_PROVENANCE["live"], "checked_at": to_utc_iso(now)}
+
+def database_health_check() -> Dict[str, Any]:
+    now = datetime.utcnow()
+    try:
+        _, ms = _timed(_ping_database)
+    except Exception as exc:
+        return {"status": "down", "summary": "Cannot reach the database", "detail": _classify_database_connection_error(exc),
+                "latency_ms": None, "provenance": OPS_PROVENANCE["live"], "checked_at": to_utc_iso(now)}
+    mig = read_database_migration_status()
+    state = mig.get("state")
+    if state == "current":
+        status, summary = "healthy", f"Connected • migrations current • {ms} ms"
+    elif state == "behind":
+        n = len(mig.get("pending") or [])
+        status, summary = "needs_attention", f"Connected, but {n} migration{'s are' if n != 1 else ' is'} missing"
+    else:
+        status, summary = "needs_attention", f"Connected • migration level {state} • {ms} ms"
+    return {"status": status, "summary": summary, "latency_ms": ms, "detail": describe_migration_status(mig),
+            "migration": {"state": state, "database": mig.get("database"), "code": mig.get("code"), "pending": mig.get("pending")},
+            "provenance": OPS_PROVENANCE["live"], "checked_at": to_utc_iso(now)}
+
 @app.get("/api/platform/overview")
-def platform_overview(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
-    """"What is happening across Cauldra right now?" - a deliberately SHORT
-    list of headline numbers; every deeper breakdown lives on its own page
-    (see the other endpoints below)."""
+def platform_overview(months: int = Query(6, ge=3, le=24), owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    """The eight headline cards plus two panels. Lifetime/current figures never
+    depend on `months`; only the Business Growth trend does."""
     ensure_fresh_fx_rate(db)  # best-effort; Overview is the default landing page
     now = datetime.utcnow()
     month_start = datetime(now.year, now.month, 1)
     today_start = datetime(now.year, now.month, now.day)
-    active_now_cutoff = now - timedelta(minutes=5)
+    active_cutoff = now - timedelta(days=OPS_ACTIVE_WINDOW_DAYS)
+    rows = ops_business_rows(db, now)
+    run_ops_detectors(db, now, rows)
 
-    total_businesses = db.query(func.count(BusinessProfile.id)).scalar() or 0
-    total_users = db.query(func.count(User.id)).scalar() or 0
-    active_now = db.query(func.count(User.id)).filter(User.last_active_at >= active_now_cutoff).scalar() or 0
-    active_today = db.query(func.count(User.id)).filter(User.last_active_at >= today_start).scalar() or 0
-    new_businesses_month = db.query(func.count(BusinessProfile.id)).filter(BusinessProfile.trial_started_at >= month_start).scalar() or 0
-    new_users_month = db.query(func.count(User.id)).filter(User.created_at >= month_start).scalar() or 0
-
+    trialing = [r for r in rows if r["status"] == "trialing"]
+    paying = [r for r in rows if r["status"] == "active"]
+    plan_split: Dict[str, int] = {}
+    for r in paying:
+        plan_split[r["plan_label"]] = plan_split.get(r["plan_label"], 0) + 1
     revenue_month_kobo = _revenue_base_query(db, month_start, now).with_entities(func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
-
-    paying_businesses = db.query(func.count(func.distinct(BusinessSubscription.business_id))).filter(BusinessSubscription.status == "active").scalar() or 0
-    # TRIAL-EXPIRY-001: a stored "trialing" row whose trial has ended is expired.
-    trial_businesses = db.query(func.count(BusinessSubscription.id)).filter(
-        BusinessSubscription.status == "trialing",
-        or_(BusinessSubscription.trial_end_at.is_(None), BusinessSubscription.trial_end_at > now),
-    ).scalar() or 0
-
-    unresolved_alerts = db.query(func.count(PlatformAlert.id)).filter(PlatformAlert.acknowledged_at.is_(None)).scalar() or 0
-    critical_alerts = db.query(func.count(PlatformAlert.id)).filter(PlatformAlert.acknowledged_at.is_(None), PlatformAlert.severity == "critical").scalar() or 0
-
     ai_spend_usd_month = db.query(func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0)).filter(
         AIUsageLedger.success == True, AIUsageLedger.created_at >= month_start, AIUsageLedger.estimated_provider_cost.isnot(None),
     ).scalar() or 0.0
+    unpriced_month = db.query(func.count(AIUsageLedger.id)).filter(
+        AIUsageLedger.success == True, AIUsageLedger.created_at >= month_start, AIUsageLedger.estimated_provider_cost.is_(None)).scalar() or 0
+    open_alerts = [a for a in ops_open_alerts(db) if alert_severity(a) != "low"]
+    critical = sum(1 for a in open_alerts if alert_severity(a) == "critical")
+
+    # Business Growth: businesses joined per calendar month (UTC) and the running total.
+    y, m = now.year, now.month
+    buckets = []
+    for _ in range(months):
+        buckets.append((y, m)); m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+    buckets.reverse()
+    first = datetime(buckets[0][0], buckets[0][1], 1)
+    before = sum(1 for r in rows if r["joined_at"] and r["joined_at"] < first)
+    growth, running = [], before
+    for (by, bm) in buckets:
+        n = sum(1 for r in rows if r["joined_at"] and r["joined_at"].year == by and r["joined_at"].month == bm)
+        running += n
+        growth.append({"month": f"{by:04d}-{bm:02d}", "new": n, "total": running})
 
     return {
         "generated_at": to_utc_iso(now),
-        "businesses": {"total": total_businesses, "new_this_month": new_businesses_month, "trial": trial_businesses, "paying": paying_businesses},
-        "users": {"total": total_users, "new_this_month": new_users_month, "active_now": active_now, "active_today": active_today},
-        "revenue": {"this_month_naira": round(revenue_month_kobo / 100, 2), "currency": "NGN"},
-        "ai_spend": {"this_month_usd": round(ai_spend_usd_month, 2), "this_month_ngn": usd_to_ngn(db, ai_spend_usd_month)},
-        "alerts": {"unresolved": unresolved_alerts, "critical": critical_alerts},
-        # Documented, fixed definitions (spec: keep meanings consistent) -
-        # not a live presence system, just this heartbeat-derived window.
-        "activity_definitions": {
-            "active_now": "Authenticated user whose last /presence/heartbeat was within the last 5 minutes.",
-            "active_today": "Authenticated user with a heartbeat since 00:00 UTC today.",
+        "businesses": {
+            "total": len(rows),
+            "new_this_month": sum(1 for r in rows if r["joined_at"] and r["joined_at"] >= month_start),
+            "active_30d": sum(1 for r in rows if r["last_active_at"] and r["last_active_at"] >= active_cutoff),
+            "active_today": sum(1 for r in rows if r["last_active_at"] and r["last_active_at"] >= today_start),
+            "trial": len(trialing),
+            "trial_ending_7d": sum(1 for r in trialing if r["sub"].trial_end_at and r["sub"].trial_end_at - now <= timedelta(days=OPS_TRIAL_ENDING_DAYS)),
+            "paying": len(paying), "paying_by_plan": plan_split,
         },
+        "revenue": {"this_month_naira": round(revenue_month_kobo / 100, 2), "currency": "NGN"},
+        "trial_conversion": ops_trial_conversion(rows),
+        "ai_spend": {"this_month_usd": round(ai_spend_usd_month, 4), "this_month_ngn": usd_to_ngn(db, ai_spend_usd_month),
+                     "unpriced_requests": int(unpriced_month)},
+        "attention": {"total": len(open_alerts), "critical": critical, "warning": len(open_alerts) - critical,
+                      "items": [ops_alert_json(a) for a in open_alerts[:5]]},
+        # Kept for older console builds.
+        "alerts": {"unresolved": len(open_alerts), "critical": critical},
+        "growth": growth,
+        "definitions": {k: OPS_DEFINITIONS[k] for k in ("active_business", "trialing", "paying", "trial_conversion", "last_active")},
     }
 
 @app.get("/api/platform/businesses")
 def platform_businesses(
-    q: Optional[str] = Query(None), plan: Optional[str] = Query(None),
+    q: Optional[str] = Query(None), plan: Optional[str] = Query(None), status: Optional[str] = Query(None),
+    health: Optional[str] = Query(None), activity: Optional[str] = Query(None), sort: Optional[str] = Query("newest"),
     limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
     owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db),
 ):
-    """Summary table. Per-business aggregates are computed with grouped
-    aggregate queries against just the businesses on THIS page - never a
-    Python loop issuing one query per row, and never loading every business's
-    full history into memory (see spec: performance)."""
-    query = db.query(BusinessProfile)
-    if q:
-        like = f"%{q.strip()}%"
-        query = query.filter(or_(BusinessProfile.company_name.ilike(like), BusinessProfile.business_code.ilike(like), BusinessProfile.email.ilike(like)))
-    if plan:
-        query = query.filter(BusinessProfile.subscription_plan == plan.strip().lower())
-    total = query.count()
-    rows = query.order_by(BusinessProfile.trial_started_at.desc()).offset(offset).limit(limit).all()
-    biz_ids = [b.id for b in rows]
-
-    user_counts = dict(db.query(User.business_id, func.count(User.id)).filter(User.business_id.in_(biz_ids)).group_by(User.business_id).all()) if biz_ids else {}
-    revenue_rows = dict(_revenue_base_query(db, None, None).filter(PaymentRecord.business_id.in_(biz_ids)).with_entities(
-        PaymentRecord.business_id, func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).group_by(PaymentRecord.business_id).all()) if biz_ids else {}
-    credit_rows = dict(db.query(AIUsageLedger.business_id, func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0)).filter(
-        AIUsageLedger.business_id.in_(biz_ids), AIUsageLedger.success == True).group_by(AIUsageLedger.business_id).all()) if biz_ids else {}
-    cost_rows = dict(db.query(AIUsageLedger.business_id, func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0)).filter(
-        AIUsageLedger.business_id.in_(biz_ids), AIUsageLedger.success == True, AIUsageLedger.estimated_provider_cost.isnot(None),
-    ).group_by(AIUsageLedger.business_id).all()) if biz_ids else {}
-    last_active_rows = dict(db.query(User.business_id, func.max(User.last_active_at)).filter(User.business_id.in_(biz_ids)).group_by(User.business_id).all()) if biz_ids else {}
-    subs = {s.business_id: s for s in db.query(BusinessSubscription).filter(BusinessSubscription.business_id.in_(biz_ids)).all()} if biz_ids else {}
-
-    items = []
+    """Filters and sorts run over ops_business_rows(): Status and Health come
+    from the same function the Overview and Subscriptions pages use."""
     now = datetime.utcnow()
-    for b in rows:
-        sub = subs.get(b.id)
-        cost_usd = cost_rows.get(b.id, 0.0)
-        # TRIAL-EXPIRY-001: the status access enforcement applies now, not the
-        # stored column (only updated when the business itself makes a request).
-        status = effective_subscription_status(sub, now)
-        items.append({
-            "id": b.id, "business_code": b.business_code, "company_name": b.company_name,
-            "joined_at": to_utc_iso(b.trial_started_at),
-            "plan": (sub.plan if sub else b.subscription_plan) or "starter",
-            "plan_label": plan_label_for((sub.plan if sub else b.subscription_plan) or "starter"),
-            "subscription_status": status,
-            "is_trial": status == "trialing",
-            "user_count": int(user_counts.get(b.id, 0)),
-            "last_active_at": to_utc_iso(last_active_rows.get(b.id)),
-            "lifetime_revenue_naira": round(revenue_rows.get(b.id, 0) / 100, 2),
-            "ai_credits_consumed": int(credit_rows.get(b.id, 0)),
-            "ai_provider_cost_usd": round(cost_usd, 2),
-            "ai_provider_cost_ngn": usd_to_ngn(db, cost_usd),
-        })
-    return {"total": total, "limit": limit, "offset": offset, "items": items}
+    rows = ops_filter_business_rows(ops_business_rows(db, now), q=q, plan=plan, status=status, health=health, activity=activity, now=now)
+    rows = ops_sort_rows(rows, sort)
+    page = rows[offset:offset + limit]
+    return {"total": len(rows), "limit": limit, "offset": offset, "items": [ops_business_row_json(r) for r in page],
+            "definitions": {k: OPS_DEFINITIONS[k] for k in ("users", "last_active", "paid_to_cauldra")}}
+
+OPS_BUSINESS_AUDIT_PREFIXES = ("SUBSCRIPTION_", "TRIAL_", "PLAN_")
+OPS_ACCOUNT_AUDIT_ACTIONS = ("BUSINESS_REGISTERED", "USER_CREATED", "USER_DELETED", "USER_DISABLED", "USER_ENABLED",
+                             "USER_ROLE_CHANGED", "USER_EMAIL_CHANGED", "USER_EMAIL_VERIFIED", "PASSWORD_CHANGED",
+                             "PASSWORD_RESET", "PASSWORD_RECOVERED", "ACCOUNT_DELETED")
+PAYMENT_PURPOSE_LABELS = {"subscription": "Subscription", "subscription_renewal": "Renewal", "subscription_upgrade": "Upgrade",
+                          "card_verification": "Card verification (refundable, not revenue)", "payment_method": "Payment method check"}
+
+def _ops_support_audit_filter(query):
+    return query.filter(or_(*[AuditLog.action.like(p + "%") for p in OPS_BUSINESS_AUDIT_PREFIXES],
+                            AuditLog.action.in_(OPS_ACCOUNT_AUDIT_ACTIONS)))
 
 @app.get("/api/platform/businesses/{business_id}")
 def platform_business_detail(business_id: int, owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    """Support/platform view. Deliberately no sales, customers, inventory or
+    expenses: only subscription, payments to Cauldra, usage and account events."""
     biz = db.query(BusinessProfile).filter(BusinessProfile.id == business_id).first()
     if not biz:
         raise HTTPException(status_code=404, detail="Business not found.")
-    sub = db.query(BusinessSubscription).filter(BusinessSubscription.business_id == business_id).first()
+    now = datetime.utcnow()
+    row = next(r for r in ops_business_rows(db, now) if r["id"] == business_id)
+    sub = row["sub"]
     users = db.query(User).filter(User.business_id == business_id).order_by(User.id).all()
-
-    revenue_total = _revenue_base_query(db, None, None).filter(PaymentRecord.business_id == business_id).with_entities(
-        func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
+    payments = db.query(PaymentRecord).filter(PaymentRecord.business_id == business_id).order_by(PaymentRecord.created_at.desc()).limit(25).all()
     last_payment = _revenue_base_query(db, None, None).filter(PaymentRecord.business_id == business_id).order_by(PaymentRecord.paid_at.desc()).first()
-    credits_total = db.query(func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0)).filter(
-        AIUsageLedger.business_id == business_id, AIUsageLedger.success == True).scalar() or 0
-    cost_total_usd = db.query(func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0)).filter(
-        AIUsageLedger.business_id == business_id, AIUsageLedger.success == True, AIUsageLedger.estimated_provider_cost.isnot(None),
-    ).scalar() or 0.0
-    last_active = db.query(func.max(User.last_active_at)).filter(User.business_id == business_id).scalar()
-
+    ai = db.query(func.count(AIUsageLedger.id), func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0),
+                  func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0), func.max(AIUsageLedger.created_at)).filter(
+        AIUsageLedger.business_id == business_id, AIUsageLedger.success == True).one()
+    ai_30 = db.query(func.count(AIUsageLedger.id), func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0)).filter(
+        AIUsageLedger.business_id == business_id, AIUsageLedger.success == True, AIUsageLedger.created_at >= now - timedelta(days=30)).one()
+    ai_failed_30 = db.query(func.count(AIUsageLedger.id)).filter(
+        AIUsageLedger.business_id == business_id, AIUsageLedger.success == False, AIUsageLedger.created_at >= now - timedelta(days=30)).scalar() or 0
+    storage_bytes = db.query(func.coalesce(func.sum(StoredUpload.size_bytes), 0)).filter(StoredUpload.business_id == business_id).scalar() or 0
+    audit = _ops_support_audit_filter(db.query(AuditLog).filter(AuditLog.business_id == business_id)).order_by(AuditLog.created_at.desc()).limit(30).all()
+    cutoff = now - timedelta(days=OPS_ACTIVE_WINDOW_DAYS)
+    storage_limit_gb = PLAN_CONFIG.get(row["plan"], {}).get("storage_gb")
     return {
-        "id": biz.id, "business_code": biz.business_code, "company_name": biz.company_name,
+        **ops_business_row_json(row),
         "email": biz.email, "phone": biz.phone, "country": biz.country, "currency": biz.currency,
-        "joined_at": to_utc_iso(biz.trial_started_at),
-        "plan": (sub.plan if sub else biz.subscription_plan),
-        "plan_label": plan_label_for(sub.plan if sub else biz.subscription_plan),
-        "subscription_status": effective_subscription_status(sub),  # TRIAL-EXPIRY-001
-        "billing_interval": (sub.billing_interval if sub else biz.billing_interval),
-        "trial_end_at": to_utc_iso(sub.trial_end_at) if sub else None,
-        "current_period_end": to_utc_iso(sub.current_period_end) if sub else None,
+        "owner": row["owner"],
+        "trial_start_at": to_utc_iso(sub.trial_start_at) if sub else None,
         "cancel_at_period_end": bool(sub.cancel_at_period_end) if sub else False,
-        "last_active_at": to_utc_iso(last_active),
+        "cancelled_at": to_utc_iso(sub.cancelled_at) if sub else None,
+        "grace_period_ends_at": to_utc_iso(sub.grace_period_ends_at) if sub else None,
+        "pending_downgrade": ({"plan_label": plan_label_for(sub.pending_downgrade_plan), "effective_at": to_utc_iso(sub.pending_downgrade_effective_at)}
+                              if sub and sub.pending_downgrade_plan else None),
+        "card_on_file": bool(sub and sub.card_verified),
         "users": [{
-            "id": u.id, "username": u.username, "role": u.role,
-            "firstname": u.firstname, "lastname": u.lastname, "email": u.email, "disabled": u.disabled,
+            "id": u.id, "username": u.username, "role": u.role, "firstname": u.firstname, "lastname": u.lastname,
+            "email": u.email, "disabled": u.disabled, "status": "disabled" if u.disabled else "active",
+            "email_verified": u.email_verified_at is not None,
             "created_at": to_utc_iso(u.created_at), "last_active_at": to_utc_iso(u.last_active_at),
         } for u in users],
-        "lifetime_revenue_naira": round(revenue_total / 100, 2),
-        "last_payment_at": to_utc_iso(last_payment.paid_at) if last_payment else None,
-        "ai_credits_consumed": int(credits_total),
-        "ai_provider_cost_usd": round(cost_total_usd, 2),
-        "ai_provider_cost_ngn": usd_to_ngn(db, cost_total_usd),
+        "last_payment": ({"paid_at": to_utc_iso(last_payment.paid_at), "amount_naira": round(last_payment.amount_kobo / 100, 2),
+                          "plan_label": plan_label_for(last_payment.plan)} if last_payment else None),
+        "payments": [{
+            "created_at": to_utc_iso(p.created_at), "paid_at": to_utc_iso(p.paid_at), "amount_naira": round(p.amount_kobo / 100, 2),
+            "status": p.status, "purpose": PAYMENT_PURPOSE_LABELS.get(p.purpose, p.purpose), "counts_as_revenue": p.purpose != "card_verification",
+            "plan_label": plan_label_for(p.plan), "billing_interval": p.billing_interval, "reference": p.paystack_reference,
+            "refund_status": p.refund_status if p.refund_status != "not_requested" else None,
+        } for p in payments],
+        "usage": {
+            "ai_requests_30d": int(ai_30[0] or 0), "ai_credits_30d": int(ai_30[1] or 0), "ai_failed_30d": int(ai_failed_30),
+            "ai_requests_lifetime": int(ai[0] or 0), "ai_credits_lifetime": int(ai[1] or 0),
+            "ai_cost_usd_lifetime": round(ai[2] or 0.0, 4), "ai_cost_ngn_lifetime": usd_to_ngn(db, ai[2] or 0.0),
+            "last_ai_use_at": to_utc_iso(ai[3]),
+            "users_active_30d": sum(1 for u in users if u.last_active_at and u.last_active_at >= cutoff),
+            "storage_tracked_bytes": int(storage_bytes), "storage_plan_limit_gb": storage_limit_gb,
+        },
+        "alerts": row["health"],
+        "audit": [{"action": a.action, "description": a.description, "actor": a.actor_username, "created_at": to_utc_iso(a.created_at)} for a in audit],
+        # Kept for older console builds.
+        "lifetime_revenue_naira": round(row["paid_kobo"] / 100, 2),
+        "ai_credits_consumed": int(ai[1] or 0), "ai_provider_cost_usd": round(ai[2] or 0.0, 2),
     }
+
+def _ops_returning_user_ids(db: Session, window_start: datetime) -> set:
+    return {uid for (uid,) in db.query(func.distinct(PresenceSession.user_id)).filter(PresenceSession.signed_in_at < window_start).all()}
 
 @app.get("/api/platform/users")
 def platform_users(
     q: Optional[str] = Query(None), role: Optional[str] = Query(None), business_id: Optional[int] = Query(None),
+    status: Optional[str] = Query(None), activity: Optional[str] = Query(None),
     active_only: bool = Query(False), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
     owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db),
 ):
-    query = db.query(User)
+    now = datetime.utcnow()
+    month_start = datetime(now.year, now.month, 1)
+    today_start = datetime(now.year, now.month, now.day)
+    window_start = now - timedelta(days=OPS_ACTIVE_WINDOW_DAYS)
+    query = db.query(User).outerjoin(BusinessProfile, BusinessProfile.id == User.business_id)
     if q:
         like = f"%{q.strip()}%"
-        query = query.filter(or_(User.username.ilike(like), User.email.ilike(like), User.firstname.ilike(like), User.lastname.ilike(like)))
+        query = query.filter(or_(User.username.ilike(like), User.email.ilike(like), User.firstname.ilike(like), User.lastname.ilike(like),
+                                 BusinessProfile.company_name.ilike(like), BusinessProfile.business_code.ilike(like)))
     if role:
         query = query.filter(User.role == role.strip().lower())
     if business_id:
         query = query.filter(User.business_id == business_id)
-    now = datetime.utcnow()
-    if active_only:
+    if status == "active":
+        query = query.filter(User.disabled == False)
+    elif status == "disabled":
+        query = query.filter(User.disabled == True)
+    if active_only or activity == "now":
         query = query.filter(User.last_active_at >= now - timedelta(minutes=5))
+    elif activity == "today":
+        query = query.filter(User.last_active_at >= today_start)
+    elif activity == "active_30d":
+        query = query.filter(User.last_active_at >= window_start)
+    elif activity == "inactive_30d":
+        query = query.filter(User.last_active_at < window_start)
+    elif activity == "never":
+        query = query.filter(User.last_active_at.is_(None))
     total = query.count()
     rows = query.order_by(User.id.desc()).offset(offset).limit(limit).all()
-
-    biz_ids = [u.business_id for u in rows]
-    biz_names = dict(db.query(BusinessProfile.id, BusinessProfile.company_name).filter(BusinessProfile.id.in_(biz_ids)).all()) if biz_ids else {}
+    biz_ids = {u.business_id for u in rows}
+    biz = {b.id: b for b in db.query(BusinessProfile).filter(BusinessProfile.id.in_(biz_ids)).all()} if biz_ids else {}
     items = [{
         "id": u.id, "username": u.username, "firstname": u.firstname, "lastname": u.lastname, "email": u.email,
-        "role": u.role, "business_id": u.business_id, "business_name": biz_names.get(u.business_id),
-        "disabled": u.disabled, "created_at": to_utc_iso(u.created_at), "last_active_at": to_utc_iso(u.last_active_at),
+        "role": u.role, "business_id": u.business_id,
+        "business_name": biz[u.business_id].company_name if u.business_id in biz else None,
+        "business_code": biz[u.business_id].business_code if u.business_id in biz else None,
+        "disabled": u.disabled, "status": "disabled" if u.disabled else "active",
+        "email_verified": u.email_verified_at is not None,
+        "created_at": to_utc_iso(u.created_at), "last_active_at": to_utc_iso(u.last_active_at),
         "currently_active": bool(u.last_active_at and u.last_active_at >= now - timedelta(minutes=5)),
     } for u in rows]
 
-    month_start = datetime(now.year, now.month, 1)
-    today_start = datetime(now.year, now.month, now.day)
+    active_30 = {uid for (uid,) in db.query(User.id).filter(User.last_active_at >= window_start).all()}
     summary = {
         "total_users": db.query(func.count(User.id)).scalar() or 0,
+        "disabled_users": db.query(func.count(User.id)).filter(User.disabled == True).scalar() or 0,
         "new_this_month": db.query(func.count(User.id)).filter(User.created_at >= month_start).scalar() or 0,
+        "join_date_not_recorded": db.query(func.count(User.id)).filter(User.created_at.is_(None)).scalar() or 0,
         "active_today": db.query(func.count(User.id)).filter(User.last_active_at >= today_start).scalar() or 0,
-        "active_this_month": db.query(func.count(User.id)).filter(User.last_active_at >= month_start).scalar() or 0,
-        # "Returning" = has been active on a day AFTER their creation day - a
-        # user who has only ever used Cauldra on the same day they joined is
-        # not yet counted as returning. Documented here as the one definition.
-        "returning": db.query(func.count(User.id)).filter(
-            User.last_active_at.isnot(None), User.created_at.isnot(None),
-            User.last_active_at >= User.created_at + timedelta(days=1),
-        ).scalar() or 0,
+        "active_30d": len(active_30),
+        "returning": len(active_30 & _ops_returning_user_ids(db, window_start)),
     }
+    summary["active_this_month"] = summary["active_30d"]  # older console builds
     return {"total": total, "limit": limit, "offset": offset, "items": items, "summary": summary,
             "activity_definitions": {
-                "currently_active": "last_active_at within the last 5 minutes.",
-                "active_today": "last_active_at since 00:00 UTC today.",
-                "active_this_month": "last_active_at since the 1st of the current UTC month.",
-                "returning": "Has a last_active_at at least 24 hours after created_at.",
+                "total_users": "Every user account, including disabled ones.",
+                "new_this_month": "Accounts created since the 1st of this month (UTC). Accounts created before join dates were recorded are not counted.",
+                "active_today": "Last Active since 00:00 UTC today.",
+                "active_30d": "Last Active within the last 30 days.",
+                "returning": OPS_DEFINITIONS["returning_users"],
+                "last_active": OPS_DEFINITIONS["last_active"],
             }}
 
+@app.get("/api/platform/users/{user_id}")
+def platform_user_detail(user_id: int, owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    """Owner/support view of one person. Memberships is a list on purpose: one
+    human is not assumed to belong to exactly one business forever."""
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found.")
+    biz = db.query(BusinessProfile).filter(BusinessProfile.id == u.business_id).first()
+    events = db.query(AuditLog).filter(or_(AuditLog.target_user_id == u.id, AuditLog.actor_user_id == u.id),
+                                       AuditLog.action.in_(OPS_ACCOUNT_AUDIT_ACTIONS)).order_by(AuditLog.created_at.desc()).limit(20).all()
+    sessions = db.query(PresenceSession).filter(PresenceSession.user_id == u.id).order_by(PresenceSession.signed_in_at.desc()).limit(5).all()
+    return {
+        "id": u.id, "username": u.username, "firstname": u.firstname, "lastname": u.lastname, "email": u.email,
+        "status": "disabled" if u.disabled else "active", "must_change_password": bool(u.must_change_password),
+        "email_verified": u.email_verified_at is not None, "email_verified_at": to_utc_iso(u.email_verified_at),
+        "email_change_pending": bool(u.pending_email),
+        "created_at": to_utc_iso(u.created_at), "last_active_at": to_utc_iso(u.last_active_at),
+        "memberships": ([{"business_id": biz.id, "business_name": biz.company_name, "business_code": biz.business_code,
+                          "role": u.role, "status": "disabled" if u.disabled else "active"}] if biz else []),
+        "account_events": [{"action": e.action, "description": e.description, "actor": e.actor_username, "created_at": to_utc_iso(e.created_at)} for e in events],
+        "recent_sessions": [{"signed_in_at": to_utc_iso(s.signed_in_at), "last_activity_at": to_utc_iso(s.last_activity_at),
+                             "signed_out_at": to_utc_iso(s.signed_out_at)} for s in sessions],
+    }
+
+SUBSCRIPTION_EVENT_LABELS = {
+    "TRIAL_STARTED": "Trial started", "TRIAL_STARTED_WITHOUT_PAYSTACK_PLAN_CODE": "Trial started",
+    "TRIAL_CANCELLED": "Trial cancelled", "SUBSCRIPTION_ACTIVATED": "Subscription activated",
+    "SUBSCRIPTION_RENEWED": "Renewed", "SUBSCRIPTION_UPGRADED": "Upgraded",
+    "SUBSCRIPTION_DOWNGRADE_SCHEDULED": "Downgrade scheduled", "SUBSCRIPTION_DOWNGRADE_APPLIED": "Downgraded",
+    "SUBSCRIPTION_DOWNGRADE_CANCELLED": "Downgrade cancelled", "SUBSCRIPTION_PLAN_CHANGED": "Plan changed",
+    "SUBSCRIPTION_CANCELLED": "Cancelled", "SUBSCRIPTION_ENDED": "Subscription ended",
+    "SUBSCRIPTION_PAYMENT_FAILED": "Payment failed",
+}
+
+def ops_subscription_events(db: Session, rows, now: datetime, days: int = 30, limit: int = 30) -> List[Dict[str, Any]]:
+    """Recorded changes (audit trail) plus expiries derived from the dates
+    themselves: an expiry happens at trial_end_at / grace end, not when the
+    business next signs in, so SUBSCRIPTION_EXPIRED rows (written lazily) are
+    replaced by the real instant."""
+    since = now - timedelta(days=days)
+    names = {r["id"]: (r["company_name"], r["business_code"]) for r in rows}
+    events = []
+    for a in db.query(AuditLog).filter(AuditLog.action.in_(tuple(SUBSCRIPTION_EVENT_LABELS)), AuditLog.created_at >= since).order_by(AuditLog.created_at.desc()).limit(limit * 2).all():
+        n = names.get(a.business_id, (None, None))
+        events.append({"at": a.created_at, "business_id": a.business_id, "company_name": n[0], "business_code": n[1],
+                       "event": SUBSCRIPTION_EVENT_LABELS[a.action], "source": "audit"})
+    for r in rows:
+        sub = r["sub"]
+        if r["status"] != "expired" or sub is None:
+            continue
+        at = sub.grace_period_ends_at if (sub.grace_period_ends_at and sub.grace_period_ends_at <= now) else sub.trial_end_at
+        if at and since <= at <= now:
+            events.append({"at": at, "business_id": r["id"], "company_name": r["company_name"], "business_code": r["business_code"],
+                           "event": "Trial expired" if at == sub.trial_end_at else "Grace period ended — access expired", "source": "dates"})
+    events.sort(key=lambda e: e["at"], reverse=True)
+    return [{**e, "at": to_utc_iso(e["at"])} for e in events[:limit]]
+
 @app.get("/api/platform/subscriptions")
-def platform_subscriptions(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
-    """Uses Cauldra's OWN existing subscription states (BusinessSubscription.status)
-    and plan ids (PLAN_CONFIG) - grouped straight from the database, never a
-    separately invented status list."""
-    # TRIAL-EXPIRY-001: counted by the status enforcement applies now (a stored
-    # "trialing" row whose trial ended is expired), not the stored column.
-    by_status: Dict[str, int] = {}
+def platform_subscriptions(
+    status: Optional[str] = Query(None), plan: Optional[str] = Query(None), filter_: Optional[str] = Query(None, alias="filter"),
+    sort: Optional[str] = Query("trial_ending"), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+    owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db),
+):
+    """Counts, table and Business Detail all use effective_subscription_status()
+    (TRIAL-EXPIRY-001) - the status access enforcement applies right now."""
     now = datetime.utcnow()
-    for sub in db.query(BusinessSubscription).all():
-        status = effective_subscription_status(sub, now)
-        by_status[status] = by_status.get(status, 0) + 1
-    by_plan = dict(db.query(BusinessSubscription.plan, func.count(BusinessSubscription.id)).group_by(BusinessSubscription.plan).all())
-    total = db.query(func.count(BusinessSubscription.id)).scalar() or 0
-    return {"total": total, "by_status": by_status, "by_plan": by_plan}
+    all_rows = ops_business_rows(db, now)
+    with_sub = [r for r in all_rows if r["sub"] is not None]
+    by_status: Dict[str, int] = {}
+    by_plan: Dict[str, int] = {}
+    for r in with_sub:
+        by_status[r["status"]] = by_status.get(r["status"], 0) + 1
+        by_plan[r["plan"]] = by_plan.get(r["plan"], 0) + 1
+    rows = ops_filter_business_rows(with_sub, plan=plan, status=status, now=now)
+    f = (filter_ or "").strip().lower()
+    if f == "trial_ending":
+        rows = [r for r in rows if any(h["code"] == "trial_ending" for h in r["health"])]
+    elif f == "payment_issue":
+        rows = [r for r in rows if any(h["code"] in ("payment_issue", "payment_review", "subscription_mismatch") for h in r["health"])]
+    elif f == "cancelled":
+        rows = [r for r in rows if r["status"] == "cancelled" or (r["sub"].cancel_at_period_end and r["status"] == "active")]
+    rows = ops_sort_rows(rows, sort, default="trial_ending")
+    billing_codes = ("payment_issue", "payment_review", "subscription_mismatch", "trial_ending")
+    items = []
+    for r in rows[offset:offset + limit]:
+        j = ops_business_row_json(r)
+        j["billing_health"] = [h for h in r["health"] if h["code"] in billing_codes]
+        j["cancel_at_period_end"] = bool(r["sub"].cancel_at_period_end)
+        j["updated_at"] = to_utc_iso(r["updated_at"])
+        items.append(j)
+    return {"total": len(with_sub), "by_status": by_status, "by_plan": by_plan,
+            "by_plan_labels": {p: plan_label_for(p) for p in by_plan},
+            "table_total": len(rows), "limit": limit, "offset": offset, "items": items,
+            "recent_changes": ops_subscription_events(db, all_rows, now),
+            "businesses_without_subscription": len(all_rows) - len(with_sub)}
 
 @app.get("/api/platform/revenue")
 def platform_revenue(
     period: str = Query("month"), start_date: Optional[str] = Query(None, alias="start"), end_date: Optional[str] = Query(None, alias="end"),
     owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db),
 ):
+    """Cauldra subscription revenue only (payment_records), never merchant sales."""
     start, end = resolve_platform_period(period, start_date, end_date)
+    now = datetime.utcnow()
     base = _revenue_base_query(db, start, end)
-
     total_kobo = base.with_entities(func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
     successful_payments = base.with_entities(func.count(PaymentRecord.id)).scalar() or 0
     paying_businesses = base.with_entities(func.count(func.distinct(PaymentRecord.business_id))).scalar() or 0
     avg_per_business_kobo = (total_kobo / paying_businesses) if paying_businesses else 0
 
-    by_plan = [{"plan": p, "plan_label": plan_label_for(p), "revenue_naira": round(amt / 100, 2), "payments": cnt}
+    by_plan = [{"plan": p, "plan_label": plan_label_for(p), "revenue_naira": round(amt / 100, 2), "payments": cnt,
+                "share_pct": round(amt / total_kobo * 100, 1) if total_kobo else None}
                for p, amt, cnt in base.with_entities(PaymentRecord.plan, func.coalesce(func.sum(PaymentRecord.amount_kobo), 0), func.count(PaymentRecord.id)).group_by(PaymentRecord.plan).all()]
-
+    by_plan.sort(key=lambda x: -x["revenue_naira"])
     by_business_rows = (
         base.with_entities(PaymentRecord.business_id, func.coalesce(func.sum(PaymentRecord.amount_kobo), 0), func.count(PaymentRecord.id), func.max(PaymentRecord.paid_at))
         .group_by(PaymentRecord.business_id).order_by(func.sum(PaymentRecord.amount_kobo).desc()).limit(50).all()
     )
     biz_ids = [r[0] for r in by_business_rows]
     biz_lookup = {b.id: b for b in db.query(BusinessProfile).filter(BusinessProfile.id.in_(biz_ids)).all()} if biz_ids else {}
+    sub_lookup = {s.business_id: s for s in db.query(BusinessSubscription).filter(BusinessSubscription.business_id.in_(biz_ids)).all()} if biz_ids else {}
     by_business = [{
         "business_id": bid, "company_name": (biz_lookup[bid].company_name if bid in biz_lookup else None),
         "business_code": (biz_lookup[bid].business_code if bid in biz_lookup else None),
+        "plan_label": plan_label_for(sub_lookup[bid].plan) if bid in sub_lookup else None,
         "revenue_naira": round(amt / 100, 2), "payments": cnt, "last_payment_at": to_utc_iso(last_paid),
     } for bid, amt, cnt, last_paid in by_business_rows]
 
-    all_time_kobo = _revenue_base_query(db, None, None).with_entities(func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
+    # Payment health: every subscription-purpose payment attempt created in the period.
+    attempts = db.query(PaymentRecord.status, func.count(PaymentRecord.id)).filter(PaymentRecord.purpose != "card_verification")
+    if start is not None:
+        attempts = attempts.filter(PaymentRecord.created_at >= start)
+    if end is not None:
+        attempts = attempts.filter(PaymentRecord.created_at < end)
+    health = {"successful": 0, "pending": 0, "failed": 0, "needs_review": 0, "other": 0}
+    for st, n in attempts.group_by(PaymentRecord.status).all():
+        key = {"success": "successful", "initialized": "pending", "pending": "pending", "failed": "failed"}.get(st)
+        key = key or ("needs_review" if (st or "").startswith("flagged_") else "other")
+        health[key] += n
 
+    # MRR from effectively active recurring subscriptions (CAULDRA CALCULATED).
+    mrr_naira, mrr_subs = 0.0, 0
+    for sub in db.query(BusinessSubscription).all():
+        if effective_subscription_status(sub, now) != "active" or sub.cancel_at_period_end:
+            continue
+        cfg = PLAN_CONFIG.get((sub.plan or "").lower())
+        if not cfg:
+            continue
+        mrr_naira += cfg["annual_price"] / 12.0 if (sub.billing_interval or "").lower() == "annual" else cfg["monthly_price"]
+        mrr_subs += 1
+
+    all_time_kobo = _revenue_base_query(db, None, None).with_entities(func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
     return {
         "period": period, "start": to_utc_iso(start), "end": to_utc_iso(end),
         "revenue_naira": round(total_kobo / 100, 2),
         "successful_payments": successful_payments,
         "paying_businesses": paying_businesses,
         "average_revenue_per_business_naira": round(avg_per_business_kobo / 100, 2),
-        "by_plan": by_plan,
-        "by_business": by_business,
+        "by_plan": by_plan, "by_business": by_business,
         "all_time_revenue_naira": round(all_time_kobo / 100, 2),
+        "payment_health": health,
+        "refunds": {"available": False, "provenance": OPS_PROVENANCE["unavailable"],
+                    "reason": ("Cauldra records refunds only for the refundable card-verification charge. A refund or "
+                               "chargeback of a subscription payment made in the Paystack dashboard is not received "
+                               "or stored, so it cannot be shown here.")},
+        "mrr": {"naira": round(mrr_naira, 2), "subscriptions": mrr_subs, "provenance": OPS_PROVENANCE["calculated"],
+                "definition": OPS_DEFINITIONS["mrr"]},
         "currency": "NGN",
     }
 
@@ -17920,62 +18680,95 @@ def platform_ai_usage(
 ):
     ensure_fresh_fx_rate(db)  # best-effort; this page is the main consumer of the NGN conversion
     start, end = resolve_platform_period(period, start_date, end_date)
-    q = db.query(AIUsageLedger).filter(AIUsageLedger.success == True)
+    now = datetime.utcnow()
+    q = db.query(AIUsageLedger)
     if start is not None:
         q = q.filter(AIUsageLedger.created_at >= start)
     if end is not None:
         q = q.filter(AIUsageLedger.created_at < end)
+    ok = AIUsageLedger.success == True
+    succ = func.sum(case((ok, 1), else_=0))
+    fail = func.sum(case((ok, 0), else_=1))
+    credits = func.coalesce(func.sum(case((ok, AIUsageLedger.credits_consumed), else_=0)), 0)
+    cost = func.coalesce(func.sum(case((ok, AIUsageLedger.estimated_provider_cost), else_=None)), 0.0)
+    priced = func.sum(case((and_(ok, AIUsageLedger.estimated_provider_cost.isnot(None)), 1), else_=0))
 
+    # Month-end projection only makes sense for the current calendar month.
+    month_start = datetime(now.year, now.month, 1)
+    days_in_month = (datetime(now.year + (now.month // 12), now.month % 12 + 1, 1) - month_start).days
+    elapsed_days = max((now - month_start).total_seconds() / 86400, 1 / 24)
     providers: Dict[str, Any] = {}
-    for provider, requests, credits, cost_usd in q.with_entities(
-        AIUsageLedger.provider, func.count(AIUsageLedger.id), func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0),
-        func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0),
-    ).group_by(AIUsageLedger.provider).all():
+    for provider, s_n, f_n, cr, cu, pr in q.with_entities(AIUsageLedger.provider, succ, fail, credits, cost, priced).group_by(AIUsageLedger.provider).all():
         key = provider or "unknown"
+        s_n, f_n, pr = int(s_n or 0), int(f_n or 0), int(pr or 0)
         budget_ngn = get_platform_setting_float(db, f"{key}_monthly_budget_ngn")
-        cost_ngn = usd_to_ngn(db, cost_usd)
-        pct = (cost_ngn / budget_ngn * 100.0) if (budget_ngn and cost_ngn is not None) else None
+        cost_ngn = usd_to_ngn(db, cu)
+        month_cost_usd = db.query(func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0)).filter(
+            AIUsageLedger.provider == provider, ok, AIUsageLedger.created_at >= month_start).scalar() or 0.0
+        month_cost_ngn = usd_to_ngn(db, month_cost_usd)
+        projected_ngn = round(month_cost_ngn / elapsed_days * days_in_month, 2) if month_cost_ngn is not None else None
+        pct = (month_cost_ngn / budget_ngn * 100.0) if (budget_ngn and month_cost_ngn is not None) else None
         providers[key] = {
-            "requests": requests, "credits_consumed": int(credits),
-            "provider_cost_usd": round(cost_usd, 2) if cost_usd else 0.0,
-            "provider_cost_ngn": cost_ngn,
-            "monthly_budget_ngn": budget_ngn,
+            "requests": s_n + f_n, "successful": s_n, "failed": f_n,
+            "failure_rate_pct": round(f_n / (s_n + f_n) * 100, 1) if (s_n + f_n) else None,
+            "credits_consumed": int(cr), "provider_cost_usd": round(cu or 0.0, 4), "provider_cost_ngn": cost_ngn,
+            "priced_requests": pr, "unpriced_requests": s_n - pr,
+            "average_cost_per_request_usd": round(cu / pr, 6) if pr else None,
+            "monthly_budget_ngn": budget_ngn, "month_to_date_cost_ngn": month_cost_ngn,
             "budget_consumed_pct": round(pct, 1) if pct is not None else None,
-            "budget_remaining_ngn": round(budget_ngn - cost_ngn, 2) if (budget_ngn and cost_ngn is not None) else None,
+            "budget_remaining_ngn": round(budget_ngn - month_cost_ngn, 2) if (budget_ngn and month_cost_ngn is not None) else None,
+            "projected_month_end_ngn": projected_ngn,
         }
-
     by_operation = []
-    for op, provider, requests, credits, cost_usd in q.with_entities(
-        AIUsageLedger.operation_type, AIUsageLedger.provider, func.count(AIUsageLedger.id),
-        func.coalesce(func.sum(AIUsageLedger.credits_consumed), 0), func.coalesce(func.sum(AIUsageLedger.estimated_provider_cost), 0.0),
-    ).group_by(AIUsageLedger.operation_type, AIUsageLedger.provider).all():
-        by_operation.append({
-            "operation": op, "provider": provider, "requests": requests, "credits_consumed": int(credits),
-            "provider_cost_usd": round(cost_usd, 2) if cost_usd else 0.0,
-            "provider_cost_ngn": usd_to_ngn(db, cost_usd),
-            "average_cost_per_request_usd": round((cost_usd / requests), 4) if requests and cost_usd else 0.0,
-        })
-
-    failed_q = db.query(func.count(AIUsageLedger.id)).filter(AIUsageLedger.success == False)
-    if start is not None:
-        failed_q = failed_q.filter(AIUsageLedger.created_at >= start)
-    if end is not None:
-        failed_q = failed_q.filter(AIUsageLedger.created_at < end)
-
+    for op_, provider, s_n, f_n, cr, cu, pr in q.with_entities(AIUsageLedger.operation_type, AIUsageLedger.provider, succ, fail, credits, cost, priced).group_by(
+            AIUsageLedger.operation_type, AIUsageLedger.provider).all():
+        s_n, f_n, pr = int(s_n or 0), int(f_n or 0), int(pr or 0)
+        by_operation.append({"operation": op_, "label": AI_FEATURE_LABELS.get(op_, (op_ or "").replace("_", " ")), "provider": provider,
+                             "requests": s_n + f_n, "failed": f_n, "credits_consumed": int(cr),
+                             "provider_cost_usd": round(cu or 0.0, 4), "provider_cost_ngn": usd_to_ngn(db, cu),
+                             "average_cost_per_request_usd": round(cu / pr, 6) if pr else None, "unpriced_requests": s_n - pr})
+    by_operation.sort(key=lambda o: -o["requests"])
+    biz_rows = q.with_entities(AIUsageLedger.business_id, func.count(AIUsageLedger.id), credits, cost, func.max(AIUsageLedger.created_at)).group_by(
+        AIUsageLedger.business_id).order_by(func.count(AIUsageLedger.id).desc()).limit(50).all()
+    names = {b.id: b for b in db.query(BusinessProfile).filter(BusinessProfile.id.in_([r[0] for r in biz_rows])).all()} if biz_rows else {}
+    by_business = [{"business_id": bid, "company_name": names[bid].company_name if bid in names else None,
+                    "business_code": names[bid].business_code if bid in names else None,
+                    "requests": int(n), "credits_consumed": int(cr), "provider_cost_usd": round(cu or 0.0, 4),
+                    "last_ai_use_at": to_utc_iso(last)} for bid, n, cr, cu, last in biz_rows]
+    failures: Dict[str, int] = {}
+    for cat, n in q.filter(AIUsageLedger.success == False).with_entities(AIUsageLedger.failure_category, func.count(AIUsageLedger.id)).group_by(AIUsageLedger.failure_category).all():
+        failures[cat or "not_recorded"] = failures.get(cat or "not_recorded", 0) + int(n)
+    totals = q.with_entities(succ, fail, credits, cost, priced, func.count(func.distinct(AIUsageLedger.business_id))).one()
+    s_n, f_n, cr, cu, pr, nbiz = int(totals[0] or 0), int(totals[1] or 0), int(totals[2] or 0), float(totals[3] or 0.0), int(totals[4] or 0), int(totals[5] or 0)
+    revenue_kobo = _revenue_base_query(db, start, end).with_entities(func.coalesce(func.sum(PaymentRecord.amount_kobo), 0)).scalar() or 0
+    cost_ngn = usd_to_ngn(db, cu)
     return {"period": period, "start": to_utc_iso(start), "end": to_utc_iso(end),
-            "providers": providers, "by_operation": by_operation, "failed_requests": failed_q.scalar() or 0}
+            "summary": {"requests": s_n + f_n, "successful": s_n, "failed": f_n, "credits_consumed": cr,
+                        "provider_cost_usd": round(cu, 4), "provider_cost_ngn": cost_ngn,
+                        "average_cost_per_request_usd": round(cu / pr, 6) if pr else None,
+                        "priced_requests": pr, "unpriced_requests": s_n - pr, "businesses_using_ai": nbiz,
+                        "revenue_naira": round(revenue_kobo / 100, 2),
+                        "cost_pct_of_revenue": round(cost_ngn / (revenue_kobo / 100) * 100, 1) if (cost_ngn is not None and revenue_kobo) else None},
+            "providers": providers, "by_operation": by_operation, "by_business": by_business,
+            "failures_by_reason": [{"reason": k, "label": AI_FAILURE_CATEGORIES.get(k, "Reason not recorded (before 2026-09-27)"), "count": v}
+                                   for k, v in sorted(failures.items(), key=lambda kv: -kv[1])],
+            "failed_requests": f_n,
+            "definitions": {"cost": "Provider-reported tokens × the price set under Provider pricing. Requests on a model with no price set are counted as unpriced, never guessed.",
+                            "credits": "Cauldra AI credits charged to the business's plan allowance (successful requests only).",
+                            "budgets": "Internal monitoring budgets for Cauldra's own provider spend - not customer AI-credit allowances."}}
 
 @app.get("/api/platform/ai-pricing")
 def platform_ai_pricing_list(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
     rows = db.query(AIProviderPricing).order_by(AIProviderPricing.provider, AIProviderPricing.model).all()
+    active = {("gemini", GEMINI_MODEL): bool(gemini_client), ("openai", OPENAI_MODEL): bool(openai_client)}
     configured = [{"provider": r.provider, "model": r.model, "input_price_per_1k_usd": r.input_price_per_1k_usd,
-                   "output_price_per_1k_usd": r.output_price_per_1k_usd, "updated_at": to_utc_iso(r.updated_at)} for r in rows]
+                   "output_price_per_1k_usd": r.output_price_per_1k_usd, "updated_at": to_utc_iso(r.updated_at),
+                   "in_use": (r.provider, r.model) in active} for r in rows]
     configured_keys = {(r.provider, r.model) for r in rows}
     # The models Cauldra is ACTUALLY configured to call right now, even before
-    # pricing has been set for them - so the owner sees exactly what needs
-    # configuring instead of an empty page.
-    active_models = [("gemini", GEMINI_MODEL), ("openai", OPENAI_MODEL)]
-    missing = [{"provider": p, "model": m} for p, m in active_models if (p, m) not in configured_keys]
+    # pricing has been set for them - so the owner edits a known row instead of
+    # typing a model name (and a typo) from scratch.
+    missing = [{"provider": p, "model": m, "configured": on} for (p, m), on in active.items() if (p, m) not in configured_keys]
     return {"configured": configured, "unconfigured_active_models": missing}
 
 @app.put("/api/platform/ai-pricing")
@@ -17986,10 +18779,19 @@ def platform_ai_pricing_set(data: PlatformAIPricingUpdate, owner: PlatformOwner 
         raise HTTPException(status_code=400, detail="Provider and model are required.")
     row = get_ai_pricing_row(db, provider, model)
     if not row:
+        # A near-duplicate (case, spaces) of a known model would silently never
+        # match the model the ledger records; edit the existing row instead.
+        norm = re.sub(r"\s+", "", model).lower()
+        known = [m for (p, m) in [(r.provider, r.model) for r in db.query(AIProviderPricing).filter(AIProviderPricing.provider == provider).all()]
+                 + [("gemini", GEMINI_MODEL), ("openai", OPENAI_MODEL)] if p == provider]
+        clash = next((m for m in known if re.sub(r"\s+", "", m).lower() == norm and m != model), None)
+        if clash:
+            raise HTTPException(status_code=409, detail=f"'{model}' looks like the existing model '{clash}'. Edit that row instead.")
         row = AIProviderPricing(provider=provider, model=model)
         db.add(row)
     row.input_price_per_1k_usd = data.input_price_per_1k_usd
     row.output_price_per_1k_usd = data.output_price_per_1k_usd
+    row.updated_at = datetime.utcnow()
     add_platform_audit(db, owner, "AI_PRICING_UPDATED",
                         f"Set pricing for {provider}/{model}: input=${data.input_price_per_1k_usd}/1k, output=${data.output_price_per_1k_usd}/1k.")
     db.commit()
@@ -18082,79 +18884,264 @@ def platform_fx_refresh(owner: PlatformOwner = Depends(get_platform_owner), db: 
     }
 
 @app.get("/api/platform/alerts")
-def platform_alerts_list(resolved: Optional[bool] = Query(None), limit: int = Query(50, ge=1, le=200),
+def platform_alerts_list(state: Optional[str] = Query(None), resolved: Optional[bool] = Query(None), limit: int = Query(50, ge=1, le=200),
                           owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
-    q = db.query(PlatformAlert)
-    if resolved is True:
-        q = q.filter(PlatformAlert.acknowledged_at.isnot(None))
-    elif resolved is False:
-        q = q.filter(PlatformAlert.acknowledged_at.is_(None))
-    rows = q.order_by(PlatformAlert.created_at.desc()).limit(limit).all()
-    return {"items": [{
-        "id": a.id, "type": a.alert_type, "provider": a.provider, "severity": a.severity, "title": a.title,
-        "message": a.message, "created_at": to_utc_iso(a.created_at), "acknowledged_at": to_utc_iso(a.acknowledged_at),
-    } for a in rows]}
+    """Grouped inbox: one row per condition, most severe first. `resolved` is
+    kept for older console builds (false = unresolved + watching)."""
+    run_ops_detectors(db)
+    rows = db.query(PlatformAlert).all()
+    want = (state or "").strip().lower()
+    if resolved is False and not want:
+        want = "open"
+    if want == "open":
+        rows = [a for a in rows if alert_state(a) != "resolved"]
+    elif want in ALERT_STATES:
+        rows = [a for a in rows if alert_state(a) == want]
+    elif resolved is True:
+        rows = [a for a in rows if alert_state(a) == "resolved"]
+    rows.sort(key=lambda a: (alert_state(a) == "resolved", ALERT_SEVERITY_ORDER[alert_severity(a)], -(a.last_seen_at or a.created_at).timestamp()))
+    counts = {s: 0 for s in ALERT_STATES}
+    for a in db.query(PlatformAlert).all():
+        counts[alert_state(a)] += 1
+    return {"items": [ops_alert_json(a) for a in rows[:limit]], "counts": counts,
+            "sources": {"sentry": "connected" if sentry_api_settings() else "not_configured",
+                        "sentry_last_error": get_platform_setting(db, "ops_sentry_last_error") or None}}
 
-@app.post("/api/platform/alerts/{alert_id}/acknowledge")
-def platform_alert_acknowledge(alert_id: int, owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+class PlatformAlertStateUpdate(BaseModel):
+    state: Literal["unresolved", "watching", "resolved"]
+
+@app.post("/api/platform/alerts/{alert_id}/state")
+def platform_alert_set_state(alert_id: int, data: PlatformAlertStateUpdate, owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
     row = db.query(PlatformAlert).filter(PlatformAlert.id == alert_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Alert not found.")
-    if not row.acknowledged_at:
-        row.acknowledged_at = datetime.utcnow()
-        row.acknowledged_by_id = owner.id
-        add_platform_audit(db, owner, "PLATFORM_ALERT_ACKNOWLEDGED", f"Acknowledged alert #{alert_id}: {row.title}")
+    if data.state == "resolved" and (row.dedup_key or "").split(":", 1)[0] in OPS_SELF_CLEARING_ALERTS and alert_state(row) != "resolved":
+        raise HTTPException(status_code=409, detail="This alert clears by itself once the condition is fixed. Mark it Watching instead.")
+    before = alert_state(row)
+    now = datetime.utcnow()
+    row.state = data.state
+    if data.state == "resolved":
+        row.resolved_at, row.resolved_by_id = now, owner.id
+    else:
+        row.resolved_at, row.resolved_by_id = None, None
+    if data.state == "watching" and not row.acknowledged_at:
+        row.acknowledged_at, row.acknowledged_by_id = now, owner.id
+    if before != data.state:
+        add_platform_audit(db, owner, "PLATFORM_ALERT_STATE", f"Alert #{alert_id} ({row.title}): {before} → {data.state}.")
     db.commit()
-    return {"message": "Alert acknowledged."}
+    return {"message": "Alert updated.", "alert": ops_alert_json(row)}
+
+@app.post("/api/platform/alerts/{alert_id}/acknowledge")
+def platform_alert_acknowledge(alert_id: int, owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    """Older console builds: acknowledging now means Watching (still open)."""
+    return platform_alert_set_state(alert_id, PlatformAlertStateUpdate(state="watching"), owner, db)
+
+def ops_health_checks(db: Session) -> Dict[str, Any]:
+    """Every card is a check run NOW (or a recorded signal with its own age),
+    never a stored flag. Returns the checks plus the 24-hour counters."""
+    now = datetime.utcnow()
+    iso = to_utc_iso(now)
+    day_ago = now - timedelta(hours=24)
+    checks: Dict[str, Dict[str, Any]] = {}
+    release = (os.getenv("RAILWAY_GIT_COMMIT_SHA", "") or "").strip()[:7]
+    checks["app"] = {"label": "App / API", "status": "healthy", "provenance": "LIVE CHECK (this server)", "checked_at": iso,
+                     "summary": "Responding" + (f" • release {release}" if release else "") + f" • up {int((now - OPS_PROCESS_STARTED_AT).total_seconds() // 3600)} h"}
+    checks["database"] = {"label": "Database", **database_health_check()}
+    checks["storage"] = {"label": "Storage", **storage_health_check()}
+    upsert_ops_alert(db, "storage_unreachable", present=checks["storage"]["status"] == "down", source="Storage", severity="critical",
+                     title="File storage is not answering", message="Cauldra could not reach its private file storage.",
+                     impact="Uploading or opening receipts, invoices, avatars and documents fails for every business.",
+                     why="Customers cannot attach or view files.", technical=checks["storage"].get("detail") or "", now=now)
+    # Payments: configuration plus what Cauldra itself recorded (no Paystack API call).
+    last_webhook = db.query(func.max(PaystackWebhookEvent.received_at)).scalar()
+    failed_24 = db.query(func.count(PaymentRecord.id)).filter(PaymentRecord.status == "failed", PaymentRecord.purpose != "card_verification", PaymentRecord.created_at >= day_ago).scalar() or 0
+    flagged = db.query(func.count(PaymentRecord.id)).filter(PaymentRecord.status.like("flagged_%")).scalar() or 0
+    mode = "live" if PAYSTACK_SECRET_KEY.startswith("sk_live_") else ("test" if PAYSTACK_SECRET_KEY.startswith("sk_test_") else None)
+    if not PAYSTACK_SECRET_KEY:
+        pst, psum = "not_configured", "Paystack key not set"
+    elif flagged or failed_24:
+        pst, psum = "needs_attention", f"{failed_24} failed in 24 h • {flagged} awaiting review"
+    else:
+        pst, psum = "healthy", f"Paystack {mode or 'configured'} mode • no failed or held payments in 24 h"
+    checks["payments"] = {"label": "Payments", "status": pst, "summary": psum, "checked_at": iso,
+                          "provenance": OPS_PROVENANCE["configuration"] + " + " + OPS_PROVENANCE["calculated"],
+                          "detail": ("Last Paystack webhook received " + (to_utc_iso(last_webhook) or "never")
+                                     + ". Paystack itself is not called from Ops; this reflects Cauldra's own payment records.")}
+    # Email: configuration plus the last recorded send result.
+    email_ready = bool(os.getenv("RESEND_API_KEY", "").strip()) and bool(RESEND_FROM)
+    ok_at, fail_at = _setting_time(db, "ops_email_last_success_at"), _setting_time(db, "ops_email_last_failure_at")
+    if not email_ready:
+        est, esum = "not_configured", "Email provider key or sender missing"
+    elif fail_at and (not ok_at or fail_at > ok_at):
+        est, esum = "needs_attention", f"Last send failed ({get_platform_setting(db, 'ops_email_last_failure_category') or 'unknown'})"
+    elif ok_at:
+        est, esum = "healthy", "Configured • last send succeeded"
+    else:
+        est, esum = "unknown", "Configured • no send recorded yet"
+    checks["email"] = {"label": "Email", "status": est, "summary": esum, "checked_at": iso,
+                       "signal_at": to_utc_iso(max(filter(None, [ok_at, fail_at]), default=None)),
+                       "provenance": OPS_PROVENANCE["configuration"] + " + last send", "detail": "Resend. Sends are recorded from 2026-09-27."}
+    # AI providers: configured is not healthy; health = recent real outcomes.
+    ai_parts, ai_worst = [], "healthy"
+    for provider, client in (("gemini", gemini_client), ("openai", openai_client)):
+        s_n = db.query(func.count(AIUsageLedger.id)).filter(AIUsageLedger.provider == provider, AIUsageLedger.success == True, AIUsageLedger.created_at >= day_ago).scalar() or 0
+        f_n = db.query(func.count(AIUsageLedger.id)).filter(AIUsageLedger.provider == provider, AIUsageLedger.success == False, AIUsageLedger.created_at >= day_ago).scalar() or 0
+        if not client:
+            ai_parts.append(f"{provider.title()}: not configured"); state = "not_configured"
+        elif s_n + f_n == 0:
+            ai_parts.append(f"{provider.title()}: no requests in 24 h (unverified)"); state = "unknown"
+        elif f_n and f_n >= s_n:
+            ai_parts.append(f"{provider.title()}: {f_n} of {s_n + f_n} failed"); state = "down" if s_n == 0 else "needs_attention"
+        else:
+            ai_parts.append(f"{provider.title()}: {s_n} ok, {f_n} failed"); state = "healthy"
+        order = ["healthy", "unknown", "not_configured", "needs_attention", "down"]
+        if order.index(state) > order.index(ai_worst):
+            ai_worst = state
+    checks["ai"] = {"label": "AI providers", "status": ai_worst, "summary": " • ".join(ai_parts), "checked_at": iso,
+                    "provenance": OPS_PROVENANCE["calculated"] + " (real requests, last 24 h)"}
+    # Background job: when the reminder sweep last completed.
+    sweep = _setting_time(db, "ops_sweep_last_run_at")
+    limit = timedelta(seconds=NOTIFICATION_SWEEP_INTERVAL_SECONDS * 2 + 300)
+    if sweep and now - sweep <= limit:
+        bst, bsum = "healthy", "Reminder sweep ran on time"
+    elif (now - OPS_PROCESS_STARTED_AT) <= limit:
+        bst, bsum = "unknown", "Starting up — first sweep not due yet"
+    else:
+        bst, bsum = "needs_attention", "Reminder sweep is late"
+    checks["background"] = {"label": "Background jobs", "status": bst, "summary": bsum, "checked_at": iso,
+                            "signal_at": to_utc_iso(sweep), "provenance": OPS_PROVENANCE["calculated"],
+                            "detail": f"Runs every {NOTIFICATION_SWEEP_INTERVAL_SECONDS // 60} min. Offline-sync refusals are returned to the device and are not recorded centrally."}
+    sentry_backend = bool(SENTRY_BACKEND_DSN) and IS_PRODUCTION
+    api = sentry_api_settings()
+    sentry_open = sum(1 for a in db.query(PlatformAlert).filter(PlatformAlert.dedup_key.like("sentry:%")).all() if alert_state(a) != "resolved")
+    checks["errors"] = {"label": "Error monitoring", "checked_at": iso, "provenance": OPS_PROVENANCE["configuration"],
+                        "status": "healthy" if sentry_backend else "not_configured",
+                        "summary": ("Reporting to Sentry" if sentry_backend else "Sentry reporting off on this environment")
+                                   + (f" • {sentry_open} open Sentry issue(s) in Alerts" if api else " • Sentry issues not connected to Alerts"),
+                        "detail": "Backend reporting needs SENTRY_BACKEND_DSN on production. Pulling issues into Alerts needs SENTRY_API_TOKEN, SENTRY_ORG_SLUG and SENTRY_PROJECT_SLUG."}
+    db.commit()
+    counters = {
+        "failed_ai_requests_24h": db.query(func.count(AIUsageLedger.id)).filter(AIUsageLedger.success == False, AIUsageLedger.created_at >= day_ago).scalar() or 0,
+        "failed_payments_24h": failed_24,
+        "webhooks_received_24h": db.query(func.count(PaystackWebhookEvent.id)).filter(PaystackWebhookEvent.received_at >= day_ago).scalar() or 0,
+        "failed_webhooks_24h": None,
+        "open_critical_alerts": sum(1 for a in ops_open_alerts(db) if alert_severity(a) == "critical"),
+    }
+    return {"checked_at": iso, "fresh_seconds": OPS_HEALTH_FRESH_SECONDS, "checks": checks, "counters": counters,
+            "counter_notes": {"failed_webhooks_24h": "UNAVAILABLE: a webhook rejected before it is verified (bad signature, malformed body) is not recorded."}}
 
 @app.get("/api/platform/system-health")
 def platform_system_health(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
-    """A useful SUMMARY, not a raw log viewer (spec) - detailed technical logs
-    stay in Railway's own log stream."""
+    """Health NOW. Alerts hold the incident history."""
+    h = ops_health_checks(db)
+    # Kept for older console builds.
+    h["database"] = {"status": "ok" if h["checks"]["database"]["status"] in ("healthy", "needs_attention") else "degraded"}
+    return h
+
+def _database_provider_facts() -> Dict[str, Any]:
+    """Provider and region from the host name, never the host itself."""
+    host = (engine.url.host or "").lower()
+    if "supabase" in host:
+        provider = "Supabase (PostgreSQL)"
+    elif "railway" in host or host.endswith(".internal"):
+        provider = "Railway PostgreSQL"
+    elif host in ("localhost", "127.0.0.1", "::1", ""):
+        provider = "Local PostgreSQL"
+    else:
+        provider = "PostgreSQL"
+    region = None
+    m = re.match(r"^aws-\d+-([a-z]{2}-[a-z]+-\d)\.pooler\.supabase\.com$", host)
+    if m:
+        region = m.group(1)
+    return {"provider": provider, "region": region}
+
+def ops_storage_inventory(db: Session) -> Dict[str, Any]:
+    """Read-only reconciliation of the provider's objects with stored_uploads.
+    Lists keys only; never downloads, moves or deletes anything."""
     now = datetime.utcnow()
-    last_24h = now - timedelta(hours=24)
+    tracked = {r.storage_key: (r.id, r.size_bytes) for r in db.query(StoredUpload.id, StoredUpload.storage_key, StoredUpload.size_bytes).all()}
     try:
-        _ping_database()
-        db_ok = True
-    except Exception:
-        db_ok = False
-    failed_ai_24h = db.query(func.count(AIUsageLedger.id)).filter(AIUsageLedger.success == False, AIUsageLedger.created_at >= last_24h).scalar() or 0
-    failed_payments_24h = db.query(func.count(PaymentRecord.id)).filter(PaymentRecord.status == "failed", PaymentRecord.created_at >= last_24h).scalar() or 0
-    webhook_events_24h = db.query(func.count(PaystackWebhookEvent.id)).filter(PaystackWebhookEvent.received_at >= last_24h).scalar() or 0
-    critical_alerts_unresolved = db.query(func.count(PlatformAlert.id)).filter(PlatformAlert.severity == "critical", PlatformAlert.acknowledged_at.is_(None)).scalar() or 0
-    return {
-        "checked_at": to_utc_iso(now),
-        "database": {"status": "ok" if db_ok else "degraded"},
-        "ai": {"failed_requests_24h": failed_ai_24h},
-        "payments": {"failed_24h": failed_payments_24h},
-        "webhooks": {"received_24h": webhook_events_24h},
-        "alerts": {"unresolved_critical": critical_alerts_unresolved},
-    }
+        (objects, complete), ms = _timed(lambda: UPLOAD_STORAGE.list_objects(limit=20000))
+    except NotImplementedError:
+        return {"status": "unavailable", "reason": f"The {UPLOAD_STORAGE.name} provider cannot list objects.", "checked_at": to_utc_iso(now)}
+    except Exception as exc:
+        return {"status": "error", "reason": f"Listing failed ({type(exc).__name__}).", "checked_at": to_utc_iso(now)}
+    keys = set(objects)
+    missing = [tracked[k][0] for k in tracked if k not in keys and k != "pending"]
+    untracked = [k for k in keys if k not in tracked]
+    return {"status": "ok", "checked_at": to_utc_iso(now), "latency_ms": ms, "complete": complete,
+            "provider_objects": len(objects), "provider_bytes": int(sum(v for v in objects.values() if v)),
+            "records_missing_object": len(missing), "missing_object_upload_ids": sorted(missing)[:20],
+            "objects_without_record": len(untracked) if complete else None,
+            "provenance": OPS_PROVENANCE["live"]}
 
 @app.get("/api/platform/infrastructure")
 def platform_infrastructure(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
-    """Only metrics Cauldra can reliably calculate from its own database.
-    Deliberately does NOT scrape Railway/Supabase/provider dashboards or
-    invent numbers for anything this backend cannot verify itself (spec)."""
+    """Configuration and measurements, each labelled with where it comes from.
+    Raw hostnames, ports, database names and keys are never returned."""
+    now = datetime.utcnow()
     storage_bytes = db.query(func.coalesce(func.sum(StoredUpload.size_bytes), 0)).scalar() or 0
     upload_count = db.query(func.count(StoredUpload.id)).scalar() or 0
-    # The connection detail /health/database used to publish anonymously
-    # (SEC-004) now lives here, behind the platform-owner session.
-    database_detail = {"port": engine.url.port, "database_name": engine.url.database}
+    db_facts = {**_database_provider_facts(), "checked_at": to_utc_iso(now)}
     try:
         with engine.connect() as conn:
-            database_detail["schema"] = conn.execute(sql_text("SELECT current_schema()")).scalar()
-            database_detail["postgres_version"] = conn.execute(sql_text("SHOW server_version")).scalar()
+            db_facts["postgres_version"] = conn.execute(sql_text("SHOW server_version")).scalar()
+            db_facts["size_bytes"] = int(conn.execute(sql_text("SELECT pg_database_size(current_database())")).scalar() or 0)
+        db_facts["connection"] = "connected"
     except Exception as exc:
-        database_detail["error"] = _classify_database_connection_error(exc)
+        db_facts["connection"] = "unreachable"
+        db_facts["error"] = _classify_database_connection_error(exc)
+    mig = read_database_migration_status()
+    db_facts["migration"] = {"state": mig.get("state"), "summary": describe_migration_status(mig)}
+    try:
+        last_inventory = json.loads(get_platform_setting(db, "ops_storage_inventory") or "null")
+    except ValueError:
+        last_inventory = None
+    sender = RESEND_FROM.split("@")[-1].strip(" >") if RESEND_FROM and "@" in RESEND_FROM else None
+    plan_codes = sum(1 for cfg in PLAN_CONFIG.values() for k in ("paystack_monthly_plan_code", "paystack_annual_plan_code") if cfg.get(k))
+    r2 = all(os.getenv(k, "").strip() for k in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ENDPOINT", "R2_BACKUP_BUCKET"))
     return {
-        "note": ("Only metrics Cauldra can reliably compute from its own database are shown here. "
-                 "Railway/Supabase/provider dashboard-only metrics (compute usage, bandwidth, disk size) "
-                 "are not scraped and are not shown."),
-        "database": {"backend": "postgresql", "host": engine.url.host, **database_detail},
-        "storage": {"total_bytes_used": int(storage_bytes), "total_files": upload_count},
+        "provenance_labels": OPS_PROVENANCE,
+        "storage": {
+            "provider": UPLOAD_STORAGE.name, "durable": bool(UPLOAD_STORAGE.durable),
+            "tracked": {"bytes": int(storage_bytes), "objects": upload_count, "provenance": OPS_PROVENANCE["calculated"],
+                        "definition": "Sum of stored_uploads.size_bytes: files Cauldra itself recorded when they were uploaded."},
+            "provider_inventory": last_inventory,
+            # Kept for older console builds.
+            "total_bytes_used": int(storage_bytes), "total_files": upload_count,
+        },
+        "database": {**db_facts, "provenance": OPS_PROVENANCE["live"] + " (PostgreSQL)"},
+        "ai_providers": [{"provider": p, "model": m, "configured": bool(c), "provenance": OPS_PROVENANCE["configuration"]}
+                         for p, m, c in (("gemini", GEMINI_MODEL, gemini_client), ("openai", OPENAI_MODEL, openai_client))],
         "ai_providers_configured": {"gemini": bool(gemini_client), "openai": bool(openai_client)},
+        "email": {"provider": "Resend", "configured": bool(os.getenv("RESEND_API_KEY", "").strip()) and bool(RESEND_FROM),
+                  "sender_domain": sender, "provenance": OPS_PROVENANCE["configuration"]},
+        "payments": {"provider": "Paystack", "configured": bool(PAYSTACK_SECRET_KEY),
+                     "mode": "live" if PAYSTACK_SECRET_KEY.startswith("sk_live_") else ("test" if PAYSTACK_SECRET_KEY.startswith("sk_test_") else None),
+                     "plan_codes_configured": plan_codes, "plan_codes_expected": len(PLAN_CONFIG) * 2,
+                     "provenance": OPS_PROVENANCE["configuration"]},
+        "hosting": {"environment": ENVIRONMENT, "platform": "Railway" if os.getenv("RAILWAY_ENVIRONMENT_NAME") or os.getenv("RAILWAY_DEPLOYMENT_ID") else None,
+                    "service": os.getenv("RAILWAY_SERVICE_NAME") or None,
+                    "deployment_id": (os.getenv("RAILWAY_DEPLOYMENT_ID") or "")[:8] or None,
+                    "release": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:7] or None,
+                    "region": os.getenv("RAILWAY_REPLICA_REGION") or None,
+                    "running_since": to_utc_iso(OPS_PROCESS_STARTED_AT), "provenance": OPS_PROVENANCE["configuration"]},
+        "backups": {"status": "unavailable", "provenance": OPS_PROVENANCE["unavailable"],
+                    "off_platform_script_configured": r2,
+                    "summary": ("Backup variables are set, but backup runs are not reported to Cauldra, so the last successful backup cannot be shown."
+                                if r2 else "Off-platform backups are not configured on this environment (R2 variables missing)."),
+                    "provider_backups": "Supabase's own scheduled backups are managed by the provider and not visible to Cauldra."},
     }
+
+@app.post("/api/platform/infrastructure/storage-check")
+def platform_storage_check(owner: PlatformOwner = Depends(get_platform_owner), db: Session = Depends(get_db)):
+    """Runs the read-only provider inventory now and keeps the result (with its
+    time) so Infrastructure can show when it was last verified."""
+    result = ops_storage_inventory(db)
+    set_platform_setting(db, "ops_storage_inventory", json.dumps(result))
+    add_platform_audit(db, owner, "STORAGE_INVENTORY_CHECK", f"Ran the read-only storage inventory: {result.get('status')}.")
+    db.commit()
+    return result
 
 # --- Hidden Platform Owner Control Panel UI. NOT under /frontend, /assets,
 # /css or /js, NOT linked from index.html, and served only from
@@ -18180,6 +19167,13 @@ def serve_platform_panel():
 @app.get(PLATFORM_PANEL_PATH + "/login.js", include_in_schema=False)
 def serve_platform_panel_login_js():
     return _platform_panel_file("js/login.js", "application/javascript")
+
+@app.get(PLATFORM_PANEL_PATH + "/ops.css", include_in_schema=False)
+def serve_platform_panel_css():
+    """Prebuilt utility styles only (no console markup or data), so like the
+    sign-in page it needs no session. OPS-ACCURACY-001: replaces the Tailwind
+    in-browser compiler removed from /assets/vendor by row 73."""
+    return _platform_panel_file("ops.css", "text/css")
 
 def _require_platform_panel_session(request: Request, db: Session) -> None:
     """The console's own markup and code reveal the whole privileged surface,
