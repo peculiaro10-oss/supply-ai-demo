@@ -309,6 +309,44 @@ def install(g):
             joined = False
         return {"business_day_id": day.id, "joined_existing": joined, "business_day": g["serialize_business_day"](day, db)}
 
+    def close_business_day(db, user, payload, captured, ref):
+        """BUSINESS-DAY-OFFLINE-001: a Business Day closed on a device while
+        offline. The device sends it only after the day's own offline work
+        (its sales/expenses depend-on list), and it names that work in
+        own_refs. Closes exactly that day by id, never "whatever is open now",
+        with the moment it was really closed.
+        - already closed on the server (another device closed it): nothing to
+          change; answered and audited, never reopened or closed twice;
+        - someone else recorded work in the day after it was closed offline:
+          closing it at the offline time would put that work after the close,
+          so it is refused (BUSINESS_DAY_CONFLICT) and the day is left open."""
+        day = db.query(g["BusinessDay"]).filter_by(id=payload.get("business_day_id"), business_id=user.business_id).with_for_update().first()
+        if not day or (payload.get("location_id") is not None and day.location_id != payload.get("location_id")):
+            failure("RESOURCE_DELETED", "The Business Day closed offline no longer exists at this location.")
+        closed_at = max(day.opened_at, min(captured, _utcnow()))
+        if not day.is_open:
+            g["add_audit"](db, user, "BUSINESS_DAY_OFFLINE_CLOSE_ALREADY_CLOSED",
+                           f"Business day {day.date} was closed offline on this device; it was already closed on the server.",
+                           business_id=user.business_id, business_day_id=day.id, location_id=day.location_id,
+                           metadata={"offline_closed_at": closed_at.isoformat(), "offline_ref": ref,
+                                     "server_closed_at": day.closed_at.isoformat() if day.closed_at else None})
+            return {"business_day_id": day.id, "already_closed": True, "business_day": g["serialize_business_day"](day, db)}
+        own = [str(r) for r in (payload.get("own_refs") or [])][:5000]
+        Sale, Expense, Refund = g["SaleModel"], g["Expense"], g["RefundTransaction"]
+        def others(model, when):
+            q = db.query(model).filter(model.business_day_id == day.id, when > closed_at)
+            if hasattr(model, "client_ref") and own:
+                q = q.filter((model.client_ref.is_(None)) | (~model.client_ref.in_(own)))
+            return q.count()
+        later = others(Sale, Sale.timestamp) + others(Expense, Expense.created_at) + others(Refund, Refund.created_at)
+        if later:
+            failure("BUSINESS_DAY_CONFLICT", "Other work was recorded in this Business Day after it was closed offline, "
+                    "so it was left open. Check it and close it online.", 409,
+                    {"business_day_id": day.id, "records_after_offline_close": later})
+        result = g["_close_business_day"](DeferredCommit(db), day, user, closed_at=closed_at,
+                                          audit_extra={"offline": True, "offline_ref": ref, "offline_closed_at": closed_at.isoformat()})
+        return {"business_day_id": day.id, "already_closed": False, "business_day": result["business_day"]}
+
     @app.post("/offline/replay")
     def replay(op: Replay, request: Request, user=Depends(g["get_current_user"]), db=Depends(g["get_db"])):
         if op.schema_version != 2:
@@ -329,10 +367,15 @@ def install(g):
         rules = {"product_create": "inventory.add_product", "product_update": "inventory.edit_product",
                  "product_delete": "inventory.delete_product", "sale_checkout": "sales.create",
                  "expense_create": "expenses.record", "supplier_create": "supplier.create",
-                 "business_day_open": "business_day.manage"}
+                 "business_day_open": "business_day.manage", "business_day_close": "business_day.manage"}
         if op.type not in rules:
             failure("ONLINE_ONLY", "This operation requires an online workflow.", 400)
-        g["require_permission"](user, rules[op.type])
+        required = rules[op.type]
+        if op.type == "business_day_open" and payload.get("auto"):
+            # Same as online: a sale or expense that finds no open day opens
+            # one with the permission that sale/expense itself needs.
+            required = {"sale": "sales.create", "expense": "expenses.record"}.get(payload.get("trigger"), required)
+        g["require_permission"](user, required)
         if op.type in ("sale_checkout", "expense_create"):
             day = db.query(g["BusinessDay"]).filter_by(id=payload.get("business_day_id"),
                 business_id=user.business_id, location_id=payload.get("location_id")).with_for_update().first()
@@ -404,6 +447,8 @@ def install(g):
                 result = g["create_expense"](g["ExpenseCreate"](**payload), request, user, deferred)
             elif op.type == "business_day_open":
                 result = open_business_day(db, user, payload, captured, ref)
+            elif op.type == "business_day_close":
+                result = close_business_day(db, user, payload, captured, ref)
             else:
                 result = g["create_supplier"](g["SupplierCreate"](**payload), user, deferred)
             response = {"op_id": ref, "status": "synced", "result": jsonable_encoder(result),

@@ -9,7 +9,11 @@ through the real /offline/replay endpoint.
   is joined to it (no second open day) and its sale lands there;
 - an open day from a DIFFERENT date is never joined: refused with a reason,
   nothing written;
-- an unknown location is refused.
+- an unknown location is refused;
+- closing offline: keeps the real close time, runs after the day's own work,
+  an already-closed server day is answered unchanged, work by others after
+  the offline close keeps the day open, permission rules as online;
+- a sale opens a day with the sale permission, as online checkout does.
 
 Set TEST_POSTGRES_ADMIN_URL (see tests/postgres_test_support.py).
 """
@@ -189,6 +193,135 @@ class OfflineBusinessDayPostgresTests(unittest.TestCase):
         self.assertEqual(r.status_code, 409, r.text)
         self.assertEqual(r.json()["detail"]["code"], "LOCATION_CHANGED")
         self.assertEqual(self._open_days(tenant), [])
+
+    # --- offline close -------------------------------------------------------
+    def _online_open(self, tenant):
+        r = self.client.post(f"/sales/start-business-day?location_id={tenant['location_id']}",
+                             headers={"Authorization": f"Bearer {tenant['users']['admin']['token']}"})
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()["business_day"]["id"]
+
+    def _day(self, day_id):
+        m = self.main
+        db = m.SessionLocal()
+        try:
+            return db.get(m.BusinessDay, day_id)
+        finally:
+            db.close()
+
+    def test_synced_day_closes_offline_with_its_real_close_time(self):
+        tenant = self._tenant()
+        day_id = self._online_open(tenant)
+        m = self.main
+        db = m.SessionLocal()
+        try:
+            db.get(m.BusinessDay, day_id).opened_at = _now() - timedelta(minutes=50)  # opened before going offline
+            db.commit()
+        finally:
+            db.close()
+        closed_offline = _now() - timedelta(minutes=10)
+        op_id = str(uuid.uuid4())
+        payload = {"business_day_id": day_id, "location_id": tenant["location_id"], "own_refs": []}
+        r = self._replay(tenant, "staff", "business_day_close", payload, closed_offline, op_id)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(r.json()["result"]["already_closed"])
+        again = self._replay(tenant, "staff", "business_day_close", payload, closed_offline, op_id)
+        self.assertEqual(again.status_code, 200, again.text)
+        self.assertEqual(again.json()["result"]["business_day_id"], day_id, "a retried close is answered, not repeated")
+        day = self._day(day_id)
+        self.assertFalse(day.is_open)
+        self.assertLess(abs((day.closed_at - closed_offline).total_seconds()), 1)
+        m = self.main
+        db = m.SessionLocal()
+        try:
+            audits = db.query(m.AuditLog).filter_by(business_day_id=day_id, action="BUSINESS_DAY_CLOSED").all()
+            self.assertEqual(len(audits), 1)
+            self.assertTrue(json.loads(audits[0].metadata_json)["offline"])
+        finally:
+            db.close()
+
+    def test_offline_day_open_sale_close_in_order(self):
+        tenant = self._tenant()
+        opened = self._replay(tenant, "staff", "business_day_open", {"location_id": tenant["location_id"]}, _now() - timedelta(minutes=30))
+        day_id = opened.json()["result"]["business_day_id"]
+        sale = self._sale(tenant, day_id)
+        self.assertEqual(sale.status_code, 200, sale.text)
+        sale_ref = sale.json()["op_id"]
+        r = self._replay(tenant, "staff", "business_day_close",
+                         {"business_day_id": day_id, "location_id": tenant["location_id"], "own_refs": [sale_ref]},
+                         _now() - timedelta(minutes=5))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(self._day(day_id).is_open, "own offline sales synced after the offline close time do not block it")
+        self.assertEqual(self._open_days(tenant), [])
+
+    def test_day_already_closed_on_server_is_answered_not_changed(self):
+        tenant = self._tenant()
+        day_id = self._online_open(tenant)
+        self.client.post(f"/sales/end-business-day?location_id={tenant['location_id']}",
+                         headers={"Authorization": f"Bearer {tenant['users']['admin']['token']}"})
+        server_closed = self._day(day_id).closed_at
+        r = self._replay(tenant, "staff", "business_day_close",
+                         {"business_day_id": day_id, "location_id": tenant["location_id"]}, _now() - timedelta(minutes=1))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["result"]["already_closed"])
+        self.assertEqual(self._day(day_id).closed_at, server_closed, "never closed twice or re-timed")
+        m = self.main
+        db = m.SessionLocal()
+        try:
+            self.assertEqual(db.query(m.AuditLog).filter_by(business_day_id=day_id, action="BUSINESS_DAY_OFFLINE_CLOSE_ALREADY_CLOSED").count(), 1)
+        finally:
+            db.close()
+
+    def test_work_recorded_by_others_after_the_offline_close_keeps_the_day_open(self):
+        tenant = self._tenant()
+        day_id = self._online_open(tenant)
+        closed_offline = _now() - timedelta(minutes=10)
+        other = self._sale(tenant, day_id, role="admin")  # another device, after the offline close
+        self.assertEqual(other.status_code, 200, other.text)
+        r = self._replay(tenant, "staff", "business_day_close",
+                         {"business_day_id": day_id, "location_id": tenant["location_id"], "own_refs": []}, closed_offline)
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["detail"]["code"], "BUSINESS_DAY_CONFLICT")
+        self.assertTrue(self._day(day_id).is_open)
+
+    def test_close_needs_business_day_permission(self):
+        tenant = self._tenant(overrides={"business_day.manage": False})
+        day_id = self._online_open(tenant)
+        r = self._replay(tenant, "staff", "business_day_close", {"business_day_id": day_id, "location_id": tenant["location_id"]})
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertTrue(self._day(day_id).is_open)
+
+    def test_permission_changed_before_reconnect_refuses_close(self):
+        tenant = self._tenant()
+        day_id = self._online_open(tenant)
+        m = self.main
+        db = m.SessionLocal()
+        try:
+            staff = db.get(m.User, tenant["users"]["staff"]["id"])
+            staff.permission_overrides = json.dumps({"reports.sales": True})
+            db.commit()
+        finally:
+            db.close()
+        r = self._replay(tenant, "staff", "business_day_close", {"business_day_id": day_id, "location_id": tenant["location_id"]})
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(r.json()["detail"]["code"], "PERMISSION_CHANGED")
+        self.assertTrue(self._day(day_id).is_open)
+
+    def test_sale_opens_a_day_with_the_sale_permission_like_online(self):
+        tenant = self._tenant(overrides={"business_day.manage": False})
+        explicit = self._replay(tenant, "staff", "business_day_open", {"location_id": tenant["location_id"]})
+        self.assertEqual(explicit.status_code, 403, "tapping Open Business Day still needs business_day.manage")
+        implicit = self._replay(tenant, "staff", "business_day_open", {"location_id": tenant["location_id"], "auto": True, "trigger": "sale"})
+        self.assertEqual(implicit.status_code, 200, implicit.text)
+        m = self.main
+        db = m.SessionLocal()
+        try:
+            self.assertEqual(db.query(m.AuditLog).filter_by(business_id=tenant["business_id"], action="BUSINESS_DAY_AUTO_OPENED").count(), 1)
+        finally:
+            db.close()
+        no_trigger = self._tenant(overrides={"business_day.manage": False})
+        r = self._replay(no_trigger, "staff", "business_day_open", {"location_id": no_trigger["location_id"], "auto": True})
+        self.assertEqual(r.status_code, 403, "an auto open must name the sale/expense that needs it")
 
 
 if __name__ == "__main__":

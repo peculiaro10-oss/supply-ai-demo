@@ -13245,7 +13245,7 @@ def sales_analytics(user: User = Depends(get_current_user), db: Session = Depend
     trend = "Growing" if change > 0 else "Declining" if change < 0 else "Stable"
     return {"days": rows, "average_daily_sales": avg, "change_percent": change, "trend": trend}
 
-def _close_business_day(db: Session, day: BusinessDay, user: User) -> dict:
+def _close_business_day(db: Session, day: BusinessDay, user: User, closed_at: Optional[datetime] = None, audit_extra: Optional[dict] = None) -> dict:
     """The one place a BusinessDay row is ever closed — used by both
     /sales/end-business-day (whichever session is currently active) and
     /business-days/{id}/close (any specific session by id, including a
@@ -13257,7 +13257,11 @@ def _close_business_day(db: Session, day: BusinessDay, user: User) -> dict:
     from a later close after a reopen (BUSINESS_DAY_CLOSED_AGAIN) — the
     original close's snapshot is never overwritten: it stays forever in its
     own immutable AuditLog row (see business_day_timeline / section 8's
-    original-vs-corrected requirement), this just records a new one."""
+    original-vs-corrected requirement), this just records a new one.
+
+    closed_at/audit_extra are only passed for a day closed on a device while
+    offline (offline_access, BUSINESS-DAY-OFFLINE-001): the day keeps the
+    moment it was really closed."""
     # The closing snapshot is the SAME canonical per-day P&L the live
     # current-day endpoint serves (_business_day_financials) — one formula,
     # so a day's numbers cannot shift the moment it is closed. It is written
@@ -13281,14 +13285,14 @@ def _close_business_day(db: Session, day: BusinessDay, user: User) -> dict:
     is_reclose = day.closed_at is not None  # a prior close_at means this day was reopened since
     day.is_open = False
     day.status = "CLOSED"
-    day.closed_at = datetime.utcnow()
+    day.closed_at = closed_at or datetime.utcnow()
     day.closed_by_id = user.id
     day.closed_by_name = user.username
     day.closed_by_role = user.role
     action = "BUSINESS_DAY_CLOSED_AGAIN" if is_reclose else "BUSINESS_DAY_CLOSED"
     add_audit(
         db, user, action, f"Closed business day {day.date}.",
-        business_day_id=day.id, location_id=day.location_id, metadata=snapshot,
+        business_day_id=day.id, location_id=day.location_id, metadata={**snapshot, **(audit_extra or {})},
     )
     # Closing finalizes a day's sales/expense totals — a Business Brain input
     # (history_days, velocity). Mark dirty rather than recomputing inline.
