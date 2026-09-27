@@ -318,6 +318,73 @@
             return window.CauldraOffline.removeOutbox(op_id);
         }
 
+        // ---- Business Day opened while offline (BUSINESS-DAY-OFFLINE-001) ----
+        // A location with no synchronized open Business Day can still start one
+        // offline. The day exists only as its own sealed outbox change
+        // (type business_day_open, a negative local id in meta.local_id), so it
+        // survives a restart with the rest of the queue and disappears on its
+        // own once it has synchronized. Sales/expenses recorded against it
+        // depend on that change: runSync() sends the day first, then swaps the
+        // local id for the server's (resolveOutboxDependenciesOnBusinessDaySynced).
+        async function pendingOfflineBusinessDays() {
+            return (await getOutboxForCurrentBusiness())
+                .filter((op) => op.type === "business_day_open" && op.status !== "conflict" && op.meta?.local_id)
+                .map((op) => ({ id: op.meta.local_id, location_id: op.payload?.location_id, is_open: true, status: "OPEN",
+                    opened_at: op.captured_at, pending_sync: true, op_id: op.op_id }));
+        }
+
+        async function findOfflineOpenBusinessDay(locationId) {
+            const synced = offlineBusinessDays.find((day) => day.is_open && Number(day.location_id) === Number(locationId));
+            if (synced) return synced;
+            return (await pendingOfflineBusinessDays()).find((day) => Number(day.location_id) === Number(locationId)) || null;
+        }
+
+        // Same permission as the online Open Business Day button
+        // (business_day.manage); the server checks it again when the change
+        // synchronizes. auto marks a day opened by a sale, as online checkout
+        // does (BUSINESS_DAY_AUTO_OPENED).
+        async function openBusinessDayOffline(locationId, { auto = false } = {}) {
+            if (!locationId) throw new Error("Choose a synchronized location before opening a Business Day offline.");
+            const existing = await findOfflineOpenBusinessDay(locationId);
+            if (existing) return existing;
+            if (!hasPermission("business_day.manage")) throw new Error("No Business Day is open for this location. Ask someone who can open the Business Day to start it.");
+            const opId = generateOpId();
+            const localId = -Date.now();
+            const capturedAt = new Date().toISOString();
+            await addOutboxOp({
+                op_id: opId, business_id: currentBusinessId(), user_id: currentUserProfile?.id || null,
+                auth_version: currentUserProfile?.auth_version ?? null,
+                type: "business_day_open", endpoint: "/sales/start-business-day", method: "POST",
+                payload: { location_id: Number(locationId), auto }, client_ref: opId, meta: { local_id: localId },
+                label: "Open Business Day", captured_at: capturedAt,
+                status: "pending", attempts: 0, next_retry_at: 0, created_at: Date.now(), last_error: null,
+            });
+            return { id: localId, location_id: Number(locationId), is_open: true, status: "OPEN", opened_at: capturedAt, pending_sync: true, op_id: opId };
+        }
+
+        async function resolveOutboxDependenciesOnBusinessDaySynced(dayOpId, localId, serverId) {
+            const rows = await getOutboxForCurrentBusiness();
+            for (const dependent of rows) {
+                const refersToDay = Number(dependent.payload?.business_day_id) === Number(localId);
+                const hadDep = Array.isArray(dependent.depends_on_op_ids) && dependent.depends_on_op_ids.includes(dayOpId);
+                if (!refersToDay && !hadDep) continue;
+                await updateOutboxOp(dependent.op_id, {
+                    payload: refersToDay ? { ...dependent.payload, business_day_id: serverId } : dependent.payload,
+                    depends_on_op_ids: hadDep ? dependent.depends_on_op_ids.filter((id) => id !== dayOpId) : dependent.depends_on_op_ids,
+                });
+            }
+        }
+
+        // A refused offline day is never silently dropped or re-pointed: the
+        // work recorded against it stays on the device with its own reason.
+        async function holdDependentsOfRefusedBusinessDay(dayOp, reason) {
+            for (const dependent of await getOutboxForCurrentBusiness()) {
+                if (dependent.status === "conflict" || !(dependent.depends_on_op_ids || []).includes(dayOp.op_id)) continue;
+                await updateOutboxOp(dependent.op_id, { status: "conflict", conflict_code: "BUSINESS_DAY_CONFLICT",
+                    last_error: `The Business Day this change was recorded in could not be synchronized: ${reason}` });
+            }
+        }
+
         // ---- Products / Suppliers read cache --------------------------------
         // Lets the app keep showing (and, for products, selling from) the last
         // synchronized data while offline. Reconciled with server data every
@@ -414,10 +481,14 @@
                         let stillOutstanding = false;
                         for (const depId of op.depends_on_op_ids) {
                             const dep = (await getOutboxForCurrentBusiness()).find((row) => row.op_id === depId);
+                            // A refused offline Business Day never syncs: its
+                            // work is held with a reason instead of waiting forever.
+                            if (dep?.type === "business_day_open" && dep.status === "conflict") await holdDependentsOfRefusedBusinessDay(dep, dep.last_error || "it needs review.");
                             if (dep) { stillOutstanding = true; break; }
                         }
                         if (stillOutstanding) {
-                            await updateOutboxOp(op.op_id, { status: "blocked_dependency" });
+                            const current = (await getOutboxForCurrentBusiness()).find((row) => row.op_id === op.op_id);
+                            if (current?.status !== "conflict") await updateOutboxOp(op.op_id, { status: "blocked_dependency" });
                             continue;
                         }
                     }
@@ -440,6 +511,16 @@
                     if (identityMismatch) {
                         await updateOutboxOp(op.op_id, { status: "conflict", last_error: "This offline change belongs to a different or expired signed-in account and was not sent." });
                         continue;
+                    }
+
+                    // A change recorded against an offline day that synchronized
+                    // just before this change was saved: use the server's id.
+                    if (Number(op.payload?.business_day_id) < 0) {
+                        const synced = offlineBusinessDays.find((day) => Number(day.local_id) === Number(op.payload.business_day_id));
+                        if (synced) {
+                            op.payload = { ...op.payload, business_day_id: synced.id };
+                            await updateOutboxOp(op.op_id, { payload: op.payload });
+                        }
                     }
 
                     await updateOutboxOp(op.op_id, { status: "syncing" });
@@ -503,7 +584,9 @@
                             // only render as "[object Object]".
                             const detail = data?.detail && typeof data.detail === "object" ? data.detail : {};
                             const conflictCode = detail.code || (res.status === 403 ? "PERMISSION_CHANGED" : res.status === 404 ? "RESOURCE_DELETED" : "VALIDATION_ERROR");
-                            await updateOutboxOp(op.op_id, { status: "conflict", conflict_code: conflictCode, conflict_details: detail.details || null, last_error: detail.message || friendlyErrorMessage(data, `Server rejected this change (HTTP ${res.status}).`) });
+                            const refusal = detail.message || friendlyErrorMessage(data, `Server rejected this change (HTTP ${res.status}).`);
+                            await updateOutboxOp(op.op_id, { status: "conflict", conflict_code: conflictCode, conflict_details: detail.details || null, last_error: refusal });
+                            if (op.type === "business_day_open") await holdDependentsOfRefusedBusinessDay(op, refusal);
                             if (["AUTH_EXPIRED", "PERMISSION_CHANGED"].includes(conflictCode)) {
                                 await window.CauldraOffline?.quarantineActive(detail.message || "Your account or permissions changed.");
                                 setSyncStatus("auth_required");
@@ -587,7 +670,15 @@
         // right record.
         async function handleSyncedOperation(op, serverData) {
             try {
-                if (op.type === "product_create" && op.meta?.local_id && serverData?.id) {
+                if (op.type === "business_day_open" && op.meta?.local_id && serverData?.business_day_id) {
+                    const serverId = serverData.business_day_id;
+                    await resolveOutboxDependenciesOnBusinessDaySynced(op.op_id, op.meta.local_id, serverId);
+                    if (!offlineBusinessDays.some((day) => Number(day.id) === Number(serverId))) {
+                        offlineBusinessDays = [...offlineBusinessDays, { id: serverId, local_id: op.meta.local_id, location_id: op.payload?.location_id, is_open: true }];
+                        const offlineSnapshot = window.CauldraOffline?.currentSnapshot?.();
+                        if (offlineSnapshot) offlineSnapshot.days = offlineBusinessDays;
+                    }
+                } else if (op.type === "product_create" && op.meta?.local_id && serverData?.id) {
                     const idx = globalProducts.findIndex((p) => p.id === op.meta.local_id);
                     if (idx !== -1) { globalProducts[idx] = { ...globalProducts[idx], ...serverData, id: serverData.id, _pendingSync: false }; }
                     await cacheProductsLocally(globalProducts);
@@ -24242,9 +24333,10 @@
                 if (!dependsOnOpIds.includes(dep.op_id)) dependsOnOpIds.push(dep.op_id);
             }
 
-            const openDay = offlineBusinessDays.find((day) => day.is_open && Number(day.location_id) === Number(locationId));
-            if (!openDay) {
-                showToast("Internet required: no previously synchronized open Business Day is available for this location.", "error");
+            // No open day here yet: a permitted user's sale opens one offline
+            // (after the cart is validated below, so a refused cart opens nothing).
+            if (!(await findOfflineOpenBusinessDay(locationId)) && !hasPermission("business_day.manage")) {
+                showToast("No Business Day is open for this location. Ask someone who can open the Business Day to start it.", "error");
                 return;
             }
             let dailyTotal = 0;
@@ -24265,6 +24357,10 @@
                 const p = nextProducts.find(pr => pr.id === item.product_id);
                 if (p) p.quantity = nextStocks.filter((row) => Number(row.product_id) === Number(item.product_id)).reduce((sum, row) => sum + Number(row.quantity || 0), 0);
             }
+            let openDay;
+            try { openDay = await openBusinessDayOffline(locationId, { auto: true }); }
+            catch (error) { showToast(error.message, "error"); return; }
+            if (openDay.pending_sync && !dependsOnOpIds.includes(openDay.op_id)) dependsOnOpIds.push(openDay.op_id);
             const opId = generateOpId();
             const offlineSnapshot = window.CauldraOffline.currentSnapshot();
             const localReceipt = { client_ref: opId, location_id: locationId, business_day_id: openDay.id, currency: getCurrencyCode(),
@@ -24399,6 +24495,11 @@
                     }
                 }
             } catch (_) { /* keep the NOT_STARTED fallback rather than guessing */ }
+            // A day opened on this device while offline and not yet synchronized.
+            if (!d.open && hasAuthenticatedBusinessContext() && window.CauldraOffline?.isUnlocked()) {
+                const localDay = await findOfflineOpenBusinessDay(selectedBusinessDayLocationId || (operationalLocations.length === 1 ? operationalLocations[0].id : null)).catch(() => null);
+                if (localDay?.pending_sync) d = { open: true, status: "OPEN", business_day: { id: localDay.id, location_id: localDay.location_id, opened_at: localDay.opened_at, pending_sync: true } };
+            }
 
             currentBusinessDayId = d.business_day ? d.business_day.id : null;
             currentBusinessDayStatus = d.status || "NOT_STARTED";
@@ -24452,7 +24553,8 @@
                 dot.className = "inline-block w-2.5 h-2.5 rounded-full bg-success shrink-0";
                 label.textContent = d.status === "REOPENED" ? "Business Day Open (Reopened)" : "Business Day Open";
                 sub.textContent = b ? `${b.date}${b.opened_at ? " · Opened " + formatBusinessTime(b.opened_at) : ""}` : "";
-                if (canControl) {
+                if (b?.pending_sync) sub.textContent = b.opened_at ? `Opened offline at ${formatBusinessTime(b.opened_at)} · waiting to sync` : "Opened offline · waiting to sync";
+                if (canControl && !b?.pending_sync) {
                     actionBtn.textContent = "Close Business Day";
                     actionBtn.className = baseBtnClass + " bg-danger/15 hover:bg-danger/25 text-danger border border-danger/30";
                     actionBtn.onclick = openBusinessDayHeaderClose;
@@ -24479,12 +24581,27 @@
             // backend sends ("Another Business Day is currently open...").
             const btn = document.getElementById('business-day-header-action-btn');
             if (btn) btn.disabled = true;
+            const openOffline = async () => {
+                await openBusinessDayOffline(selectedBusinessDayLocationId || (operationalLocations.length === 1 ? operationalLocations[0].id : null));
+                showToast("Business Day opened offline. It will sync when you're back online.", "success");
+            };
             try {
-                const qs = selectedBusinessDayLocationId ? `?location_id=${selectedBusinessDayLocationId}` : "";
-                const r = await fetch(`${API_URL}/sales/start-business-day${qs}`, { method: 'POST', headers: { "Authorization": `Bearer ${authToken}` } });
-                const d = await r.json();
-                if (!r.ok) throw new Error(showApiError(r, d, "The Business Day could not be opened."));
-                showToast("Business day started.", "success");
+                if (offlineWorkspaceUnlocked && !authToken) await openOffline();
+                else {
+                    const qs = selectedBusinessDayLocationId ? `?location_id=${selectedBusinessDayLocationId}` : "";
+                    let r;
+                    try { r = await fetch(`${API_URL}/sales/start-business-day${qs}`, { method: 'POST', headers: { "Authorization": `Bearer ${authToken}` } }); }
+                    catch (networkError) {
+                        if (!isNetworkFailure(networkError) || !window.CauldraOffline?.isUnlocked()) throw networkError;
+                        r = null;
+                        await openOffline();
+                    }
+                    if (r) {
+                        const d = await r.json();
+                        if (!r.ok) throw new Error(showApiError(r, d, "The Business Day could not be opened."));
+                        showToast("Business day started.", "success");
+                    }
+                }
             } catch (e) {
                 showToast(friendlyErrorMessage(e.message, e.message), 'error');
             } finally {
@@ -25771,8 +25888,9 @@
         // main.py) — this just needs to generate one and queue the request.
         async function handleRecordExpenseOffline(payload, opId) {
             const locationId = payload.location_id || selectedBusinessDayLocationId || activeLocations()[0]?.id;
-            const openDay = offlineBusinessDays.find((day) => day.is_open && Number(day.location_id) === Number(locationId));
-            if (!openDay) throw new Error("Internet required: no previously synchronized open Business Day is available for this location.");
+            let openDay;
+            try { openDay = await openBusinessDayOffline(locationId, { auto: true }); }
+            catch (error) { showToast(error.message, "error"); return; }
             const offlineSnapshot = window.CauldraOffline.currentSnapshot();
             const localExpense = { id: `local-${opId}`, ...payload, location_id: locationId, business_day_id: openDay.id,
                 currency: getCurrencyCode(), occurred_at: new Date().toISOString(), client_ref: opId, status: "pending_sync", _pendingSync: true };
@@ -25782,6 +25900,7 @@
                 auth_version: currentUserProfile?.auth_version ?? null,
                 type: "expense_create", endpoint: "/expenses/", method: "POST",
                 payload: { ...payload, location_id: locationId, business_day_id: openDay.id, currency: getCurrencyCode(), occurred_at: new Date().toISOString(), client_ref: opId }, client_ref: opId, meta: {},
+                depends_on_op_ids: openDay.pending_sync ? [openDay.op_id] : [],
                 label: `Expense: ${payload.category} (${formatCurrency(payload.amount)})`,
                 status: "pending", attempts: 0, next_retry_at: 0, created_at: Date.now(), last_error: null,
             }, [{ kind: "expenses", value: nextExpenses }]);

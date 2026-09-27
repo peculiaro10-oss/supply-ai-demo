@@ -11848,5 +11848,53 @@
   "{#0} créditos restantes",
   "{#0} رصيد متبقٍ",
   "{#0} créditos restantes"
+ ],
+ "No Business Day is open for this location. Ask someone who can open the Business Day to start it.": [
+  "Aucune journée commerciale n’est ouverte pour cet emplacement. Demandez à une personne autorisée d’ouvrir la journée commerciale.",
+  "No hay ningún día comercial abierto para esta ubicación. Pide a alguien que pueda abrir el día comercial que lo inicie.",
+  "لا يوجد يوم عمل مفتوح لهذا الموقع. اطلب من شخص يملك صلاحية فتح يوم العمل أن يبدأه.",
+  "Nenhum dia comercial está aberto para este local. Peça a alguém que possa abrir o dia comercial para iniciá-lo."
+ ],
+ "Choose a synchronized location before opening a Business Day offline.": [
+  "Choisissez un emplacement synchronisé avant d’ouvrir une journée commerciale hors ligne.",
+  "Elige una ubicación sincronizada antes de abrir un día comercial sin conexión.",
+  "اختر موقعًا متزامنًا قبل فتح يوم عمل دون اتصال.",
+  "Escolha um local sincronizado antes de abrir um dia comercial offline."
+ ],
+ "Business Day opened offline. It will sync when you're back online.": [
+  "Journée commerciale ouverte hors ligne. Elle sera synchronisée à votre retour en ligne.",
+  "Día comercial abierto sin conexión. Se sincronizará cuando vuelvas a estar en línea.",
+  "فُتح يوم العمل دون اتصال. ستتم مزامنته عند عودتك إلى الاتصال.",
+  "Dia comercial aberto offline. Ele será sincronizado quando você voltar a ficar online."
+ ],
+ "Opened offline at {time} · waiting to sync": [
+  "Ouverte hors ligne à {time} · en attente de synchronisation",
+  "Abierto sin conexión a las {time} · pendiente de sincronizar",
+  "فُتح دون اتصال عند {time} · بانتظار المزامنة",
+  "Aberto offline às {time} · aguardando sincronização"
+ ],
+ "Opened offline · waiting to sync": [
+  "Ouverte hors ligne · en attente de synchronisation",
+  "Abierto sin conexión · pendiente de sincronizar",
+  "فُتح دون اتصال · بانتظار المزامنة",
+  "Aberto offline · aguardando sincronização"
+ ],
+ "The Business Day this change was recorded in could not be synchronized: {reason}": [
+  "La journée commerciale dans laquelle cette modification a été enregistrée n’a pas pu être synchronisée : {reason}",
+  "No se pudo sincronizar el día comercial en el que se registró este cambio: {reason}",
+  "تعذّرت مزامنة يوم العمل الذي سُجّل فيه هذا التغيير: {reason}",
+  "Não foi possível sincronizar o dia comercial em que esta alteração foi registrada: {reason}"
+ ],
+ "The Business Day opened offline could not be matched to this location's open Business Day. The work saved offline was kept for review.": [
+  "La journée commerciale ouverte hors ligne n’a pas pu être rattachée à la journée commerciale ouverte de cet emplacement. Le travail enregistré hors ligne a été conservé pour vérification.",
+  "El día comercial abierto sin conexión no pudo asociarse al día comercial abierto de esta ubicación. El trabajo guardado sin conexión se conservó para revisarlo.",
+  "تعذّرت مطابقة يوم العمل المفتوح دون اتصال مع يوم العمل المفتوح لهذا الموقع. تم الاحتفاظ بالعمل المحفوظ دون اتصال للمراجعة.",
+  "Não foi possível associar o dia comercial aberto offline ao dia comercial aberto deste local. O trabalho salvo offline foi mantido para revisão."
+ ],
+ "A Business Day from a different date is already open at this location. The work saved offline was kept on this device and was not added to that day.": [
+  "Une journée commerciale d’une autre date est déjà ouverte pour cet emplacement. Le travail enregistré hors ligne a été conservé sur cet appareil et n’a pas été ajouté à cette journée.",
+  "Ya hay un día comercial de otra fecha abierto en esta ubicación. El trabajo guardado sin conexión se conservó en este dispositivo y no se añadió a ese día.",
+  "يوجد بالفعل يوم عمل مفتوح بتاريخ مختلف في هذا الموقع. تم الاحتفاظ بالعمل المحفوظ دون اتصال على هذا الجهاز ولم يُضَف إلى ذلك اليوم.",
+  "Já existe um dia comercial de outra data aberto neste local. O trabalho salvo offline foi mantido neste dispositivo e não foi adicionado a esse dia."
  ]
 }

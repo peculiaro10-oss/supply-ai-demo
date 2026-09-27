@@ -1173,7 +1173,8 @@
     function conflictGuidance(code) {
         const guidance = { STOCK_CHANGED: "Stock or price changed on the server. Review the original sale.", RESOURCE_DELETED: "The original record no longer exists.",
             PERMISSION_CHANGED: "Your permissions changed while this device was offline.", LOCATION_CHANGED: "The original location or warehouse changed.",
-            BUSINESS_DAY_CLOSED: "The original Business Day closed before this change synchronized.", AUTH_EXPIRED: "Sign in online as the original user to review this change.",
+            BUSINESS_DAY_CLOSED: "The original Business Day closed before this change synchronized.",
+            BUSINESS_DAY_CONFLICT: "The Business Day opened offline could not be matched to this location's open Business Day. The work saved offline was kept for review.", AUTH_EXPIRED: "Sign in online as the original user to review this change.",
             VALIDATION_ERROR: "Review the saved values before retrying." };
         return guidance[code] || "This change needs review before it can synchronize.";
     }
