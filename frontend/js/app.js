@@ -19650,6 +19650,9 @@
                 if (dialog.dispatchEvent(cancel)) dialog.close();
                 return "dialog";
             }
+            // The mobile menu drawer (z-[90]) sits above every module modal.
+            const drawerOverlay = document.getElementById("mobile-nav-overlay");
+            if (drawerOverlay && !drawerOverlay.classList.contains("hidden")) { closeMobileNav(); return "drawer"; }
             const modal = topmostOpenModal();
             if (modal) {
                 if (BACK_PROTECTED_MODALS.has(modal.id)) return "blocked";
