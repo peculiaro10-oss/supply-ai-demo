@@ -12160,6 +12160,11 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
 
     validated = []
     negotiated_lines = []
+    # X5 (triage 80): a catalog-mode line charges the server's catalog price,
+    # never a submitted unit_price. When the till submitted a different price
+    # (its cached catalog was stale) the sale still completes at the catalog
+    # price, but the response now says so instead of ignoring it silently.
+    price_adjustments = []
     for item, stock in zip(items, resolved_stock_by_line):
         p = products_by_id[item.product_id]
         qty = item.quantity
@@ -12196,6 +12201,11 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
                 "catalog_wholesale_price": wholesale_price,
                 "unit_cost": float(p.cost_price or 0.0),
                 "negotiated_price": price, "reason": reason,
+            })
+        if item.price_mode != "negotiated" and item.unit_price is not None and round(float(item.unit_price), 2) != round(price, 2):
+            price_adjustments.append({
+                "product_id": p.id, "product_name": p.name, "price_mode": item.price_mode,
+                "submitted_unit_price": round(float(item.unit_price), 2), "charged_unit_price": round(price, 2),
             })
         validated.append((p, qty, price, item.price_mode, stock))
 
@@ -12314,7 +12324,7 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
         metadata={"transaction_id": transaction_ref, "total": round(daily_total, 2),
                   "lines": len(validated), "units": sum(q for _, q, _, _, _ in validated),
                   "pricing_policy": "server_catalog_or_authorized_negotiation",
-                  "negotiated_lines": negotiated_lines},
+                  "negotiated_lines": negotiated_lines, "price_adjustments": price_adjustments},
     )
     try:
         db.commit()
@@ -12331,7 +12341,8 @@ def sales_checkout(payload: SalesCheckoutRequest, request: Request, user: User =
     except Exception:
         db.rollback()
     return {"message": "Sale completed successfully.", "daily_total": daily_total, "business_day_id": day.id,
-            "transaction_id": transaction_ref, "updated_products": updated_products}
+            "transaction_id": transaction_ref, "updated_products": updated_products,
+            "price_adjustments": price_adjustments}
 
 # -----------------------------------------------------------------------------
 # REFUNDS

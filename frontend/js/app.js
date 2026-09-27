@@ -1669,7 +1669,7 @@
                     endBusinessDayConfirmTitle: "End Business Day", businessDayCloseFailed: "The business day could not be closed.",
                     businessDayClosedSuccess: "Business day closed and recorded.",
                     itemOutOfStock: "Item {name} is out of stock!", onlyUnitsLeft: "Only {count} units left in stock!",
-                    onlyUnitsAvailable: "Only {count} units available!", saleCompletedToday: "Sale completed. Today's total: {total}", saleCompletedTotal: "Sale completed. Sale total: {total}",
+                    onlyUnitsAvailable: "Only {count} units available!", saleCompletedToday: "Sale completed. Today's total: {total}", saleCompletedTotal: "Sale completed. Sale total: {total}", catalogPriceApplied: "Charged at the current catalog price, not the older price in the cart: {items}.", catalogPriceLine: "{name} {charged} (cart showed {submitted})",
                     saleFailed: "Unable to complete the sale right now.",
                 },
                 expenses: { expenseHistory: "Expense History", recordExpense: "Record Expense", allCategories: "All categories", allUsers: "All users",
@@ -2194,7 +2194,7 @@
                     endBusinessDayConfirmTitle: "Clôturer la journée commerciale", businessDayCloseFailed: "La journée commerciale n'a pas pu être clôturée.",
                     businessDayClosedSuccess: "Journée commerciale clôturée et enregistrée.",
                     itemOutOfStock: "L'article {name} est en rupture de stock !", onlyUnitsLeft: "Il ne reste que {count} unités en stock !",
-                    onlyUnitsAvailable: "Seulement {count} unités disponibles !", saleCompletedToday: "Vente terminée. Total du jour : {total}", saleCompletedTotal: "Vente terminée. Total de la vente : {total}",
+                    onlyUnitsAvailable: "Seulement {count} unités disponibles !", saleCompletedToday: "Vente terminée. Total du jour : {total}", saleCompletedTotal: "Vente terminée. Total de la vente : {total}", catalogPriceApplied: "Facturé au prix actuel du catalogue, et non à l'ancien prix du panier : {items}.", catalogPriceLine: "{name} {charged} (le panier affichait {submitted})",
                     saleFailed: "Impossible de finaliser la vente pour le moment.",
                 },
                 expensesExtra: {
@@ -2606,7 +2606,7 @@
                     endBusinessDayConfirmTitle: "Cerrar día comercial", businessDayCloseFailed: "No se pudo cerrar el día comercial.",
                     businessDayClosedSuccess: "Día comercial cerrado y registrado.",
                     itemOutOfStock: "¡El artículo {name} está agotado!", onlyUnitsLeft: "¡Solo quedan {count} unidades en existencia!",
-                    onlyUnitsAvailable: "¡Solo {count} unidades disponibles!", saleCompletedToday: "Venta completada. Total de hoy: {total}", saleCompletedTotal: "Venta completada. Total de la venta: {total}",
+                    onlyUnitsAvailable: "¡Solo {count} unidades disponibles!", saleCompletedToday: "Venta completada. Total de hoy: {total}", saleCompletedTotal: "Venta completada. Total de la venta: {total}", catalogPriceApplied: "Cobrado al precio actual del catálogo, no al precio anterior del carrito: {items}.", catalogPriceLine: "{name} {charged} (el carrito mostraba {submitted})",
                     saleFailed: "No se puede completar la venta en este momento.",
                 },
                 expensesExtra: {
@@ -3428,7 +3428,7 @@
                     endBusinessDayConfirmTitle: "إنهاء يوم العمل", businessDayCloseFailed: "تعذر إغلاق يوم العمل.",
                     businessDayClosedSuccess: "تم إغلاق يوم العمل وتسجيله.",
                     itemOutOfStock: "العنصر {name} غير متوفر في المخزون!", onlyUnitsLeft: "تبقى {count} وحدة فقط في المخزون!",
-                    onlyUnitsAvailable: "تتوفر {count} وحدة فقط!", saleCompletedToday: "تم إتمام البيع. إجمالي اليوم: {total}", saleCompletedTotal: "تم إتمام البيع. إجمالي البيع: {total}",
+                    onlyUnitsAvailable: "تتوفر {count} وحدة فقط!", saleCompletedToday: "تم إتمام البيع. إجمالي اليوم: {total}", saleCompletedTotal: "تم إتمام البيع. إجمالي البيع: {total}", catalogPriceApplied: "تم احتساب سعر الكتالوج الحالي، وليس السعر الأقدم في السلة: {items}.", catalogPriceLine: "{name} {charged} (كانت السلة تعرض {submitted})",
                     saleFailed: "تعذر إتمام عملية البيع الآن.",
                 },
                 expensesExtra: {
@@ -3840,7 +3840,7 @@
                     endBusinessDayConfirmTitle: "Encerrar dia comercial", businessDayCloseFailed: "Não foi possível encerrar o dia comercial.",
                     businessDayClosedSuccess: "Dia comercial encerrado e registrado.",
                     itemOutOfStock: "O item {name} está sem estoque!", onlyUnitsLeft: "Restam apenas {count} unidades em estoque!",
-                    onlyUnitsAvailable: "Apenas {count} unidades disponíveis!", saleCompletedToday: "Venda concluída. Total de hoje: {total}", saleCompletedTotal: "Venda concluída. Total da venda: {total}",
+                    onlyUnitsAvailable: "Apenas {count} unidades disponíveis!", saleCompletedToday: "Venda concluída. Total de hoje: {total}", saleCompletedTotal: "Venda concluída. Total da venda: {total}", catalogPriceApplied: "Cobrado pelo preço atual do catálogo, não pelo preço anterior do carrinho: {items}.", catalogPriceLine: "{name} {charged} (o carrinho mostrava {submitted})",
                     saleFailed: "Não foi possível concluir a venda agora.",
                 },
                 expensesExtra: {
@@ -24087,7 +24087,16 @@
                 // SALE-001: the checkout response's daily_total is THIS sale's total
                 // (sales_checkout sums only the lines just sold), so it is labelled
                 // as the sale's total, not "Today's total".
-                showToast(t("sales.saleCompletedTotal", {total: formatCurrency(data.daily_total)}),"success"); posCart=[]; renderPOSCart(); closeSaleModal();
+                posCart=[]; renderPOSCart(); closeSaleModal();
+                // X5: shown after the sale dialog closes, so it lands on the page
+                // (placed inside the dialog, it closed with it). A catalog price
+                // the server charged instead of the cart's older price is named.
+                const saleDone = t("sales.saleCompletedTotal", {total: formatCurrency(data.daily_total)});
+                const priceAdjustments = Array.isArray(data.price_adjustments) ? data.price_adjustments : [];
+                if (priceAdjustments.length) {
+                    const lines = priceAdjustments.map(a => t("sales.catalogPriceLine", {name: a.product_name, charged: formatCurrency(a.charged_unit_price), submitted: formatCurrency(a.submitted_unit_price)})).join("; ");
+                    showToast(`${saleDone}. ${t("sales.catalogPriceApplied", {items: lines})}`, "warning");
+                } else showToast(saleDone, "success");
                 // Targeted update — patch local product quantities from the
                 // server's authoritative post-sale state and refresh only
                 // the specifically affected areas (inventory, dashboard
@@ -24099,6 +24108,11 @@
                 (data.updated_products || []).forEach(u => {
                     const idx = globalProducts.findIndex(p => p.id === u.id);
                     if (idx !== -1) globalProducts[idx].quantity = u.quantity;
+                });
+                // The next sale starts from the price the server just charged.
+                priceAdjustments.forEach(a => {
+                    const product = globalProducts.find(p => p.id === a.product_id);
+                    if (product) product[a.price_mode === "wholesale" ? "wholesale_price" : "retail_price"] = a.charged_unit_price;
                 });
                 cacheProductsLocally(globalProducts);
                 updateDashboardMetrics();
