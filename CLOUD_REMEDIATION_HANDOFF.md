@@ -721,6 +721,94 @@ If the owner accepts local Web verification pending QA, the count becomes **32 �
 2. Supply the OBS-5 onboarding-copy detail from the tracker.
 3. Android final pass (§7): add RESP-001 at 800 px, close tap areas, session-expiry notice, UX-014, the ERR-003 error text.
 
+
+### 14.2 UI/i18n result + platform stage, rows 73–80 (2026-09-27, overnight cloud session)
+
+**UI/i18n stage (local session, recorded here).** Commits `d551d89` + `25b8e4c` (triage 70, 72; I18N-001, OBS-5). QA deployment **`75cb2f59`**. **UI/i18n signed-in QA: 34 PASS, 0 FAIL.** The stage is QA/browser verified; not rerun here.
+
+**Branch and commits.** `remediation/batch-e-ai-forecast-brain`, on top of `25b8e4c`:
+`d38965e` rows 73–75 · `80c2736` row 77 · `ec955e4` row 78 · `63fc49b` row 80 · plus this documentation commit. **No QA deploy** (no Railway access from the cloud). **No migrations, no new variables.**
+
+| Row | Finding | Status | Evidence |
+|---|---|---|---|
+| 73 | OBS-11 | **FIXED — QA + Android pending.** The app compiled Tailwind in every browser (vendored 3.4.17 play compiler, with a "not for production" console warning). It now ships the prebuilt `frontend/css/tailwind.css` (`node scripts/build-tailwind-css.js`, theme in `scripts/tailwind/`), linked last, like the injected styles. | All 472 runtime-generated classes present. Computed styles match the runtime version in 150 states (27 modules; 375/768/800/1024/1366 px; en/fr/es/ar/pt), except one real class conflict (expense custom-category row: two text colours), fixed to its previous colour. Remaining differences are data or animation timing only. |
+| 74 | OBS-10 | **FIXED — QA pending** (the service worker is web-only; native skips it). Cause: `base.css` precached twice (`/css/base.css` and an unused `/frontend/css/base.css`, same file). | Cache listing before and after; `run_service_worker_offline.js`: no duplicate entries, `tailwind.css` cached, styled cold offline. Cache version `cauldra-shell-v13-prebuilt-css`. |
+| 75 | OBS-12 | **FIXED — QA pending.** Three load-time `app.js build …` console lines removed. The Tailwind warning went with row 73. Scanner traces that run only on a user's scan are kept (diagnostics). | Console capture before and after. |
+| 76 | URL-OPS-001 | **PRODUCTION-ROLLOUT ACTION — no code defect found.** The Ops route is built from the request's own host plus `PLATFORM_PANEL_PATH`. The backend, Ops bundle (`location.origin`) and `scripts/create_platform_owner.py` contain no origin. The legacy address must be in configuration or records: the owner's Ops bookmark or records, and/or production Supabase Auth **Site URL** (the setup script's verification email passes no redirect, so the Site URL decides where it lands). | Code search. |
+| 77 | REC-001 | **FIXED (diagnostics) — owner decision on fail-closed.** Startup now logs `[startup] Database migration: …` (matches / DATABASE BEHIND CODE + pending list / not shipped by this code / no Alembic history table). A request hitting a missing table or column logs `[schema-behind-code] …` naming it; customers keep the ERR-003 text. It never refuses to start (see decision 1). | `test_rec001_migration_status.py` (5), `…_postgres.py` (current → behind → missing-column request → untracked). |
+| 78 | OFFLINE-QUEUE-001 | **FIXED — confirmed first.** (a) Client: a later account/permission refusal overwrote **every** queued change's reason, including changes already refused for their own reason, and could throw on a tamper-quarantined row. Now only waiting changes take the account reason. (b) Server: a replay failing validation said "The original operation contains invalid values." It now names the field and problem, never the value. | Offline harness check (fails before, passes after; 29 others unchanged); `test_offline_queue001.py`, `…_postgres.py` via `/offline/replay`. |
+| 79 | QA-AUTH-EMAIL-001 | **EXTERNAL / QA CONFIGURATION — no code change.** App behaviour is correct: a Supabase 429 is surfaced as its own reason with the provider's wait (OBS-8), never bypassed. The cap and default branding are Supabase's default mailer. Custom SMTP plus templates is Supabase dashboard configuration (production: §10 item 6). | Code read. |
+| 80 | X5 | **FIXED — QA + Android pending** (signal per this stage's instruction; see decision 2). In retail/wholesale mode a stale cart price was silently replaced by the catalog price (reproduced: cart ₦100, recorded ₦120). The "Sale completed" message was also invisible because it rendered inside the closing dialog. Checkout now returns `price_adjustments` (also in the audit metadata). The till shows the sale message on the page, as a warning naming each adjusted line (en/fr/es/ar/pt), and refreshes its local price. Sale security, permissions and negotiated pricing are unchanged. | Browser reproduction before and after; `test_x5_price_signal_postgres.py` (fails before). |
+
+**Tests and sweep.** New tests:
+- `tests/test_platform_rows_73_80.cjs` (static, 33 checks);
+- `tests/test_rec001_migration_status.py` and `tests/test_rec001_migration_status_postgres.py`;
+- `tests/test_offline_queue001.py` and `tests/test_offline_queue001_postgres.py`;
+- `tests/test_x5_price_signal_postgres.py`.
+
+Extended:
+- `tests/offline-browser-harness.html`;
+- `tests/run_service_worker_offline.js`;
+- `tests/test_batch_a_native_offline.cjs` (the mono-stack guard follows the theme into its new file).
+
+The full Python + Node suite ran at `25b8e4c` and at `63fc49b` with a local Postgres: identical exit codes **and** identical failure messages for every pre-existing suite, and all new suites pass.
+
+**Pre-existing, not this stage:**
+- the same 9 Postgres fixture suites as §14.1, plus `test_inapp_payments`, `test_infrastructure`, `test_location_authority`, `test_paystack_webhook_atomicity`, `test_sentry_monitoring` and `test_native_bundle`;
+- `run_service_worker_offline.js` asserts an old "internet connection … required … first sign-in" unlock wording and fails at `25b8e4c` too.
+
+**QA verification still required** (after `railway up --service cauldra-qa` from `63fc49b`+):
+1. The startup log shows `Database migration: 0042_business_brain_forecast_recompute (matches this code)`.
+2. Console on load: no Tailwind warning and no `app.js build` lines. Network: `/css/tailwind.css` 200; `tailwindcss-3.4.17.js` is never requested.
+3. Spot-check dashboard, sale, expense and settings at 375, 800 and 1366 px in en and ar. The expense "Enter a custom category" row is blue.
+4. DevTools → Cache Storage `cauldra-shell-v13-prebuilt-css`: `base.css` appears once, and an offline reload is styled.
+5. X5:
+   - with the sale screen loaded on device A, change a product's retail price on device B;
+   - sell it on A without reloading;
+   - A shows a warning naming the product, both prices and the recorded total.
+6. A normal sale shows "Sale completed. Sale total: …" on the page.
+
+**Android final-checklist additions:**
+- The bundled `css/tailwind.css` styles every screen. Check phone and 800 px tablet, en and ar, including the offline unlock and sale screens, with no unstyled flash at cold start (note on OBS-4).
+- `android:prepare:qa` bundle verification passes. It now requires `css/tailwind.css`.
+- The X5 warning and "Sale completed" message are readable on a phone, including Arabic RTL.
+- Offline: after a permission change, a previously refused queued sale still shows its own reason in Sync details.
+- Logcat shows no `app.js build` lines.
+- Row 74: nothing to check (the service worker is not used in the native shell).
+
+These are added to all outstanding A–F and UI/i18n Android checks.
+
+**Manifest additions (names only).** Add `d38965e`, `80c2736`, `ec955e4`, `63fc49b` after `25b8e4c`. No migrations or variables. Behaviour notes:
+- the frontend loads the static `/css/tailwind.css`, and the vendored Tailwind compiler is removed;
+- the service-worker cache version moves to `v13`, and clients drop older caches on activation;
+- a startup migration-status log line, plus `[schema-behind-code]` lines. A production schema without `alembic_version` logs "no Alembic history table", which is expected and non-fatal;
+- the `/sales/checkout` response and `SALE_COMPLETED` audit metadata gain `price_adjustments`;
+- the offline replay `VALIDATION_ERROR` message is specific and adds `details.fields`.
+
+Rollout actions:
+- **Row 76:** open Ops only on the canonical address. Set production Supabase Auth Site URL to the canonical address. Replace any stored Ops link that uses the Railway service URL, and keep that host served for legacy APKs (G8).
+- **Row 79:** custom SMTP and branded templates (already §10 item 6).
+
+**Owner decisions / manual actions.**
+1. **REC-001:** keep the log-only diagnostics, or make startup refuse to run when the database is behind? Refusing would require every migration to land before its code (the recorded order runs Batch E before `0042`). It would also require confirming that production is Alembic-tracked (its level is unread, §4).
+2. **X5:** confirm the non-blocking signal (the sale completes at the catalog price, with a warning). The alternative is refusing the sale until the cart is refreshed, as offline replay already does.
+3. **Row 76:** check the stored Ops link and production Supabase Site URL; nothing in the repository to change.
+4. **Row 79:** decide whether QA gets custom SMTP now or only production.
+
+**Resulting count.** `Still needs a fix` was 32 before Batch F, then 17 after Batch F, then 15 after UI/i18n (rows 70, 72 QA-verified). Rows 73, 74, 75, 78 and 80, plus 77 if the owner accepts diagnostics, move to **fixed, awaiting QA**. Once QA-verified, **15 → 9 (10 if 77 stays open)**.
+
+The remaining 9 are none of them code fixes:
+- rows 1 (legal), 64 (decision/Android), 76 (production rollout) and 79 (provider configuration);
+- Batch A rows 2, 61, 62, 63 and 66 (Android/manual verification).
+
+This assumes the 15 Batch F rows are confirmed on QA. `75cb2f59` contains their code, and this session has no record of their QA checks.
+
+**Tracker lines (new):**
+- OBS-11, OBS-10, OBS-12, OFFLINE-QUEUE-001, X5 → `FIXED — awaiting QA verification`;
+- REC-001 → `FIXED (diagnostics) — awaiting QA + owner decision on fail-closed`;
+- URL-OPS-001 → `PRODUCTION-ROLLOUT ACTION`;
+- QA-AUTH-EMAIL-001 → `EXTERNAL — QA/provider configuration`.
+
 ---
 
 *Handoff prepared 2026-09-26 from `remediation/batch-e-ai-forecast-brain` @ `2aeec3f`. Documentation only — no product code, QA, `main` or production change.*
