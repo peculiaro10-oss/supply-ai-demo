@@ -1089,6 +1089,88 @@ Also a small UX gap across all of the above: offline failures show generic "fail
 
 **Android/native checklist:** add the step-5 checks above. Mark any APK built before `45e5f54` as superseded.
 
+
+### 14.5 OFFLINE-STOCK-REFUND-001 — G1 stock adjustments/transfers and G2 refunds offline (2026-09-27, cloud session)
+
+Owner decision: G1 and G2 are launch scope; G3–G9 stay later work, not started. Starting head `be2504e`. No migrations, no new variables; service-worker cache `cauldra-shell-v16-offline-stock-refunds`.
+
+**G1, stock adjustments.**
+- The existing +/- actions work offline for users with `inventory.adjust_stock`.
+- Each is a sealed `stock_adjust` change: product, the product's warehouse, a signed **delta**, reason, the quantity the device saw, and the real local time.
+- The online endpoint was already delta-based, so nothing is ever overwritten with an absolute count.
+- On sync the server rechecks the permission and device grant, the product (RESOURCE_DELETED) and the warehouse/location (LOCATION_CHANGED). It then applies the delta on top of other devices' changes, exactly once (op-id idempotency).
+- If the result would be negative, it refuses (STOCK_CHANGED) with the current figure, and nothing changes.
+- Online and offline share one core, `_apply_stock_adjustment`.
+
+**G1, transfers.**
+- The warehouse-modal transfer works offline for users with `inventory.transfer_stock`, between warehouses already on the device. Local source stock is checked first.
+- `stock_transfer` carries warehouse **ids**. The server locks both stock rows in a fixed order and moves both in one transaction, or neither.
+- Too little source stock is refused whole with the figures; there is no partial move and no negative stock.
+- Online and offline share `_apply_stock_transfer`.
+- The device's cached stock reflects its own pending changes, like an offline sale, so the same units cannot be moved twice on the device.
+
+**G2, refunds: what was found.** Sale refunds are **internal to Cauldra**: accounting rows plus optional restock. `create_refund` calls no payment provider. Paystack refund fields exist only on subscription and card-verification payment records. So an offline refund is a pending request that the server completes in full on sync, and nothing claims money moved.
+
+**G2, which sales can be refunded offline.** With `sales.refund`:
+- (A) a sale recorded offline on this device, synced or not;
+- (B) a synchronized sale in the new sealed snapshot list `refundable_sales`: the last 90 days, bounded at 500 lines, carrying what the server says is still refundable;
+- (C) anything else needs the internet, and the modal says so;
+- a legacy sale with no known location is not refunded offline.
+
+**G2, how an offline refund is recorded.**
+- The device takes off refunds it has already queued, so the same units cannot be refunded twice on it.
+- The refund lands in the open day at the original sale's location, auto-opening one with `sales.refund` as online does.
+- A refund of a not-yet-synced sale depends on that sale and addresses its line by cart position; the server stores one row per cart item, in order, and checks the product id.
+- If the sale is refused, the refund is held with "The sale this refund is for could not be synchronized…".
+- Nothing is restocked on the device; the server restocks exactly once.
+- A Business Day close waits for refunds recorded in it.
+
+**G2, on sync.**
+- The server rechecks permission and grant, and the day and location.
+- It locks the sale rows and rechecks the remaining refundable quantity. If another till refunded some or all of it, the whole offline refund is refused (REFUND_CONFLICT) with sold, already-refunded and remaining figures. Nothing is partly applied, over-refunded or restocked twice.
+- Otherwise it runs the online refund with the op id as its idempotency key.
+- `create_refund` now also locks the sale rows, so two concurrent online refunds cannot over-refund either.
+
+**UX.**
+- Sync Details now lists waiting changes as "Refund pending", "Transfer pending", "Adjustment pending" or "Waiting to sync", and conflicts as "Needs attention".
+- Transactions shows "Refund pending" on a sale.
+- Toasts say pending, never done.
+- New strings are translated (fr/es/ar/pt).
+
+**Tests.**
+- Server `tests/test_offline_stock_refund_postgres.py`: 16/16.
+- E2E `tests/run_offline_stock_refund_e2e.js`: 35/35 checks, 3 scenarios, stable over repeated runs.
+- Static `tests/test_offline_stock_refund.cjs`: pass.
+- Regressions:
+  - Business Day e2e 46/46 (the part-2 report's "48" was a miscount; the suite has 46 checks);
+  - Business Day offline server tests 12/12;
+  - offline harness 30/30 (row 78);
+  - batch D inventory, staff permissions, PERM-001, offline access/queue, X5, REC-001, refund reporting and batch E: all pass;
+  - suites failing at `be2504e` (business_day, mutation idempotency, rejected checkout, checkout atomicity, sale pricing, refund state (Paystack verification charges), REC-001 postgres, location authority) fail on exactly the same tests.
+- Two test-only fixes: a whole-second timing gap in the Business Day e2e, and per-run audit scoping in the new e2e.
+
+**APK:** a new APK is required (client code and service-worker change). It supersedes builds before this batch.
+
+**Android checks to run** (English and Arabic):
+1. Offline +/- stock, then force-stop and reopen: still pending. Reconnect: applied once.
+2. Offline transfer: "Transfer pending". A transfer larger than the device's stock is refused.
+3. Another device empties the source first: the transfer is held, and nothing moves.
+4. Offline refund of a synced sale and of an offline sale: "Refund pending"; no stock comes back until sync; force-stop keeps both.
+5. Another till refunds the same sale first: the offline refund is held with its figures.
+6. The offline sale is refused: its refund is held.
+7. A user without `sales.refund`: no refund offline.
+
+**Tracker:**
+- `OFFLINE-CAP-G1 → FIXED (commits below) — awaiting QA + APK + Android`;
+- `OFFLINE-CAP-G2 → FIXED — awaiting QA + APK + Android`;
+- `OFFLINE-CAP-G3…G9 → later offline work (unchanged)`.
+
+**Triage:** the same rows.
+
+**Retest log:** 2026-09-27 cloud results above; no QA deploy, no Android.
+
+**Manifest:** add this batch's commits; no migrations, no variables; service-worker cache v16.
+
 ---
 
 *Handoff prepared 2026-09-26 from `remediation/batch-e-ai-forecast-brain` @ `2aeec3f`. Documentation only — no product code, QA, `main` or production change.*
