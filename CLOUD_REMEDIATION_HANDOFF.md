@@ -1171,6 +1171,86 @@ Owner decision: G1 and G2 are launch scope; G3–G9 stay later work, not started
 
 **Manifest:** add this batch's commits; no migrations, no variables; service-worker cache v16.
 
+### 14.6 OFFLINE-EXTERNAL-001 — external-provider workflows offline-friendly, and ONE combined local handoff (2026-09-27, cloud session)
+
+Owner principle: first-party workflows work offline where safe; external-provider workflows are **offline-friendly** (work preserved, the external step deferred or resumed, PENDING never shown as COMPLETED). Starting head `904f904`. No migrations, no new variables; service-worker cache `cauldra-shell-v17-offline-external`.
+
+**Shared architecture (no new framework).** A deferred external step is one more change type in the existing sealed outbox: AES-GCM at rest; in clear only `op_id`, `type`, `status`, dependencies and time; replayed by the existing `/offline/replay` (device grant, identity and permission rechecked, `claim_idempotent_mutation` on the op id). Added:
+- `EXTERNAL_ACTION_TYPES` (today `po_email_send`) with a retry cap: backoff 10 s → 5 min, at most 8 attempts, then **Needs attention** (never retried forever);
+- `cancelOutbox()` in `offline.js`: one atomic read-and-delete, only for external types, never while the send is in flight; `updateOutbox()` can no longer re-create a cancelled row; the sync loop re-reads after marking a change "syncing" and skips a cancelled one;
+- Sync Details: "Waiting to send", a **Cancel** action for a waiting email and **Remove** for a held one, and plain reasons for the new codes.
+
+**Implemented.**
+1. **Purchase-order email while offline (QUEUEABLE).** Send by email on a synchronized DRAFT queues a sealed `po_email_send` (order id, supplier id, SHA-256 of the draft text). The card says **Waiting to send** ("Saved on this device and not sent yet…"); edit, delete and Send are hidden for it; the same order cannot be queued twice. On reconnect it is sent automatically through the server, which rechecks `po.send`, that the order still exists and is DRAFT (`PO_ALREADY_SENT`), that the draft and supplier are unchanged (`PO_CHANGED`) and that it is at most 72 hours old (`STALE_ACTION`), then calls the provider with `Idempotency-Key: cauldra-offline-<op id>`. The order becomes SENT, audited and notified (the server sends the push) only after the provider accepted it; "Purchase order #N was emailed." appears only then. Provider outcomes: unconfigured → `PROVIDER_UNAVAILABLE` (Needs attention), refused → `PROVIDER_REJECTED` (Needs attention), outage → `PROVIDER_RETRY` (retried). Reasons never echo the address, key or draft.
+   - Online send unchanged in behaviour; it now shares `email_purchase_order()` and locks the order row, so two concurrent sends of one draft can no longer both email.
+2. **Purchase orders readable offline.** The Purchase Orders screen renders the sealed snapshot's orders with "Using saved data from <time>." (it said "load failed" before). WhatsApp, edit and delete stay online-only and are hidden offline.
+3. **AI (MUST WAIT, context kept; local fallback).** The assistant window now opens offline; its local answers (low stock, product and unit counts, out of stock) still work. Any other question is **not queued** (it spends AI credits and answers from the data at that moment) and **not answered**: the question goes back in the box with "You're offline, so this question has not been answered…". AI insights, margin advice and invoice scan say "Cauldra's AI has not run, and nothing was sent" / "Nothing was uploaded or scanned". No on-device model.
+4. **Barcode.** The business's own products are matched offline as before; the provider look-up is skipped and says "No internet, so the barcode could not be looked up… the barcode is kept, so enter the details yourself." Manual product creation offline is unchanged.
+5. **Security email/SMS (recovery code, password reset).** Never queued (codes expire). Offline they now say so and keep what was typed.
+6. Because `navigator.onLine` is unreliable in the Android WebView, a request that cannot reach Cauldra at all is treated as offline for the chat, barcode and recovery messages too.
+
+**Deliberately unchanged / online-only:** Paystack payment (resumable by the existing PAY-001 design: server payment record, webhook, "check status / resume", "do not pay again"; never queued or simulated; no card data on the device); email verification and email change; WhatsApp PO hand-off; Price Monitor checks and price-list upload; profile-photo upload; invoice scan; push subscribe; Sentry (loaded only online in production; offline events are dropped by the SDK; Cauldra stores no diagnostics); FX (platform-panel only, cached server-side with its fetch time).
+
+**Reconnect policy (po_email_send):** auto-send on reconnect; retry with backoff (8 attempts max) then Needs attention; op-id receipt plus provider idempotency key; Cancel until the send starts, Remove once held; not sent after 72 hours (STALE_ACTION, user re-sends); `po.send`, device grant, identity and auth version rechecked; no dependencies (the order must already exist on the server — offline-created drafts are G4, not built). Sign-out/removing offline data: the existing warning counts it as an unsynced change; a permission or account change quarantines the queue as before.
+- Residual risk, stated: Resend honours an idempotency key for 24 hours. A duplicate is only possible if the provider accepted a send, the Cauldra transaction then failed, and the retry came more than 24 hours later.
+
+**Tests.**
+- Server `tests/test_offline_external_postgres.py` (simulated provider): **10/10**.
+- End to end `tests/run_offline_external_e2e.js` with the test-only simulated provider `tests/fake_email_provider/` (loaded only when put on `PYTHONPATH` with `CAULDRA_TEST_FAKE_EMAIL_PROVIDER=1`; never deployed): **29/29**, repeated.
+- Static `tests/test_offline_external.cjs`: all pass.
+- Regressions: G1/G2 e2e 35/35; Business Day e2e 46/46; offline harness 30/30 (row 78); full Python/cjs sweep. The sweep caught one real regression (the offline check broke the UX-013 single-run test for AI insights); fixed in `c6c4bfd`. Every other failing suite fails on exactly the same tests at `904f904`: business_day, infrastructure, mutation idempotency, Paystack webhook atomicity, REC-001 postgres, refund state, registration atomicity, rejected checkout, sale pricing, checkout atomicity, Sentry monitoring, transaction count; in-app payments and location authority need `DATABASE_URL` (environment); historical COGS times out (as in the earlier baseline); `test_native_bundle` needs a prepared `www` bundle.
+
+**External offline capability matrix** (Class: A queueable, B cacheable, C resumable, D local fallback, E must wait).
+
+| Workflow | Provider | Before | Class | Now? | Offline UX after | Reconnect | Security | Config | Launch |
+|---|---|---|---|---|---|---|---|---|---|
+| Purchase-order email | Resend | failed offline | A | Yes | Waiting to send; Cancel; sent only after acceptance | Auto ≤72 h; 8 tries then Needs attention | po.send, draft fingerprint, row lock, op id + provider key, sealed | existing `RESEND_*` | Critical — done |
+| Purchase orders list | first-party | "load failed" | B | Yes | Using saved data from … | refresh | sealed snapshot | none | done |
+| PO via WhatsApp | wa.me / WhatsApp app | online only | E | No | hidden offline | manual | user attests send | none | later |
+| AI assistant chat | Gemini/OpenAI | window blocked | D + E | Yes | local answers; others not answered, question kept | manual resend | no queue (credits, stale data) | server keys | done |
+| AI insights / margin advice | Gemini | error | E | Yes | "AI has not run" | manual | — | server keys | done |
+| Invoice scan (upload + AI) | storage + Gemini | blocked/error | E (C later) | Yes | "nothing uploaded or scanned" | manual | would need sealed file store | storage + AI | later |
+| Price-list upload, Price Monitor checks | storage / websites | blocked | E (A later) | No | internet required | manual | — | — | later (G8) |
+| Profile photo | storage | error | E (A later) | No | error, nothing uploaded | manual | — | storage | later |
+| Barcode: own products | first-party | worked | D | unchanged | matched offline | — | — | — | done |
+| Barcode: provider look-up | General Catalog + UPCitemdb | "lookup failed" | E + D | Yes | not looked up; barcode kept; manual entry | manual | — | UPCitemdb | done |
+| Recovery code, password reset | Resend / Termii / Twilio | generic error | E | Yes (message) | offline, nothing sent, input kept | manual | never queued (expiry) | existing | done |
+| Email verify / change, onboarding verify | Resend | blocked | E | No | internet required | manual | security email | existing | as is |
+| Paystack checkout / upgrade / trial / card | Paystack | blocked (Billing) | C | No (existing PAY-001) | internet required; resume or check status online | manual | never queued; no card data; new intent if expired | Paystack keys | as is |
+| Paystack webhook | incoming | server | n/a | — | not a device concern | server | server idempotency | — | — |
+| Push delivery | web push (VAPID) | server | server-owned | — | notification created when the change syncs; pushed once | server | — | VAPID keys | as is |
+| Push subscribe | browser push service | error | E | No | — | manual | — | — | later |
+| Sentry (frontend) | Sentry CDN | not loaded offline | SDK | No | never blocks; offline events dropped | — | no stored diagnostics | DSN | as is |
+| FX USD→NGN | Frankfurter | server-side cache | B (server) | — | platform panel only | server | — | — | — |
+| Business Brain | first-party (no AI provider) | not shown offline | B | No | — | — | — | — | later (first-party) |
+
+No analytics SDK and no outgoing webhooks exist in the code.
+
+**Launch-critical external gaps still open:** none in code. Open verification: QA deploy, one APK, the Android pass below, and one owner-approved real-provider email check (parked: cloud may not send real email).
+
+**ONE combined local handoff — all offline work since `704b843`.**
+- Final head: the docs commit that adds this section, directly after `c6c4bfd` on `remediation/batch-e-ai-forecast-brain`.
+- Commits: `a3609a6`, `95b8470`, `bc585ab` (docs), `7c84a82`, `45e5f54`, `be2504e` (docs), `3ee9e8d`, `dfb74fd`, `904f904` (docs), `0dd4092` (server), `c8b7674` (client), `c6c4bfd` (fix), and this section's docs commit.
+- Migrations: none since `704b843` (latest remains `0043_ops_accuracy_telemetry`). Variables: none new (`CAULDRA_OFFLINE_SIGNING_KEY`, `RESEND_API_KEY`, `RESEND_FROM` already exist on QA; do not set any `CAULDRA_TEST_*` variable on QA).
+- Cache: `cauldra-shell-v17-offline-external`.
+- Order: pull the final head once → `railway up --service cauldra-qa` once → check the startup database line (at head, no pending migration) and `/health` → build **one** QA APK (`build-apk.bat qa`) → one Android pass.
+- New APK: **required**; supersedes `cauldra-qa-rc-704b843.apk` and every build in between.
+- Android pass (English and Arabic; prove offline with airplane mode plus `dumpsys connectivity`):
+  1. Row 78 sequence (§14.3), ending with the day closed offline before reconnecting.
+  2. Business Day part 2 (§14.4 step 5): offline close of a synced and of an offline-opened day; force-stop while closed; a sale after the close opens a new day; B keeps selling after A's offline close → A's close held; no `business_day.manage` → no Open/Close, but a sale opens a day.
+  3. G1/G2 (§14.5, seven checks).
+  4. External: a synced PO draft offline → Send by email → "Waiting to send"; force-stop and reopen → still waiting; Cancel on a second one → never sent; reconnect → the first becomes Sent once. AI chat offline keeps the question, local answers work; AI insights and invoice scan say nothing ran; barcode offline keeps the barcode for manual entry; forgot-password offline says nothing was sent.
+- Earlier Android results: the offline, Business Day and row 78 parts of the `704b843` run are superseded. Areas whose code did not change (native Paystack bridge, build-target and 0-production-request checks, NAT-002 gate wording, RESP-001 layout) keep their recorded status; smoke them on the new APK.
+- External checks that stay manual (owner): one real Resend delivery of a queued PO email to an owner-controlled address on QA; Paystack TEST resume after a dropped connection; AI provider answers online.
+- Clean-up: close the QA test day; delete test suppliers, purchase orders, products and sales per QA hygiene. Do not touch the 42 lost uploads or Tenant B.
+
+**Records.**
+- **Tracker:** `OFFLINE-EXTERNAL-001 — external-provider workflows offline-friendly (PO email queue; AI/barcode/recovery truthful offline; PO list readable) → FIXED (0dd4092, c8b7674, c6c4bfd) — awaiting QA + APK + Android`; G1/G2 and BUSINESS-DAY-OFFLINE-001 unchanged (awaiting the same combined pass); G3–G9 later offline work.
+- **Triage:** add `OFFLINE-EXTERNAL-001`, launch-scoped (owner principle 2026-09-27), FIXED — awaiting QA/Android; later items: invoice-scan/price-list/photo queued upload, Business Brain offline, WhatsApp hand-off, push subscribe.
+- **Retest log:** 2026-09-27 cloud: server 10/10, e2e 29/29, static pass, regressions as above; no QA deploy, no Android, no real provider call.
+- **Manifest:** add all commits listed above after `704b843`; no migrations; no new variables; cache v17; test-only `tests/fake_email_provider/` must never be on a deployed `PYTHONPATH`.
+- **Android checklist:** replace the separate offline lists with the combined pass above; mark every APK before this batch superseded.
+
 ---
 
 *Handoff prepared 2026-09-26 from `remediation/batch-e-ai-forecast-brain` @ `2aeec3f`. Documentation only — no product code, QA, `main` or production change.*
