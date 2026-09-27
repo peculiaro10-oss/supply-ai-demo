@@ -44,6 +44,9 @@ assert(!/window\.Capacitor\.registerPlugin\('App'\)/.test(app), 'app.js must not
 // NAT-001 — one-glyph Naira fallback, local only, after the desktop mono fonts.
 assert(/@font-face \{ font-family: "Cauldra Currency"; src: local\([^;]+; unicode-range: U\+20A6; \}/.test(css), 'Naira fallback face must be local-only and limited to U+20A6');
 assert(!/Cauldra Currency[^}]*url\(/.test(css), 'no downloaded font');
-assert(index.includes(`'"Liberation Mono"', '"Cauldra Currency"', '"Courier New"', 'monospace'`), 'mono stack must place the fallback after the desktop mono fonts');
+// OBS-11 moved the Tailwind theme from index.html into the prebuilt stylesheet's build config.
+const twConfig = read('scripts/tailwind/tailwind.config.js'), twCss = read('frontend/css/tailwind.css');
+assert(twConfig.includes(`'"Liberation Mono"', '"Cauldra Currency"', '"Courier New"', 'monospace'`), 'mono stack must place the fallback after the desktop mono fonts');
+assert(/\.font-mono\{font-family:[^}]*Liberation Mono,Cauldra Currency,Courier New,monospace\}/.test(twCss), 'prebuilt stylesheet must carry the same mono stack');
 
 console.log('PASS: Batch A guards — retry recovery without a session, accurate gate wording, 24 h opt-in snooze, Android Back with protected gates, bridge-safe listeners, local Naira fallback.');

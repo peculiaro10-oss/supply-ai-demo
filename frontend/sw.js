@@ -16,10 +16,13 @@
 // below deletes every cache whose name doesn't match the current one, which
 // is the only thing standing between a fixed startup bug and a browser
 // silently keeping the old broken app.js around after the fix ships.
-const SHELL_CACHE = "cauldra-shell-v12-launch-i18n-polish";
+const SHELL_CACHE = "cauldra-shell-v13-prebuilt-css";
 
 // Precached at install time. Kept small and static-only — anything dynamic
-// (products, sales, etc.) never belongs in this cache.
+// (products, sales, etc.) never belongs in this cache. List each file once, by
+// the URL the page itself requests: a second URL for the same file (audit
+// OBS-10 found base.css also listed as /frontend/css/base.css) downloads and
+// stores it twice and is never used by the page.
 //
 // SHELL_DOCUMENTS are the app's own code — not versioned by filename, so
 // they're treated like "/" itself (network-first with a cached fallback,
@@ -38,7 +41,7 @@ const SHELL_DOCUMENTS = [
     "/js/i18n-runtime.js",
     "/css/base.css",
     "/css/dashboard-fixes.css",
-    "/frontend/css/base.css",
+    "/css/tailwind.css",
 ];
 const SHELL_ASSETS = [
     "/",
@@ -49,7 +52,6 @@ const SHELL_ASSETS = [
     "/assets/icon-192.png",
     "/assets/icon-512.png",
     "/assets/cauldra-mark-96.png",
-    "/assets/vendor/tailwindcss-3.4.17.js",
     "/assets/vendor/fontawesome/css/all.min.css",
     "/assets/vendor/fontawesome/webfonts/fa-solid-900.woff2",
     "/assets/vendor/fontawesome/webfonts/fa-regular-400.woff2",

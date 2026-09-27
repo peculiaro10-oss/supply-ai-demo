@@ -68,7 +68,7 @@ async function connect(url) {
     await pause(2000);
   }
   const cached = await cdp.call('Runtime.evaluate', {
-    expression: `(async()=>{const cacheName=${JSON.stringify(shellCacheName)};const cache=await caches.open(cacheName);const urls=['/','/js/app.js','/js/offline.js','/css/offline.css'];const found={};for(const url of urls)found[url]=!!(await cache.match(new Request(location.origin+url)));found.controlled=!!navigator.serviceWorker.controller;found.cacheNames=await caches.keys();found.entries=(await cache.keys()).map(request=>new URL(request.url).pathname);return found})()`,
+    expression: `(async()=>{const cacheName=${JSON.stringify(shellCacheName)};const cache=await caches.open(cacheName);const urls=['/','/js/app.js','/js/offline.js','/css/offline.css','/css/tailwind.css'];const found={};for(const url of urls)found[url]=!!(await cache.match(new Request(location.origin+url)));found.controlled=!!navigator.serviceWorker.controller;found.cacheNames=await caches.keys();found.entries=(await cache.keys()).map(request=>new URL(request.url).pathname);return found})()`,
     awaitPromise: true,
     returnByValue: true,
   });
@@ -80,11 +80,14 @@ async function connect(url) {
     if (opened.result.value) break;
   }
   const state = await cdp.call('Runtime.evaluate', {
-    expression: `({title:document.title,offlineModule:!!window.CauldraOffline,unlockOpen:!!document.getElementById('offline-unlock-dialog')?.open,firstSignInRequired:/internet connection.*required.*first sign-in/i.test(document.getElementById('offline-unlock-dialog')?.textContent||''),bodyWidth:document.documentElement.scrollWidth,viewportWidth:innerWidth})`,
+    expression: `({title:document.title,tailwindApplied:(()=>{const probe=document.createElement('div');probe.className='hidden sm:flex';document.body.appendChild(probe);const hidden=getComputedStyle(probe).display;probe.className='flex';const flex=getComputedStyle(probe).display;probe.remove();return (hidden==='none'||hidden==='flex')&&flex==='flex'&&getComputedStyle(document.body).backgroundColor!=='rgba(0, 0, 0, 0)'})(),offlineModule:!!window.CauldraOffline,unlockOpen:!!document.getElementById('offline-unlock-dialog')?.open,firstSignInRequired:/internet connection.*required.*first sign-in/i.test(document.getElementById('offline-unlock-dialog')?.textContent||''),bodyWidth:document.documentElement.scrollWidth,viewportWidth:innerWidth})`,
     returnByValue: true,
   });
   const result = { cached: cached.result.value, coldOffline: state.result.value };
-  result.passed = ['/','/js/app.js','/js/offline.js','/css/offline.css'].every(pathname=>result.cached[pathname]) && result.cached.controlled && result.coldOffline.offlineModule && result.coldOffline.unlockOpen && result.coldOffline.firstSignInRequired && result.coldOffline.bodyWidth <= result.coldOffline.viewportWidth + 1;
+  // OBS-10: each file is precached once, under the URL the page requests.
+  const entries = result.cached.entries || [];
+  result.duplicateEntries = entries.filter((entry, i) => entries.indexOf(entry) !== i || entry.startsWith('/frontend/'));
+  result.passed = ['/','/js/app.js','/js/offline.js','/css/offline.css','/css/tailwind.css'].every(pathname=>result.cached[pathname]) && result.cached.controlled && !result.duplicateEntries.length && result.coldOffline.tailwindApplied && result.coldOffline.offlineModule && result.coldOffline.unlockOpen && result.coldOffline.firstSignInRequired && result.coldOffline.bodyWidth <= result.coldOffline.viewportWidth + 1;
   console.log(JSON.stringify(result, null, 2));
   await cdp.call('Page.close');
   cdp.close();

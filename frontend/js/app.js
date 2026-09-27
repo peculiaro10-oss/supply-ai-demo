@@ -23278,9 +23278,6 @@
         // => nothing was ever decoded. One reused AudioContext, unlocked on the
         // camera tap / scan-field focus; entirely best-effort — a blocked or
         // missing AudioContext must never interrupt a scan.
-        console.log("[barcode] app.js build 2026-09-04-v24 — clean scanner UI + Add Product autofill + [barcode-flow] trace");
-        console.log("[dup] app.js build 2026-09-04-v25 — smart product duplicate detection");
-        console.log("[barcode-flow] app.js build 2026-09-04-v26 — barcode lookup: catalog MISS is not final; UPCitemdb outcome surfaced");
         let _pipelineAudioCtx = null;
         function _primePipelineAudio() {
             try {
@@ -25659,10 +25656,13 @@
             const query = document.getElementById("expense-category-search").value.trim().toLowerCase();
             const list = (expenseCategoriesCache || []).filter(c => c.toLowerCase().includes(query));
             const container = document.getElementById("expense-category-list");
-            const rowCls = "text-left w-full px-3 py-2 rounded-lg hover:bg-cardHover text-textMain transition cursor-pointer";
+            // One text colour per row: two colour classes on one element leave the
+            // winner to stylesheet order (the custom row is meant to be primary).
+            const rowBase = "text-left w-full px-3 py-2 rounded-lg hover:bg-cardHover transition cursor-pointer";
+            const rowCls = `${rowBase} text-textMain`;
             let html = list.map(c => `<button type="button" class="${rowCls}" onclick="selectExpenseCategory('${escapeHtml(c).replace(/'/g, "\\'")}')">${escapeHtml(c)}</button>`).join("");
             const customLabel = query ? `Use "${escapeHtml(document.getElementById("expense-category-search").value.trim())}" as a custom category` : "Enter a custom category";
-            html += `<button type="button" class="${rowCls} border-t border-borderCol mt-1 pt-2 text-primary font-semibold" onclick="selectExpenseCategory(${query ? `'${escapeHtml(document.getElementById("expense-category-search").value.trim()).replace(/'/g, "\\'")}'` : "null"})"><i class="fa-solid fa-plus mr-1.5"></i>${customLabel}</button>`;
+            html += `<button type="button" class="${rowBase} border-t border-borderCol mt-1 pt-2 text-primary font-semibold" onclick="selectExpenseCategory(${query ? `'${escapeHtml(document.getElementById("expense-category-search").value.trim()).replace(/'/g, "\\'")}'` : "null"})"><i class="fa-solid fa-plus mr-1.5"></i>${customLabel}</button>`;
             if (!list.length && !query) container.innerHTML = `<div class="text-center py-4 text-textSec">Loading categories...</div>` + html;
             else container.innerHTML = html;
         }

@@ -15,11 +15,12 @@ supply-ai/
 │   ├── index.html            app shell — <head> + all page/modal markup
 │   ├── css/
 │   │   ├── base.css          scrollbars, POS cart, inputs, misc component CSS
-│   │   └── dashboard-fixes.css  narrow-screen dashboard/layout overrides
+│   │   ├── dashboard-fixes.css  narrow-screen dashboard/layout overrides
+│   │   └── tailwind.css      prebuilt Tailwind utilities (generated, committed)
 │   ├── js/
 │   │   ├── app.js            the entire single-page app (one classic script)
 │   │   └── heartbeat.js      presence heartbeat bootstrap
-│   ├── assets/               icons, manifest.json, vendored Tailwind/FA/qr-code
+│   ├── assets/               icons, manifest.json, vendored FA/qr-code
 │   └── sw.js                 service worker (app-shell caching)
 │
 ├── alembic/ + alembic.ini    database migrations (run from repo root)
@@ -64,7 +65,13 @@ Alembic gets it via `prepend_sys_path = . backend` in `alembic.ini`.
   comment, e.g. `<!-- SIDEBAR NAVIGATION -->`).
 - Its behavior lives in `frontend/js/app.js` (search for the handler name from
   the markup's `onclick`).
-- Styling is Tailwind utility classes in the markup; the two `css/` files only
-  hold what Tailwind can't express inline.
+- Styling is Tailwind utility classes in the markup; the other `css/` files only
+  hold what Tailwind can't express inline. The utilities come from the prebuilt
+  `css/tailwind.css` (the app no longer compiles Tailwind in the browser). After
+  adding a Tailwind class to `index.html` or any `frontend/js` file, rebuild it
+  with `node scripts/build-tailwind-css.js` (theme: `scripts/tailwind/`); the
+  `--check` flag fails if the committed file is stale. Give an element one
+  class per property (e.g. one text colour): which of two wins depends on
+  stylesheet order.
 - After changing anything in `frontend/`, regenerate the mobile copy before a
   Capacitor build: `rm -rf www && cp -r frontend www` (see MOBILE_PACKAGING.md).

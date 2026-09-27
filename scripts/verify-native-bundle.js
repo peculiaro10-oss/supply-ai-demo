@@ -69,7 +69,7 @@ function verify(native = true, target) {
     if (native && !resolved.apiBaseUrl) {
         failures.push('Build target "' + resolved.name + '" is same-origin (web only) and cannot be packaged for Android; use qa or production');
     }
-    for (const rel of ['index.html',buildTarget.EMITTED_FILE,'js/app.js','js/payments.js','js/offline.js','css/base.css','css/payments.css','css/offline.css','sw.js'])
+    for (const rel of ['index.html',buildTarget.EMITTED_FILE,'js/app.js','js/payments.js','js/offline.js','css/base.css','css/payments.css','css/offline.css','css/tailwind.css','sw.js'])
         if (!expected.files[rel]) failures.push('frontend/' + rel + ' missing');
     const dirs = ['www'];
     if (native) dirs.push('android/app/src/main/assets/public');
