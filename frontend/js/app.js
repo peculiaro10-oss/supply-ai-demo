@@ -26537,16 +26537,18 @@
         let sessionRecheckInFlight = null;
         function recheckSessionAfterUnauthorized(sentToken, mutating) {
             if (sessionRecheckInFlight) return sessionRecheckInFlight;
+            // Cleared from .finally(), which always runs after this assignment.
+            // A try/finally inside the async body ran synchronously when the
+            // check returned early (a 401 for an older token, or during
+            // sign-out), BEFORE the assignment, leaving a settled promise here
+            // for good: every later 401 was ignored and an ended session
+            // stayed on screen (final Android pass, F22 follow-up).
             sessionRecheckInFlight = (async () => {
-                try {
-                    // Already renewed (or already ended) by someone else.
-                    if (!authToken || authToken !== sentToken || signOutInProgress || businessDeletionInProgress) return;
-                    const ok = await refreshSessionOrEnd();
-                    if (ok && mutating) showToast("Your session was renewed. If that action didn't complete, please try it again.", "info");
-                } finally {
-                    sessionRecheckInFlight = null;
-                }
-            })();
+                // Already renewed (or already ended) by someone else.
+                if (!authToken || authToken !== sentToken || signOutInProgress || businessDeletionInProgress) return;
+                const ok = await refreshSessionOrEnd();
+                if (ok && mutating) showToast("Your session was renewed. If that action didn't complete, please try it again.", "info");
+            })().finally(() => { sessionRecheckInFlight = null; });
             return sessionRecheckInFlight;
         }
 
