@@ -5500,7 +5500,7 @@ def get_active_business_days(db: Session, business_id: int) -> List[BusinessDay]
         .all()
     )
 
-def _create_business_day_session(db: Session, business_id: int, opener: Optional[User], auto: bool = False, commit: bool = True, location_id: Optional[int] = None) -> BusinessDay:
+def _create_business_day_session(db: Session, business_id: int, opener: Optional[User], auto: bool = False, commit: bool = True, location_id: Optional[int] = None, opened_at: Optional[datetime] = None, audit_extra: Optional[dict] = None) -> BusinessDay:
     """Unconditionally creates and audits a brand-new Business Day
     session row. Callers MUST have already confirmed no other session is
     currently active (see get_active_business_day) — this never looks up or
@@ -5515,7 +5515,12 @@ def _create_business_day_session(db: Session, business_id: int, opener: Optional
     Business Day) vs BUSINESS_DAY_AUTO_OPENED (a sale/expense needed an owning
     day and none was active). Both are real, both are audited — but they mean
     different things when reconstructing what happened, so they must not be
-    logged under the same action code."""
+    logged under the same action code.
+
+    opened_at (naive UTC) is only passed for a session a device opened while
+    offline (see offline_access, BUSINESS-DAY-OFFLINE-001): the session keeps
+    the moment it was really opened, and its `date` is that moment's
+    location-local date, not the date it happened to synchronize."""
     # An explicit location_id (passed by start_business_day/checkout once it
     # has resolved/validated the target Location) always wins; only a caller
     # that has no location context at all falls back to the business's
@@ -5535,12 +5540,16 @@ def _create_business_day_session(db: Session, business_id: int, opener: Optional
     if resolved_location_row and resolved_location_row.timezone:
         business_for_tz = db.query(BusinessProfile).filter(BusinessProfile.id == business_id).first()
         tz = resolve_period_zoneinfo(business_for_tz, resolved_location_row)
-        today = datetime.utcnow().replace(tzinfo=timezone.utc).astimezone(tz).date().isoformat()
+        today = (opened_at or datetime.utcnow()).replace(tzinfo=timezone.utc).astimezone(tz).date().isoformat()
+    elif opened_at:
+        business_for_tz = db.query(BusinessProfile).filter(BusinessProfile.id == business_id).first()
+        tz = business_local_zoneinfo(business_for_tz) if business_for_tz else timezone.utc
+        today = opened_at.replace(tzinfo=timezone.utc).astimezone(tz).date().isoformat()
     else:
         today = business_local_today(db, business_id)
     day = BusinessDay(
         business_id=business_id, date=today, is_open=True, status="OPEN",
-        location_id=resolved_location_id,
+        location_id=resolved_location_id, opened_at=opened_at or datetime.utcnow(),
         opened_by_id=opener.id if opener else None,
         opened_by_name=opener.username if opener else None,
         opened_by_role=opener.role if opener else None,
@@ -5556,7 +5565,7 @@ def _create_business_day_session(db: Session, business_id: int, opener: Optional
         "BUSINESS_DAY_AUTO_OPENED" if auto else "BUSINESS_DAY_STARTED",
         f"Business day {today} {'auto-opened for an operational action' if auto else 'started'}.",
         business_id=business_id, business_day_id=day.id, location_id=day.location_id,
-        metadata={"date": today, "opened_by": day.opened_by_name, "role": day.opened_by_role, "auto": auto},
+        metadata={"date": today, "opened_by": day.opened_by_name, "role": day.opened_by_role, "auto": auto, **(audit_extra or {})},
     )
     if commit:
         db.commit()

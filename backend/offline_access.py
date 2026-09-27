@@ -274,6 +274,41 @@ def install(g):
             "days": days, "sales": [], "sales_history": history, "expenses": expenses,
             "cache": cache, "freshness": freshness, "history_since": since})
 
+    def open_business_day(db, user, payload, captured, ref):
+        """BUSINESS-DAY-OFFLINE-001: a Business Day opened on a device while it
+        was offline. Same permission as the online Open Business Day button
+        (enforced by the caller's rule table) and the same one-open-day-per-
+        location rule. If this location already has an open day from the SAME
+        location-local date (another device opened it, or this device's
+        snapshot was stale), the offline day is joined to it - the sales it
+        recorded belong to that session, exactly as an online sale joins the
+        open day. An open day from a different date is never joined: the
+        change is refused so the sales waiting on it stay on the device for
+        review instead of landing in an unrelated day."""
+        location = db.query(g["Location"]).filter_by(id=payload.get("location_id"), business_id=user.business_id, is_active=True).first()
+        if not location:
+            failure("LOCATION_CHANGED", "The original location is unavailable.")
+        business = db.query(g["BusinessProfile"]).filter_by(id=user.business_id).with_for_update().one()
+        opened_at = min(captured, _utcnow())
+        local_date = opened_at.replace(tzinfo=timezone.utc).astimezone(g["resolve_period_zoneinfo"](business, location)).date().isoformat()
+        active = g["get_active_business_day"](db, user.business_id, location_id=location.id)
+        auto = bool(payload.get("auto"))
+        if active:
+            if active.date != local_date:
+                failure("BUSINESS_DAY_CONFLICT", "A Business Day from a different date is already open at this location. "
+                        "The work saved offline was kept on this device and was not added to that day.", 409,
+                        {"location_id": location.id, "offline_date": local_date, "open_day_date": active.date})
+            g["add_audit"](db, user, "BUSINESS_DAY_OFFLINE_OPEN_JOINED",
+                           f"A Business Day opened offline on {local_date} was joined to the Business Day already open at this location.",
+                           business_id=user.business_id, business_day_id=active.id, location_id=location.id,
+                           metadata={"offline_opened_at": opened_at.isoformat(), "offline_ref": ref, "auto": auto})
+            day, joined = active, True
+        else:
+            day = g["_create_business_day_session"](db, user.business_id, user, auto=auto, commit=False, location_id=location.id,
+                                                    opened_at=opened_at, audit_extra={"offline": True, "offline_ref": ref})
+            joined = False
+        return {"business_day_id": day.id, "joined_existing": joined, "business_day": g["serialize_business_day"](day, db)}
+
     @app.post("/offline/replay")
     def replay(op: Replay, request: Request, user=Depends(g["get_current_user"]), db=Depends(g["get_db"])):
         if op.schema_version != 2:
@@ -293,7 +328,8 @@ def install(g):
             return existing
         rules = {"product_create": "inventory.add_product", "product_update": "inventory.edit_product",
                  "product_delete": "inventory.delete_product", "sale_checkout": "sales.create",
-                 "expense_create": "expenses.record", "supplier_create": "supplier.create"}
+                 "expense_create": "expenses.record", "supplier_create": "supplier.create",
+                 "business_day_open": "business_day.manage"}
         if op.type not in rules:
             failure("ONLINE_ONLY", "This operation requires an online workflow.", 400)
         g["require_permission"](user, rules[op.type])
@@ -366,6 +402,8 @@ def install(g):
                 result = g["sales_checkout"](g["SalesCheckoutRequest"](**payload), request, user, deferred)
             elif op.type == "expense_create":
                 result = g["create_expense"](g["ExpenseCreate"](**payload), request, user, deferred)
+            elif op.type == "business_day_open":
+                result = open_business_day(db, user, payload, captured, ref)
             else:
                 result = g["create_supplier"](g["SupplierCreate"](**payload), user, deferred)
             response = {"op_id": ref, "status": "synced", "result": jsonable_encoder(result),
