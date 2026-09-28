@@ -17001,6 +17001,7 @@
             try { if (!document.getElementById("expenses-modal")?.classList.contains("hidden")) loadExpenseHistory(false); } catch (_) {}
             try { if (!document.getElementById("profit-modal")?.classList.contains("hidden")) loadProfitData(profitActivePeriod); } catch (_) {}
             try { if (!document.getElementById("daily-sales-modal")?.classList.contains("hidden")) { loadSalesHistory(); loadSalesHistoryPeriodTotal(); } } catch (_) {}
+            try { if (!document.getElementById("alerts-modal")?.classList.contains("hidden")) renderAlerts(); } catch (_) {}
         }
 
         // The single function that changes what the user sees. Called by the
@@ -17962,7 +17963,7 @@
         function showApiError(response, data, fallback = "Something went wrong. Please try again.") {
             if (response?.status === 401) return "Your session could not be verified. Please sign in again.";
             if (response?.status === 429) return rateLimitMessage(response, data);
-            if (noteSubscriptionResponse(response, data)) return `${subscriptionBlockedMessage} ${t("subscription.dataKept")}`;
+            if (noteSubscriptionResponse(response, data)) return subscriptionBlockedText();
             if (response?.status === 403) return friendlyErrorMessage(data, "You do not have permission to perform this action.");
             if (response?.status === 404) { const detail = friendlyErrorMessage(data, ""); return detail || fallback; }
             if (response?.status === 409) return friendlyErrorMessage(data, "That action cannot be completed because the information has changed.");
@@ -18062,6 +18063,16 @@
             setSubscriptionBlocked(friendlyErrorMessage(data, t("subscription.inactiveDefault")));
             return true;
         }
+        // SUB-A5-02: the paused reason and "Your business data is kept." are two
+        // catalogued sentences. Joined into one string, the launch catalog
+        // (js/i18n-runtime.js), which matches whole text only, matched neither
+        // and Arabic showed English. Each is translated on its own, then joined.
+        function catalogText(text) {
+            try { return window.CauldraI18n ? window.CauldraI18n.translate(text) : text; } catch (_) { return text; }
+        }
+        function subscriptionBlockedText() {
+            return subscriptionBlockedMessage ? `${catalogText(subscriptionBlockedMessage)} ${catalogText(t("subscription.dataKept"))}` : '';
+        }
         function renderSubscriptionBlockedBanner() {
             let banner = document.getElementById('subscription-blocked-banner');
             if (!subscriptionBlockedMessage || !hasAuthenticatedBusinessContext()) { banner?.classList.add('hidden'); return; }
@@ -18075,14 +18086,14 @@
             }
             const isAdmin = getCurrentRole() === 'admin';
             banner.innerHTML = `<i class="fa-solid fa-circle-exclamation text-danger shrink-0"></i>`
-                + `<span class="min-w-0 flex-1 break-words">${escapeHtml(subscriptionBlockedMessage)} ${escapeHtml(t("subscription.dataKept"))}</span>`
+                + `<span class="min-w-0 flex-1 break-words"><span>${escapeHtml(subscriptionBlockedMessage)}</span> <span>${escapeHtml(t("subscription.dataKept"))}</span></span>`
                 + (isAdmin ? `<button type="button" onclick="openBillingModal()" class="shrink-0 bg-primary hover:bg-primaryHover text-white px-3 py-1.5 rounded-lg font-semibold cursor-pointer">${escapeHtml(t("subscription.choosePlan"))}</button>`
                            : `<span class="shrink-0 text-textSec">${escapeHtml(t("subscription.askAdmin"))}</span>`);
             banner.classList.remove('hidden');
         }
         function showSubscriptionBlockedNotice() {
             renderSubscriptionBlockedBanner();
-            showToast(`${subscriptionBlockedMessage} ${t("subscription.dataKept")}`, 'error');
+            showToast(subscriptionBlockedText(), 'error');
             if (getCurrentRole() === 'admin') openBillingModal();
         }
 
@@ -28600,7 +28611,7 @@
             }
             if (dashboardBrainForbiddenMessage) {
                 container.innerHTML = businessBriefEmpty('fa-lock', subscriptionBlockedMessage
-                    ? `${subscriptionBlockedMessage} ${t("subscription.dataKept")}` : dashboardBrainForbiddenMessage);
+                    ? subscriptionBlockedText() : dashboardBrainForbiddenMessage);
                 return;
             }
             const attention = getBusinessBriefAttentionItems();
@@ -31006,6 +31017,27 @@
         // an inline onclick attribute.
         let notificationCenterItems = [];
 
+        // SUB-A5-02: subscription reminders are stored as English sentences with
+        // the business-local time already written in ("28 Sep 2026, 15:33
+        // (Africa/Lagos)"). Outside English the sentence is translated from the
+        // launch catalog and that same stored wall-clock time is re-shown in
+        // the reader's date format, zone label kept — never recomputed, never
+        // shifted. Stored records are not changed; English shows them as stored.
+        const REMINDER_TIME_RE = /\b(\d{2}) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{4}), (\d{2}):(\d{2}) \(([A-Za-z0-9_\/+-]+)\)/g;
+        const REMINDER_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        function notificationMessageText(n) {
+            const text = String(n?.message || '');
+            if (currentLanguage === DEFAULT_LANGUAGE || !/^SUBSCRIPTION_REMINDER_/.test(String(n?.type || ''))) return text;
+            const translated = catalogText(text);
+            if (translated === text) return text; // not catalogued: shown exactly as stored
+            return translated.replace(REMINDER_TIME_RE, (whole, d, mon, y, h, mi, zone) => {
+                try {
+                    const wall = new Date(Date.UTC(Number(y), REMINDER_MONTHS.indexOf(mon), Number(d), Number(h), Number(mi)));
+                    return `${new Intl.DateTimeFormat(getBusinessLocale(), { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' }).format(wall)} (${zone})`;
+                } catch (_) { return whole; }
+            });
+        }
+
         async function renderAlerts() {
             const container=document.getElementById('notifications-container'); const badge=document.getElementById('notification-badge');
             const mobileBadge=document.getElementById('mobile-notification-badge');
@@ -31028,7 +31060,7 @@
                     return `<div class="p-3 rounded-xl ${sevClass} border flex items-start justify-between gap-3 text-xs cursor-pointer" onclick="openNotification(${n.id})">
                         <div>
                             <div class="font-bold text-textMain">${unreadDot}${escapeHtml(n.title)}</div>
-                            <div class="text-[11px] text-textSec mt-0.5">${escapeHtml(n.message)}</div>
+                            <div class="text-[11px] text-textSec mt-0.5 break-words">${escapeHtml(notificationMessageText(n))}</div>
                             ${n.created_at ? `<div class="text-[9px] text-textSec mt-1">${formatBusinessDateTime(n.created_at)}</div>` : ''}
                         </div>
                     </div>`;

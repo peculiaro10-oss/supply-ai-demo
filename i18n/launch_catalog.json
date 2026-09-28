@@ -12472,5 +12472,95 @@
   "Renovar o pagar requiere conexión a internet.",
   "يتطلب التجديد أو الدفع اتصالاً بالإنترنت.",
   "Renovar ou pagar requer conexão com a internet."
+ ],
+ "Subscription ending soon": [
+  "Abonnement bientôt terminé",
+  "La suscripción termina pronto",
+  "الاشتراك ينتهي قريبًا",
+  "Assinatura terminando em breve"
+ ],
+ "Subscription still paused": [
+  "Abonnement toujours suspendu",
+  "Suscripción aún en pausa",
+  "الاشتراك لا يزال متوقفًا مؤقتًا",
+  "Assinatura ainda pausada"
+ ],
+ "Automatic renewal attempts have ended": [
+  "Les tentatives de renouvellement automatique sont terminées",
+  "Terminaron los intentos de renovación automática",
+  "انتهت محاولات التجديد التلقائي",
+  "As tentativas de renovação automática terminaram"
+ ],
+ "Your Cauldra trial ends on {when}. Your saved card will be charged then. If the payment can't be confirmed, Cauldra pauses until it is. Your business data is always kept.": [
+  "Votre essai Cauldra se termine le {when}. Votre carte enregistrée sera alors débitée. Si le paiement ne peut pas être confirmé, Cauldra est suspendu jusqu’à confirmation. Les données de votre entreprise sont toujours conservées.",
+  "Tu prueba de Cauldra termina el {when}. Entonces se cobrará tu tarjeta guardada. Si no se puede confirmar el pago, Cauldra se pausa hasta que se confirme. Los datos de tu empresa siempre se conservan.",
+  "تنتهي فترتك التجريبية في Cauldra في {when}. سيتم الخصم من بطاقتك المحفوظة حينها. إذا تعذّر تأكيد الدفع، يتوقف Cauldra مؤقتًا حتى تأكيده. تُحفظ بيانات نشاطك التجاري دائمًا.",
+  "Seu teste do Cauldra termina em {when}. Seu cartão salvo será cobrado nesse momento. Se o pagamento não puder ser confirmado, o Cauldra fica pausado até a confirmação. Os dados da sua empresa são sempre mantidos."
+ ],
+ "Your Cauldra trial ends on {when}. Renew or choose a plan in Subscription & Billing to keep using Cauldra without a pause. Your business data is always kept.": [
+  "Votre essai Cauldra se termine le {when}. Renouvelez ou choisissez un forfait dans Abonnement et facturation pour continuer à utiliser Cauldra sans interruption. Les données de votre entreprise sont toujours conservées.",
+  "Tu prueba de Cauldra termina el {when}. Renueva o elige un plan en Suscripción y facturación para seguir usando Cauldra sin pausa. Los datos de tu empresa siempre se conservan.",
+  "تنتهي فترتك التجريبية في Cauldra في {when}. جدّد أو اختر خطة من الاشتراك والفوترة لمواصلة استخدام Cauldra دون توقف. تُحفظ بيانات نشاطك التجاري دائمًا.",
+  "Seu teste do Cauldra termina em {when}. Renove ou escolha um plano em Assinatura e cobrança para continuar usando o Cauldra sem pausa. Os dados da sua empresa são sempre mantidos."
+ ],
+ "Your Cauldra subscription ends on {when}. Your saved card will be charged then. If the payment can't be confirmed, Cauldra pauses until it is. Your business data is always kept.": [
+  "Votre abonnement Cauldra se termine le {when}. Votre carte enregistrée sera alors débitée. Si le paiement ne peut pas être confirmé, Cauldra est suspendu jusqu’à confirmation. Les données de votre entreprise sont toujours conservées.",
+  "Tu suscripción de Cauldra termina el {when}. Entonces se cobrará tu tarjeta guardada. Si no se puede confirmar el pago, Cauldra se pausa hasta que se confirme. Los datos de tu empresa siempre se conservan.",
+  "ينتهي اشتراكك في Cauldra في {when}. سيتم الخصم من بطاقتك المحفوظة حينها. إذا تعذّر تأكيد الدفع، يتوقف Cauldra مؤقتًا حتى تأكيده. تُحفظ بيانات نشاطك التجاري دائمًا.",
+  "Sua assinatura do Cauldra termina em {when}. Seu cartão salvo será cobrado nesse momento. Se o pagamento não puder ser confirmado, o Cauldra fica pausado até a confirmação. Os dados da sua empresa são sempre mantidos."
+ ],
+ "Your Cauldra subscription ends on {when}. Renew or choose a plan in Subscription & Billing to keep using Cauldra without a pause. Your business data is always kept.": [
+  "Votre abonnement Cauldra se termine le {when}. Renouvelez ou choisissez un forfait dans Abonnement et facturation pour continuer à utiliser Cauldra sans interruption. Les données de votre entreprise sont toujours conservées.",
+  "Tu suscripción de Cauldra termina el {when}. Renueva o elige un plan en Suscripción y facturación para seguir usando Cauldra sin pausa. Los datos de tu empresa siempre se conservan.",
+  "ينتهي اشتراكك في Cauldra في {when}. جدّد أو اختر خطة من الاشتراك والفوترة لمواصلة استخدام Cauldra دون توقف. تُحفظ بيانات نشاطك التجاري دائمًا.",
+  "Sua assinatura do Cauldra termina em {when}. Renove ou escolha um plano em Assinatura e cobrança para continuar usando o Cauldra sem pausa. Os dados da sua empresa são sempre mantidos."
+ ],
+ "Your Cauldra trial ended on {when}. Cauldra is charging your saved card for your plan and unlocks as soon as the payment is confirmed. Your business data is safe.": [
+  "Votre essai Cauldra s’est terminé le {when}. Cauldra débite votre carte enregistrée pour votre forfait et se débloque dès que le paiement est confirmé. Les données de votre entreprise sont en sécurité.",
+  "Tu prueba de Cauldra terminó el {when}. Cauldra está cobrando tu tarjeta guardada por tu plan y se desbloquea en cuanto se confirme el pago. Los datos de tu empresa están seguros.",
+  "انتهت فترتك التجريبية في Cauldra في {when}. يقوم Cauldra بالخصم من بطاقتك المحفوظة مقابل خطتك، ويُفتح فور تأكيد الدفع. بيانات نشاطك التجاري آمنة.",
+  "Seu teste do Cauldra terminou em {when}. O Cauldra está cobrando seu cartão salvo pelo seu plano e é desbloqueado assim que o pagamento for confirmado. Os dados da sua empresa estão seguros."
+ ],
+ "Your Cauldra trial ended on {when}. Your business data is safe. Choose a plan in Subscription & Billing to continue.": [
+  "Votre essai Cauldra s’est terminé le {when}. Les données de votre entreprise sont en sécurité. Choisissez un forfait dans Abonnement et facturation pour continuer.",
+  "Tu prueba de Cauldra terminó el {when}. Los datos de tu empresa están seguros. Elige un plan en Suscripción y facturación para continuar.",
+  "انتهت فترتك التجريبية في Cauldra في {when}. بيانات نشاطك التجاري آمنة. اختر خطة من الاشتراك والفوترة للمتابعة.",
+  "Seu teste do Cauldra terminou em {when}. Os dados da sua empresa estão seguros. Escolha um plano em Assinatura e cobrança para continuar."
+ ],
+ "Your Cauldra subscription is paused because the renewal payment was not confirmed by {when}. Your business data is safe. Cauldra will retry your saved card automatically until {end}; an Admin can also renew now from Subscription & Billing.": [
+  "Votre abonnement Cauldra est suspendu car le paiement du renouvellement n’a pas été confirmé avant le {when}. Les données de votre entreprise sont en sécurité. Cauldra réessaiera automatiquement votre carte enregistrée jusqu’au {end} ; un administrateur peut aussi renouveler dès maintenant depuis Abonnement et facturation.",
+  "Tu suscripción de Cauldra está en pausa porque el pago de la renovación no se confirmó antes del {when}. Los datos de tu empresa están seguros. Cauldra volverá a intentar con tu tarjeta guardada automáticamente hasta el {end}; un administrador también puede renovar ahora desde Suscripción y facturación.",
+  "اشتراكك في Cauldra متوقف مؤقتًا لأن دفعة التجديد لم تُؤكَّد بحلول {when}. بيانات نشاطك التجاري آمنة. سيعيد Cauldra محاولة الخصم من بطاقتك المحفوظة تلقائيًا حتى {end}، ويمكن للمسؤول أيضًا التجديد الآن من الاشتراك والفوترة.",
+  "Sua assinatura do Cauldra está pausada porque o pagamento da renovação não foi confirmado até {when}. Os dados da sua empresa estão seguros. O Cauldra tentará novamente seu cartão salvo automaticamente até {end}; um administrador também pode renovar agora em Assinatura e cobrança."
+ ],
+ "Your Cauldra subscription is paused because the renewal payment was not confirmed by {when}. Your business data is safe. An Admin can renew from Subscription & Billing at any time.": [
+  "Votre abonnement Cauldra est suspendu car le paiement du renouvellement n’a pas été confirmé avant le {when}. Les données de votre entreprise sont en sécurité. Un administrateur peut renouveler à tout moment depuis Abonnement et facturation.",
+  "Tu suscripción de Cauldra está en pausa porque el pago de la renovación no se confirmó antes del {when}. Los datos de tu empresa están seguros. Un administrador puede renovar en cualquier momento desde Suscripción y facturación.",
+  "اشتراكك في Cauldra متوقف مؤقتًا لأن دفعة التجديد لم تُؤكَّد بحلول {when}. بيانات نشاطك التجاري آمنة. يمكن للمسؤول التجديد في أي وقت من الاشتراك والفوترة.",
+  "Sua assinatura do Cauldra está pausada porque o pagamento da renovação não foi confirmado até {when}. Os dados da sua empresa estão seguros. Um administrador pode renovar a qualquer momento em Assinatura e cobrança."
+ ],
+ "Your Cauldra subscription is still paused. Your business data is safe. An Admin can renew from Subscription & Billing. Automatic attempts continue until {end}.": [
+  "Votre abonnement Cauldra est toujours suspendu. Les données de votre entreprise sont en sécurité. Un administrateur peut renouveler depuis Abonnement et facturation. Les tentatives automatiques continuent jusqu’au {end}.",
+  "Tu suscripción de Cauldra sigue en pausa. Los datos de tu empresa están seguros. Un administrador puede renovar desde Suscripción y facturación. Los intentos automáticos continúan hasta el {end}.",
+  "لا يزال اشتراكك في Cauldra متوقفًا مؤقتًا. بيانات نشاطك التجاري آمنة. يمكن للمسؤول التجديد من الاشتراك والفوترة. تستمر المحاولات التلقائية حتى {end}.",
+  "Sua assinatura do Cauldra continua pausada. Os dados da sua empresa estão seguros. Um administrador pode renovar em Assinatura e cobrança. As tentativas automáticas continuam até {end}."
+ ],
+ "Your Cauldra subscription is still paused. Your business data is safe. An Admin can renew from Subscription & Billing.": [
+  "Votre abonnement Cauldra est toujours suspendu. Les données de votre entreprise sont en sécurité. Un administrateur peut renouveler depuis Abonnement et facturation.",
+  "Tu suscripción de Cauldra sigue en pausa. Los datos de tu empresa están seguros. Un administrador puede renovar desde Suscripción y facturación.",
+  "لا يزال اشتراكك في Cauldra متوقفًا مؤقتًا. بيانات نشاطك التجاري آمنة. يمكن للمسؤول التجديد من الاشتراك والفوترة.",
+  "Sua assinatura do Cauldra continua pausada. Os dados da sua empresa estão seguros. Um administrador pode renovar em Assinatura e cobrança."
+ ],
+ "Cauldra has stopped trying your saved card automatically. Your business data is safe, and an Admin can renew from Subscription & Billing at any time.": [
+  "Cauldra a cessé de débiter automatiquement votre carte enregistrée. Les données de votre entreprise sont en sécurité, et un administrateur peut renouveler à tout moment depuis Abonnement et facturation.",
+  "Cauldra dejó de intentar cobrar tu tarjeta guardada automáticamente. Los datos de tu empresa están seguros y un administrador puede renovar en cualquier momento desde Suscripción y facturación.",
+  "توقف Cauldra عن محاولة الخصم من بطاقتك المحفوظة تلقائيًا. بيانات نشاطك التجاري آمنة، ويمكن للمسؤول التجديد في أي وقت من الاشتراك والفوترة.",
+  "O Cauldra parou de tentar cobrar seu cartão salvo automaticamente. Os dados da sua empresa estão seguros, e um administrador pode renovar a qualquer momento em Assinatura e cobrança."
+ ],
+ "Your Cauldra subscription is still paused. Your business data is safe, and an Admin can renew from Subscription & Billing at any time.": [
+  "Votre abonnement Cauldra est toujours suspendu. Les données de votre entreprise sont en sécurité, et un administrateur peut renouveler à tout moment depuis Abonnement et facturation.",
+  "Tu suscripción de Cauldra sigue en pausa. Los datos de tu empresa están seguros y un administrador puede renovar en cualquier momento desde Suscripción y facturación.",
+  "لا يزال اشتراكك في Cauldra متوقفًا مؤقتًا. بيانات نشاطك التجاري آمنة، ويمكن للمسؤول التجديد في أي وقت من الاشتراك والفوترة.",
+  "Sua assinatura do Cauldra continua pausada. Os dados da sua empresa estão seguros, e um administrador pode renovar a qualquer momento em Assinatura e cobrança."
  ]
 }

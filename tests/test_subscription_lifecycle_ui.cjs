@@ -49,7 +49,7 @@ check('new wording is translated for every launch language', () => {
     }
 });
 check('service-worker cache bumped so installed web clients take the new Billing screen', () => {
-    assert.match(sw, /const SHELL_CACHE = "cauldra-shell-v19-billing-saved-status";/);
+    assert.match(sw, /const SHELL_CACHE = "cauldra-shell-v20-paused-i18n";/);
 });
 const offline = fs.readFileSync(path.join(root, 'frontend/js/offline.js'), 'utf8');
 const payments = fs.readFileSync(path.join(root, 'frontend/js/payments.js'), 'utf8');
