@@ -11,6 +11,7 @@ import json
 import base64
 import secrets
 import hashlib
+import html as _html
 import hmac
 import random
 import string
@@ -1961,6 +1962,12 @@ class BusinessSubscription(Base):
     pending_downgrade_requested_at = Column(SQLDateTime, nullable=True)
     pending_downgrade_requested_by_user_id = Column(Integer, nullable=True)
     pending_downgrade_paystack_subscription_code = Column(String, nullable=True)
+    # SUB-LIFECYCLE-001 (migration 0044): the email Paystack bound to the saved
+    # reusable authorization (Charge Authorization needs it), and the last pause
+    # interval (offline work captured inside it is refused, not applied).
+    paystack_authorization_email = Column(String, nullable=True)
+    paused_from = Column(SQLDateTime, nullable=True)
+    resumed_at = Column(SQLDateTime, nullable=True)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(SQLDateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -1992,6 +1999,42 @@ class PaymentRecord(Base):
     refunded_at = Column(SQLDateTime, nullable=True)
     paid_at = Column(SQLDateTime, nullable=True)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
+    # SUB-LIFECYCLE-001 (migration 0044): the paid-through time this payment
+    # renews. One successful payment per business and period; one automatic
+    # attempt per 12-hour slot (attempt_source 'auto', slot 0..5).
+    renewal_period_end = Column(SQLDateTime, nullable=True)
+    attempt_source = Column(String, nullable=True)
+    renewal_attempt_slot = Column(Integer, nullable=True)
+    __table_args__ = (
+        Index("uq_payment_records_one_success_per_renewal", "business_id", "renewal_period_end", unique=True,
+              postgresql_where=sql_text("status = 'success' AND renewal_period_end IS NOT NULL"),
+              sqlite_where=sql_text("status = 'success' AND renewal_period_end IS NOT NULL")),
+        Index("uq_payment_records_one_auto_attempt_per_slot", "business_id", "renewal_period_end", "renewal_attempt_slot", unique=True,
+              postgresql_where=sql_text("attempt_source = 'auto'"), sqlite_where=sql_text("attempt_source = 'auto'")),
+    )
+
+class SubscriptionReminderDelivery(Base):
+    """SUB-LIFECYCLE-001 (migration 0044): the durable "sent" log for
+    subscription reminders. One row per business, period (exact paid-through
+    or trial-end time), stage, channel ('in_app' | 'email') and recipient (user
+    id for in-app, lower-cased address for email). The unique key is what stops
+    a sweep that runs twice from notifying or emailing twice."""
+    __tablename__ = "subscription_reminder_deliveries"
+    id = Column(Integer, primary_key=True)
+    business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False, index=True)
+    period_anchor = Column(SQLDateTime, nullable=False)
+    stage = Column(String, nullable=False)
+    channel = Column(String, nullable=False)
+    recipient = Column(String, nullable=False)
+    status = Column(String, nullable=False)  # sent | pending | failed | abandoned
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error_category = Column(String, nullable=True)
+    sent_at = Column(SQLDateTime, nullable=True)
+    created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(SQLDateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    __table_args__ = (UniqueConstraint("business_id", "period_anchor", "stage", "channel", "recipient",
+                                       name="uq_subscription_reminder_delivery"),
+                      Index("ix_subscription_reminder_deliveries_status", "status"))
 
 class PaystackWebhookEvent(Base):
     __tablename__ = "paystack_webhook_events"
@@ -2545,15 +2588,11 @@ def refresh_subscription_status(db: Session, subscription: Optional[BusinessSubs
         # scheduled first debit hasn't landed/succeeded yet, or the business never
         # completed checkout). Do not silently keep granting paid access.
         subscription.status = "expired"; subscription.payment_status = "unpaid"
-        # This branch only ever executes once per transition (the condition
-        # stops matching the instant status changes) — a naturally one-shot
-        # hook, the same pattern every other state-transition notification
-        # in this file uses.
-        create_notification(
-            db, business_id=subscription.business_id, category="subscription", severity="critical", type="SUBSCRIPTION_EXPIRED",
-            title="Subscription expired", message="Your Cauldra trial has ended. Subscribe to a plan to continue using Cauldra.",
-            deep_link="subscription", dedup_key=f"sub_expired:{subscription.business_id}",
-        )
+        add_audit(db, None, "SUBSCRIPTION_PAUSED", f"Trial ended at {to_utc_iso(subscription.trial_end_at)}; access paused, data kept.",
+                  business_id=subscription.business_id)
+        # SUB-LIFECYCLE-001: announced through the durable reminder log (in-app
+        # now, email by the sweep) — exactly once per period and channel.
+        announce_subscription_lifecycle(db, subscription, now)
         db.commit()
     elif (subscription.status == "active" and subscription.cancel_at_period_end
           and subscription.current_period_end and now >= subscription.current_period_end):
@@ -2582,31 +2621,33 @@ def refresh_subscription_status(db: Session, subscription: Optional[BusinessSubs
         add_audit(db, None, "SUBSCRIPTION_PAUSED",
                   f"Renewal not confirmed by the paid-through time ({to_utc_iso(subscription.current_period_end)}); access paused, data kept.",
                   business_id=subscription.business_id)
-        # Same dedup_key the explicit Paystack invoice.payment_failed webhook
-        # branch uses — whichever of the two detects the failure first wins;
-        # the other is automatically a no-op via create_notification's own
-        # dedup check, so this can never double-push for one failure episode.
-        create_notification(
-            db, business_id=subscription.business_id, category="subscription", severity="critical", type="SUBSCRIPTION_PAYMENT_FAILED",
-            title="Subscription paused",
-            message="Your Cauldra subscription is paused because the renewal payment has not been confirmed. Your business data is safe. Renew from Subscription & Billing to continue.",
-            deep_link="subscription", dedup_key=f"payment_failed:{subscription.business_id}",
-        )
+        # Announced through the durable reminder log ("paused" stage).
+        announce_subscription_lifecycle(db, subscription, now)
         db.commit()
     window_end = renewal_retry_window_end(subscription) if subscription.status == "past_due" else None
     if window_end and now >= window_end:
         subscription.status = "expired"
         add_audit(db, None, "SUBSCRIPTION_RENEWAL_WINDOW_ENDED",
-                  "The past-due window after the paid-through time ended; access stays paused and data kept.",
+                  "The 3-day automatic renewal window after the paid-through time ended; access stays paused, data kept, Pay Now still available.",
                   business_id=subscription.business_id)
-        create_notification(
-            db, business_id=subscription.business_id, category="subscription", severity="critical", type="SUBSCRIPTION_EXPIRED",
-            title="Subscription still paused",
-            message="Your Cauldra subscription is still paused. Your business data is safe. Renew from Subscription & Billing at any time to continue.",
-            deep_link="subscription", dedup_key=f"sub_expired:{subscription.business_id}",
-        )
+        announce_subscription_lifecycle(db, subscription, now)
         db.commit()
     return subscription
+
+def announce_subscription_lifecycle(db: Session, subscription: "BusinessSubscription", now: datetime) -> None:
+    """Record the reminder due now (in-app at once; emails are sent by the
+    background sweep). Never lets a reminder problem block the request."""
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == subscription.business_id).first()
+    if business is None:
+        return
+    try:
+        if db.get_bind().dialect.name == "postgresql":
+            with db.begin_nested():
+                record_subscription_reminders(db, business, subscription, now)
+        else:
+            record_subscription_reminders(db, business, subscription, now)
+    except Exception:
+        pass
 
 def require_subscription_access(db: Session, user: User):
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
@@ -2930,6 +2971,11 @@ def usage_summary(db: Session, business: BusinessProfile) -> dict:
             "paid_through_at": to_utc_iso(sub.current_period_end) if sub.paid_at else None,
             "renewal_window_ends_at": to_utc_iso(renewal_retry_window_end(sub)) if effective_status == "past_due" else None,
             "server_time": to_utc_iso(datetime.utcnow()),
+            # A renewal charge or checkout that Paystack has not yet confirmed:
+            # Billing shows "Renewal being confirmed", never "failed".
+            "renewal_in_progress": bool(open_renewal_attempts(db, business.id)),
+            "auto_renewal": ({"next_attempt_at": to_utc_iso(schedule["next_attempt_at"]), "ends_at": to_utc_iso(schedule["ends_at"]),
+                              "exhausted": schedule["exhausted"]} if (schedule := (auto_renewal_schedule(sub, datetime.utcnow()) if auto_renewal_possible(sub) else None)) else None),
             # A scheduled downgrade never changes `plan`/`billing_interval` above —
             # those still reflect the currently-active, already-paid plan. This is
             # purely informational for the UI; the server alone decides if/when it
@@ -6090,53 +6136,26 @@ def check_ai_credit_notifications(db: Session, business: "BusinessProfile") -> N
 # fires" rule as AI credits: a subscription that somehow jumps straight from
 # 10 days to 2 days remaining (server downtime, clock skew) only ever gets
 # the 1-day warning, not a backlog of 7-day/3-day ones for a moment already past.
-# SUB-LIFECYCLE-001: reminder stages before the exact expiry timestamp, most
-# urgent first: (stage key, time before expiry, wording). A stage fires once the
-# remaining time is at or below it; only the most urgent due stage fires, so a
-# missed earlier stage is never sent late on top of a later one.
-SUBSCRIPTION_COUNTDOWN_STAGES = (
-    ("1h", timedelta(hours=1), "in about 1 hour"),
-    ("6h", timedelta(hours=6), "in about 6 hours"),
-    ("24h", timedelta(hours=24), "within 24 hours"),
-    ("3", timedelta(days=3), "in 3 days"),
-    ("7", timedelta(days=7), "in 7 days"),
-)
-
-def check_subscription_countdown_notifications(db: Session, business: "BusinessProfile", now: Optional[datetime] = None) -> None:
-    """Pre-expiry reminders at 7 days, 3 days, 24 hours, 6 hours and 1 hour
-    before the exact trial end / paid-through timestamp (SUB-LIFECYCLE-001;
-    previously 7/3/1 calendar days). The pause itself is announced where
-    refresh_subscription_status() moves the status, which the background sweep
-    now also runs, so a business that nobody opens is still told on time.
-
-    The dedup key carries the business, the exact expiry timestamp and the
-    stage, so a sweep that runs twice never sends a stage twice for the same
-    period, and a renewed period is a fresh key space."""
-    sub = get_or_create_subscription(db, business, commit=False)
+def subscription_lifecycle_pass(db: Session, business: "BusinessProfile", now: Optional[datetime] = None) -> None:
+    """SUB-LIFECYCLE-001 background pass for one business: apply the pause at
+    its exact time, run the renewal engine, record due reminders, send queued
+    reminder emails. Each step commits on its own so one failure (a provider
+    outage, say) never undoes another."""
     now = now or datetime.utcnow()
-    if subscription_access_state(sub, now)[0] not in ("trialing", "active"):
-        return
-    period_end = sub.trial_end_at if sub.status == "trialing" else sub.current_period_end
-    if not period_end or now >= period_end:
-        return  # refresh_subscription_status() owns the transition past this point
-    remaining = period_end - now
-    period_anchor = period_end.replace(microsecond=0).isoformat()
-    # Only claim an automatic renewal when Paystack holds a recurring subscription.
-    renewing = sub.status == "active" and not sub.cancel_at_period_end and bool(sub.paystack_subscription_code)
-    for stage, before, when in SUBSCRIPTION_COUNTDOWN_STAGES:
-        if remaining <= before:
-            action = ("It renews automatically if the payment succeeds; if it cannot be confirmed, Cauldra pauses at that time."
-                      if renewing else "Renew or choose a plan in Subscription & Billing to keep using Cauldra without a pause.")
-            create_notification(
-                db, business_id=business.id, category="subscription", severity=("important" if stage == "7" else "critical"),
-                type=f"SUBSCRIPTION_EXPIRY_{stage.upper()}" if not stage.isdigit() else f"SUBSCRIPTION_EXPIRY_{stage}D",
-                title="Subscription ending soon",
-                message=f"Your Cauldra {'trial' if sub.status == 'trialing' else 'subscription'} ends {when}. {action} Your business data is always kept.",
-                deep_link="subscription", dedup_key=f"sub_expiry_warning:{business.id}:{period_anchor}:{stage}", stage=stage,
-            )
-            break
+    steps = (
+        lambda: refresh_subscription_status(db, get_or_create_subscription(db, business, commit=False)),
+        lambda: run_subscription_renewal(db, business, now) if PAYSTACK_SECRET_KEY else None,
+        lambda: record_subscription_reminders(db, business, get_or_create_subscription(db, business, commit=False), now),
+        lambda: send_pending_subscription_reminder_emails(db, business, now),
+    )
+    for step in steps:
+        try:
+            step()
+            db.commit()
+        except Exception:
+            db.rollback()
 
-NOTIFICATION_SWEEP_INTERVAL_SECONDS = int(os.getenv("SUPPLY_AI_NOTIFICATION_SWEEP_SECONDS", str(30 * 60)))
+NOTIFICATION_SWEEP_INTERVAL_SECONDS = int(os.getenv("SUPPLY_AI_NOTIFICATION_SWEEP_SECONDS", str(5 * 60)))
 
 async def notification_sweep_loop():
     """Periodic background sweep for the one notification category that is
@@ -6156,15 +6175,7 @@ async def notification_sweep_loop():
             db = SessionLocal()
             try:
                 for business in db.query(BusinessProfile).all():
-                    try:
-                        # SUB-LIFECYCLE-001: apply the pause at the exact time
-                        # (and its notice) even if nobody from the business
-                        # signs in, then send any due pre-expiry reminder.
-                        refresh_subscription_status(db, get_or_create_subscription(db, business, commit=False))
-                        check_subscription_countdown_notifications(db, business)
-                        db.commit()
-                    except Exception:
-                        db.rollback()
+                    subscription_lifecycle_pass(db, business)
             finally:
                 db.close()
             # OPS-ACCURACY-001: System Health reads when the sweep last completed.
@@ -6944,6 +6955,7 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
             current_period_start=now, current_period_end=trial_end, next_billing_at=trial_end,
             trial_consent_at=now, paystack_customer_code=auth_row.paystack_customer_code,
             paystack_authorization_code=auth_row.paystack_authorization_code,
+            paystack_authorization_email=str(auth_row.email or "").strip().casefold() or None,
             card_last4=auth_row.card_last4, card_type=auth_row.card_type,
             card_exp_month=auth_row.card_exp_month, card_exp_year=auth_row.card_exp_year,
         )
@@ -6966,19 +6978,15 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
         db.rollback()
         raise
 
-    # Schedule the automatic post-trial charge with Paystack itself (same
-    # pattern as /subscription/trial/confirm) — Cauldra does not invent its own
-    # card-charging mechanism for the trial-to-paid conversion.
-    plan_code = PLAN_CONFIG[plan].get("paystack_annual_plan_code" if billing_interval == "annual" else "paystack_monthly_plan_code")
+    # SUB-LIFECYCLE-001: the trial converts through Cauldra's renewal engine,
+    # which charges the saved authorization at trial end (a Paystack
+    # subscription is never retried and would be a second charging engine), so
+    # no Paystack subscription is created here.
     try:
         customer_code = auth_row.paystack_customer_code or paystack_get_or_create_customer(str(data.owner_email))
-        if plan_code and auth_row.paystack_authorization_code:
-            created = paystack_create_subscription(customer_code, plan_code, auth_row.paystack_authorization_code, start_date=trial_end)
-            new_sub.paystack_subscription_code = created.get("subscription_code")
-        else:
-            add_audit(db, admin, "TRIAL_STARTED_WITHOUT_PAYSTACK_PLAN_CODE", f"Trial started for {PLAN_CONFIG[plan]['label']} ({billing_interval}) but no PAYSTACK_*_PLAN_CODE is configured for this plan/interval, so automatic conversion cannot be scheduled with Paystack yet. The trial will still expire correctly and require manual checkout to convert.", business_id=new_biz.id)
         new_sub.paystack_customer_code = customer_code
-        new_sub.paystack_plan_code = plan_code or None
+        new_sub.paystack_subscription_code = None
+        new_sub.paystack_plan_code = None
         db.commit()
     except Exception:
         db.rollback()
@@ -13828,22 +13836,40 @@ def sync_condition_driven_notifications(db: Session, business_id: int) -> None:
     check_expiry_notifications(db, business_id)
     db.commit()
 
+def get_notification_reader(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)) -> User:
+    """SUB-LIFECYCLE-001: the notification centre is readable while the
+    subscription is paused (read and acknowledge only), so subscription and
+    security notices reach the user. It exposes no business operation; every
+    operational route and deep link stays behind get_current_user's 402."""
+    if user.must_change_password:
+        raise HTTPException(status_code=403, detail="You must change your temporary password before using the application.")
+    return user
+
+def notification_reader_is_paused(db: Session, user: User) -> bool:
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    sub = refresh_subscription_status(db, get_or_create_subscription(db, business)) if business else None
+    return bool(sub is not None and subscription_access_state(sub)[1])
+
 @app.get("/notifications")
-def list_notifications(unread_only: bool = Query(False), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    sync_condition_driven_notifications(db, user.business_id)
+def list_notifications(unread_only: bool = Query(False), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), user: User = Depends(get_notification_reader), db: Session = Depends(get_db)):
+    paused = notification_reader_is_paused(db, user)
+    if not paused:
+        # Inventory/expiry conditions are recomputed only while the workspace
+        # is usable; a paused business only reads what already exists.
+        sync_condition_driven_notifications(db, user.business_id)
     q = db.query(Notification).filter(Notification.recipient_user_id == user.id)
     if unread_only:
         q = q.filter(Notification.is_read == False)
     rows = q.order_by(Notification.created_at.desc()).offset(offset).limit(limit).all()
     unread_count = db.query(Notification).filter(Notification.recipient_user_id == user.id, Notification.is_read == False).count()
-    return {"notifications": [serialize_notification(n) for n in rows], "unread_count": unread_count}
+    return {"notifications": [serialize_notification(n) for n in rows], "unread_count": unread_count, "read_only": paused}
 
 @app.get("/notifications/unread-count")
-def notifications_unread_count(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def notifications_unread_count(user: User = Depends(get_notification_reader), db: Session = Depends(get_db)):
     return {"unread_count": db.query(Notification).filter(Notification.recipient_user_id == user.id, Notification.is_read == False).count()}
 
 @app.post("/notifications/{notification_id}/read")
-def mark_notification_read(notification_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def mark_notification_read(notification_id: int, user: User = Depends(get_notification_reader), db: Session = Depends(get_db)):
     n = db.query(Notification).filter(Notification.id == notification_id, Notification.recipient_user_id == user.id).first()
     if not n: raise HTTPException(status_code=404, detail="Notification is unavailable.")
     if not n.is_read:
@@ -13851,7 +13877,7 @@ def mark_notification_read(notification_id: int, user: User = Depends(get_curren
     return {"message": "Notification marked as read."}
 
 @app.post("/notifications/mark-all-read")
-def mark_all_notifications_read(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def mark_all_notifications_read(user: User = Depends(get_notification_reader), db: Session = Depends(get_db)):
     now = datetime.utcnow()
     updated = db.query(Notification).filter(Notification.recipient_user_id == user.id, Notification.is_read == False) \
         .update({Notification.is_read: True, Notification.read_at: now}, synchronize_session=False)
@@ -14599,24 +14625,13 @@ def schedule_downgrade(data: DowngradeRequest, request: Request, user: User = De
     # never blocks the customer's recorded intent — it only means the switch
     # will need manual verification at the boundary, same tolerance already
     # used elsewhere in this file when a plan has no configured Paystack code.
-    new_plan_code = PLAN_CONFIG[plan].get("paystack_annual_plan_code" if interval == "annual" else "paystack_monthly_plan_code")
+    # SUB-LIFECYCLE-001: Cauldra's renewal engine bills the lower plan at the
+    # boundary (renewal_plan_for). Any legacy Paystack subscription is disabled
+    # so it cannot also charge the old plan there; if that cannot be confirmed
+    # now, the engine disables it before it charges.
     pending_paystack_code = None
-    try:
-        if sub.paystack_subscription_code:
-            try:
-                fetched = paystack_fetch_subscription(sub.paystack_subscription_code)
-                email_token = fetched.get("email_token")
-                if email_token:
-                    paystack_disable_subscription(sub.paystack_subscription_code, email_token)
-            except Exception:
-                add_audit(db, user, "SUBSCRIPTION_DOWNGRADE_OLD_PAYSTACK_DISABLE_FAILED", "Downgrade scheduled, but disabling the current recurring Paystack subscription failed. Verify manually to ensure it does not also charge at the boundary.", business_id=business.id)
-        if new_plan_code and sub.paystack_authorization_code and sub.paystack_customer_code:
-            created = paystack_create_subscription(sub.paystack_customer_code, new_plan_code, sub.paystack_authorization_code, start_date=effective_at)
-            pending_paystack_code = created.get("subscription_code")
-        else:
-            add_audit(db, user, "SUBSCRIPTION_DOWNGRADE_WITHOUT_PAYSTACK_PLAN_CODE", f"Downgrade to {PLAN_CONFIG[plan]['label']} ({interval}) scheduled, but no PAYSTACK_*_PLAN_CODE is configured for it, so automatic conversion cannot be scheduled with Paystack yet. The switch will need manual verification at the boundary.", business_id=business.id)
-    except Exception:
-        add_audit(db, user, "SUBSCRIPTION_DOWNGRADE_PAYSTACK_SCHEDULE_FAILED", "Downgrade scheduled locally, but arranging the new recurring Paystack subscription failed. Automatic conversion at the boundary may not occur; verify manually.", business_id=business.id)
+    if sub.paystack_subscription_code and not retire_provider_subscription(db, sub, reason="downgrade scheduled"):
+        add_audit(db, user, "SUBSCRIPTION_DOWNGRADE_OLD_PAYSTACK_DISABLE_FAILED", "Downgrade scheduled; the old Paystack recurring subscription could not be disabled yet. Cauldra disables it before the renewal is charged.", business_id=business.id)
 
     sub.pending_downgrade_plan = plan
     sub.pending_downgrade_billing_interval = interval
@@ -14653,22 +14668,12 @@ def cancel_pending_downgrade(request: Request, user: User = Depends(get_current_
     # subscription and restore normal auto-renewal for the CURRENT plan at the
     # same preserved boundary — no refund, no new billing period, just a
     # restoration of the subscription state to what it was before scheduling.
-    try:
-        if sub.pending_downgrade_paystack_subscription_code:
-            try:
-                fetched = paystack_fetch_subscription(sub.pending_downgrade_paystack_subscription_code)
-                email_token = fetched.get("email_token")
-                if email_token:
-                    paystack_disable_subscription(sub.pending_downgrade_paystack_subscription_code, email_token)
-            except Exception:
-                add_audit(db, user, "SUBSCRIPTION_DOWNGRADE_CANCEL_PAYSTACK_DISABLE_FAILED", "Scheduled downgrade cancelled locally, but disabling its pre-arranged Paystack subscription failed. Verify manually to ensure it does not also charge at the boundary.", business_id=business.id)
-        current_plan_code = PLAN_CONFIG[current_plan_id].get("paystack_annual_plan_code" if current_interval == "annual" else "paystack_monthly_plan_code")
-        if current_plan_code and sub.paystack_authorization_code and sub.paystack_customer_code and sub.current_period_end:
-            created = paystack_create_subscription(sub.paystack_customer_code, current_plan_code, sub.paystack_authorization_code, start_date=sub.current_period_end)
-            sub.paystack_subscription_code = created.get("subscription_code")
-            sub.paystack_plan_code = current_plan_code
-    except Exception:
-        add_audit(db, user, "SUBSCRIPTION_DOWNGRADE_CANCEL_PAYSTACK_RESCHEDULE_FAILED", "Scheduled downgrade cancelled, but restoring normal recurring billing for the current plan failed. Verify manually.", business_id=business.id)
+    # SUB-LIFECYCLE-001: renewal on the current plan is Cauldra's engine, so
+    # nothing is re-created at Paystack; a legacy pre-arranged lower-plan
+    # subscription is disabled (or disabled by the engine before it charges).
+    if sub.pending_downgrade_paystack_subscription_code and not retire_provider_subscription(
+            db, sub, "pending_downgrade_paystack_subscription_code", "scheduled downgrade cancelled"):
+        add_audit(db, user, "SUBSCRIPTION_DOWNGRADE_CANCEL_PAYSTACK_DISABLE_FAILED", "Scheduled downgrade cancelled; its pre-arranged Paystack subscription could not be disabled yet. Cauldra disables it before the renewal is charged.", business_id=business.id)
 
     clear_pending_downgrade(sub)
     add_audit(db, user, "SUBSCRIPTION_DOWNGRADE_CANCELLED",
@@ -14812,6 +14817,7 @@ def safe_payment_method(sub, transaction):
         return False  # preserve a previous usable method
     sub.paystack_authorization_code = auth['authorization_code']
     sub.paystack_customer_code = customer.get('customer_code') or sub.paystack_customer_code
+    sub.paystack_authorization_email = str(customer.get('email') or '').strip().casefold() or sub.paystack_authorization_email
     sub.card_verified = True
     last4 = str(auth.get('last4') or '')
     sub.card_last4 = last4 if re.fullmatch(r'\d{4}', last4) else None
@@ -14992,18 +14998,32 @@ def reconcile_first_subscription_payment(
 
     metadata["verification_source"] = "paystack_verify_transaction"
     record.transaction_metadata = json.dumps(metadata, sort_keys=True)
+
+    sub = db.query(BusinessSubscription).filter_by(business_id=business.id).with_for_update().one()
+    # SUB-LIFECYCLE-001: a Pay Now for a period another payment already
+    # renewed (second device, second Admin, or the automatic engine) is kept
+    # as a duplicate-payment exception for refund review, never as credit.
+    other = duplicate_success_for(db, record)
+    if other is not None:
+        return flag_duplicate_payment(db, record, other.paystack_reference, verified_transaction, now)
     record.paystack_transaction_id = str(verified_transaction.get("id") or "") or None
     record.status = "success"
     record.paid_at = now
-
-    sub = db.query(BusinessSubscription).filter_by(business_id=business.id).with_for_update().one()
+    anchor = record.renewal_period_end
+    same_plan = (sub.plan or "").strip().lower() == record.plan and (sub.billing_interval or "").strip().lower() == record.billing_interval
+    # An early renewal of the same plan continues from the paid-through time; a
+    # renewal after a genuine pause (or a plan switch) starts now.
+    start = anchor if (anchor is not None and sub.paid_at and same_plan and now < anchor) else now
+    was_paused = sub.paid_at is not None and subscription_access_state(sub, now)[1] is not None
+    if anchor is not None and sub.paid_at and start > anchor:
+        sub.paused_from, sub.resumed_at = anchor, start
     sub.plan = record.plan
     sub.billing_interval = record.billing_interval
     sub.status = "active"
     sub.payment_status = "paid"
     sub.paid_at = now
-    sub.current_period_start = now
-    sub.current_period_end = add_billing_interval(now, record.billing_interval)
+    sub.current_period_start = start
+    sub.current_period_end = add_billing_interval(start, record.billing_interval)
     sub.next_billing_at = sub.current_period_end
     safe_payment_method(sub, verified_transaction)
     sub.latest_transaction_reference = record.paystack_reference
@@ -15018,10 +15038,773 @@ def reconcile_first_subscription_payment(
         f"Payment verified with Paystack; subscription active on {PLAN_CONFIG[record.plan]['label']} ({record.billing_interval}).",
         business_id=business.id,
     )
+    if was_paused:
+        add_audit(db, None, "SUBSCRIPTION_RESTORED",
+                  f"Pay Now {record.paystack_reference} confirmed; access restored, paid through {to_utc_iso(sub.current_period_end)}.",
+                  business_id=business.id)
     resolve_notifications(db, f"sub_expired:{business.id}", business.id)
     resolve_notifications(db, f"payment_failed:{business.id}", business.id)
     db.flush()
     return {"status": "success", "already_processed": False}
+
+# -----------------------------------------------------------------------------
+# SUB-LIFECYCLE-001 — Cauldra's single renewal engine
+#
+# Paystack's documentation: "Subscriptions aren't retried. If a subscription
+# charge fails, we don't retry it." A failed Paystack subscription stays
+# enabled ("attention") and is charged again only on the NEXT payment date, and
+# the retry behaviour is not configurable. It therefore cannot provide the
+# owner's 12-hour x 3-day retry, and a manual renewal would leave it able to
+# charge again next cycle. Cauldra is the one renewal engine instead: at the
+# exact paid-through time, and then once per 12-hour slot until 3 days after
+# it, the saved reusable authorization is charged through Paystack's Charge
+# Authorization API with a reference Cauldra owns. Any Paystack subscription
+# still attached to the business is disabled before Cauldra charges, and no new
+# ones are created, so there are never two engines charging one subscription.
+# -----------------------------------------------------------------------------
+RENEWAL_RETRY_INTERVAL = timedelta(hours=12)
+RENEWAL_RETRY_WINDOW = timedelta(days=PAYSTACK_GRACE_PERIOD_DAYS)
+RENEWAL_RETRY_SLOTS = max(1, int(RENEWAL_RETRY_WINDOW / RENEWAL_RETRY_INTERVAL))  # 6 slots: +0h .. +60h
+CHECKOUT_RESUME_WINDOW = timedelta(minutes=30)
+RENEWAL_PENDING_RECHECK_AFTER = timedelta(minutes=10)
+# Paystack runs its own calendar (QA TEST evidence 2026-09-28: a subscription
+# started on the 31st is charged on the 28th), so a legacy charge can land a few
+# days before Cauldra's paid-through time. Within this margin it renews the
+# coming period; further inside an already-paid period it is a duplicate.
+PROVIDER_SCHEDULE_DRIFT = timedelta(days=7)
+PROVIDER_CHARGE_IMMINENT = timedelta(hours=1)
+RENEWAL_ATTEMPT_PURPOSES = ("subscription", "subscription_renewal", "subscription_upgrade")
+OPEN_ATTEMPT_STATUSES = ("initialized", "pending")
+PAYSTACK_PENDING_STATUSES = {"pending", "ongoing", "processing", "queued", "send_otp", "send_pin", "send_phone", "send_birthday", "open_url"}
+PAYSTACK_FAILED_STATUSES = {"failed", "reversed", "abandoned"}
+
+
+def renewal_anchor(sub: Optional["BusinessSubscription"]) -> Optional[datetime]:
+    """The paid-through (or trial-end) instant the next renewal continues from."""
+    if sub is None:
+        return None
+    return sub.current_period_end or sub.trial_end_at
+
+
+def renewal_slot(anchor: datetime, now: datetime) -> Optional[int]:
+    """Deterministic 12-hour slot index since the exact expiry, or None when
+    outside the automatic window. At most one automatic attempt per slot."""
+    if anchor is None or now < anchor:
+        return None
+    slot = int((now - anchor) / RENEWAL_RETRY_INTERVAL)
+    return slot if slot < RENEWAL_RETRY_SLOTS else None
+
+
+def renewal_plan_for(sub: "BusinessSubscription") -> tuple:
+    """Plan and interval the next renewal bills: a scheduled downgrade takes
+    effect exactly at the boundary it was scheduled for."""
+    plan = (sub.plan or "starter").strip().lower()
+    interval = (sub.billing_interval or "monthly").strip().lower()
+    if sub.pending_downgrade_plan and sub.pending_downgrade_plan in PLAN_CONFIG:
+        plan = sub.pending_downgrade_plan
+        interval = (sub.pending_downgrade_billing_interval or interval).strip().lower()
+    if plan not in PLAN_CONFIG:
+        plan = "starter"
+    if interval not in ("monthly", "annual"):
+        interval = "monthly"
+    return plan, interval
+
+
+def auto_renewal_eligible(sub: Optional["BusinessSubscription"], now: datetime) -> bool:
+    """Whether the engine may charge the saved card for the current period
+    boundary. Needs a reusable authorization and consent (a paid subscription,
+    or a trial the customer agreed would convert); never after a cancellation."""
+    if sub is None or sub.cancel_at_period_end or not sub.card_verified or not sub.paystack_authorization_code:
+        return False
+    if sub.status not in ("trialing", "active", "past_due", "expired"):
+        return False
+    if not (sub.paid_at or sub.trial_consent_at):
+        return False
+    return renewal_slot(renewal_anchor(sub), now) is not None
+
+
+def auto_renewal_schedule(sub: Optional["BusinessSubscription"], now: datetime) -> Optional[dict]:
+    """Next automatic attempt and when automatic attempts stop, for Billing."""
+    anchor = renewal_anchor(sub)
+    if sub is None or anchor is None or sub.cancel_at_period_end or not sub.paystack_authorization_code:
+        return None
+    ends = anchor + RENEWAL_RETRY_WINDOW
+    if now >= ends:
+        return {"next_attempt_at": None, "ends_at": ends, "exhausted": True}
+    slot = renewal_slot(anchor, now)
+    next_at = anchor if slot is None else anchor + RENEWAL_RETRY_INTERVAL * (slot + 1)
+    return {"next_attempt_at": next_at if next_at < ends else None, "ends_at": ends, "exhausted": False}
+
+
+def open_renewal_attempts(db: Session, business_id: int) -> list:
+    return (db.query(PaymentRecord)
+            .filter(PaymentRecord.business_id == business_id,
+                    PaymentRecord.purpose.in_(RENEWAL_ATTEMPT_PURPOSES),
+                    PaymentRecord.status.in_(OPEN_ATTEMPT_STATUSES))
+            .order_by(PaymentRecord.created_at.desc()).all())
+
+
+def lock_subscription(db: Session, business_id: int) -> "BusinessSubscription":
+    """Row lock that serialises the engine, Pay Now on any device, the
+    browser return, status checks and the webhook for one business."""
+    return db.query(BusinessSubscription).filter_by(business_id=business_id).with_for_update().one()
+
+
+def provider_charged_this_cycle(fetched: dict, anchor: Optional[datetime]) -> bool:
+    """True when Paystack's own subscription already charged (or is charging)
+    for this boundary, so Cauldra must wait for its webhook, not charge again."""
+    invoice = fetched.get("most_recent_invoice") or {}
+    if str(invoice.get("status") or "").lower() not in ("success", "pending"):
+        return False
+    when = parse_provider_time(invoice.get("paid_at") or invoice.get("period_start") or invoice.get("created_at"))
+    return bool(anchor and when and when >= anchor - PROVIDER_SCHEDULE_DRIFT)
+
+
+def parse_provider_time(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed
+
+
+def retire_provider_subscription(db: Session, sub: "BusinessSubscription", attr: str = "paystack_subscription_code", reason: str = "") -> bool:
+    """Disable a Paystack subscription so it can never charge alongside
+    Cauldra's engine. Returns False (and changes nothing locally) when the
+    provider could not confirm, so the caller must not charge yet."""
+    code = getattr(sub, attr)
+    if not code:
+        return True
+    try:
+        fetched = paystack_fetch_subscription(code)
+        provider_status = str(fetched.get("status") or "").lower()
+        if provider_status not in ("cancelled", "complete", "completed"):
+            token = fetched.get("email_token")
+            if not token:
+                return False
+            paystack_disable_subscription(code, token)
+    except Exception:
+        return False
+    setattr(sub, attr, None)
+    if attr == "paystack_subscription_code":
+        sub.paystack_plan_code = None
+    add_audit(db, None, "SUBSCRIPTION_PROVIDER_SCHEDULE_RETIRED",
+              "The Paystack recurring subscription was disabled; Cauldra's renewal engine charges the saved card at the paid-through time instead"
+              + (f" ({reason})." if reason else "."), business_id=sub.business_id)
+    return True
+
+
+def renewal_period_start(anchor: Optional[datetime], confirmed_at: datetime, on_time: bool) -> datetime:
+    """On-time renewal continues from the previous paid-through time (a late
+    webhook never shortens or shifts the paid period); a late renewal after a
+    genuine pause starts when the payment was confirmed."""
+    if anchor is None:
+        return confirmed_at
+    if on_time or confirmed_at <= anchor:
+        return anchor
+    return confirmed_at
+
+
+def duplicate_success_for(db: Session, record: "PaymentRecord") -> Optional["PaymentRecord"]:
+    if record.renewal_period_end is None:
+        return None
+    return (db.query(PaymentRecord)
+            .filter(PaymentRecord.business_id == record.business_id, PaymentRecord.id != record.id,
+                    PaymentRecord.renewal_period_end == record.renewal_period_end,
+                    PaymentRecord.status == "success").first())
+
+
+def flag_duplicate_payment(db: Session, record: "PaymentRecord", other_reference: Optional[str], transaction: dict, now: datetime) -> dict:
+    """A second confirmed payment for the same renewal period. Never turned into
+    silent credit and never auto-refunded: kept for refund/review."""
+    meta = parse_paystack_metadata(record.transaction_metadata)
+    meta.update({"duplicate_of": other_reference, "paystack_transaction_id": str(transaction.get("id") or ""),
+                 "server_verified_at": now.replace(microsecond=0).isoformat() + "Z"})
+    record.transaction_metadata = json.dumps(meta, sort_keys=True)
+    record.paystack_transaction_id = str(transaction.get("id") or "") or record.paystack_transaction_id
+    record.status = "duplicate_payment_review"
+    record.paid_at = now
+    add_audit(db, None, "SUBSCRIPTION_DUPLICATE_PAYMENT",
+              f"A second confirmed payment ({record.paystack_reference}) arrived for the renewal period already paid by {other_reference or 'another payment'}. "
+              "It was not applied as credit; it needs a refund review.", business_id=record.business_id)
+    create_notification(
+        db, business_id=record.business_id, category="subscription", severity="critical", type="SUBSCRIPTION_DUPLICATE_PAYMENT",
+        title="Duplicate payment received",
+        message="We received two payments for the same subscription period. Your subscription is active; the extra payment will be reviewed for a refund.",
+        deep_link="subscription", dedup_key=f"sub_duplicate_payment:{record.business_id}:{record.paystack_reference}",
+    )
+    db.flush()
+    return {"status": "duplicate_payment_review", "already_processed": False}
+
+
+def apply_renewal_success(db: Session, sub: "BusinessSubscription", record: "PaymentRecord", transaction: dict, now: datetime, *, on_time: bool) -> dict:
+    """The one success transition for a renewal: payment recorded, period
+    extended once from the right anchor, access restored — in one transaction,
+    under the subscription row lock."""
+    other = duplicate_success_for(db, record)
+    if other is not None:
+        return flag_duplicate_payment(db, record, other.paystack_reference, transaction, now)
+    anchor = record.renewal_period_end
+    if anchor is not None and sub.current_period_end and sub.current_period_end > anchor and sub.status == "active":
+        # The period already moved past this boundary through another payment.
+        return flag_duplicate_payment(db, record, sub.latest_transaction_reference, transaction, now)
+    was_paused = subscription_access_state(sub, now)[1] is not None
+    confirmed_at = parse_provider_time(transaction.get("paid_at") or transaction.get("paidAt")) or now
+    confirmed_at = min(confirmed_at, now)
+    start = renewal_period_start(anchor, confirmed_at, on_time)
+    plan, interval = record.plan, record.billing_interval
+    meta = parse_paystack_metadata(record.transaction_metadata)
+    meta.update({"paystack_transaction_id": str(transaction.get("id") or ""),
+                 "server_verified_at": now.replace(microsecond=0).isoformat() + "Z",
+                 "period_start": start.replace(microsecond=0).isoformat() + "Z"})
+    record.transaction_metadata = json.dumps(meta, sort_keys=True)
+    record.paystack_transaction_id = str(transaction.get("id") or "") or None
+    record.status = "success"
+    record.paid_at = now
+    applying_downgrade = bool(sub.pending_downgrade_plan) and plan == sub.pending_downgrade_plan
+    old_plan = (sub.plan or "starter").strip().lower()
+    sub.plan = plan
+    sub.billing_interval = interval
+    sub.status = "active"
+    sub.payment_status = "paid"
+    sub.paid_at = now
+    sub.current_period_start = start
+    sub.current_period_end = add_billing_interval(start, interval)
+    sub.next_billing_at = sub.current_period_end
+    sub.latest_transaction_reference = record.paystack_reference
+    sub.grace_period_ends_at = None
+    sub.cancel_at_period_end = False
+    sub.cancelled_at = None
+    if anchor is not None and start > anchor:
+        sub.paused_from, sub.resumed_at = anchor, start
+    safe_payment_method(sub, transaction)
+    if applying_downgrade:
+        clear_pending_downgrade(sub)
+        add_audit(db, None, "SUBSCRIPTION_DOWNGRADE_APPLIED",
+                  f"Scheduled downgrade took effect: {PLAN_CONFIG.get(old_plan, {}).get('label', old_plan)} -> {PLAN_CONFIG[plan]['label']} ({interval}). Existing business data was preserved.",
+                  business_id=sub.business_id)
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == sub.business_id).first()
+    if business:
+        business.subscription_plan = plan
+        business.billing_interval = interval
+    add_audit(db, None, "SUBSCRIPTION_RESTORED" if was_paused else "SUBSCRIPTION_RENEWED",
+              f"Paystack confirmed the renewal payment {record.paystack_reference}; paid through {to_utc_iso(sub.current_period_end)} "
+              f"(period starts {'at the previous paid-through time' if start == anchor else 'at confirmation'}).",
+              business_id=sub.business_id)
+    resolve_notifications(db, f"sub_expired:{sub.business_id}", sub.business_id)
+    resolve_notifications(db, f"payment_failed:{sub.business_id}", sub.business_id)
+    create_notification(
+        db, business_id=sub.business_id, category="subscription", severity="info", type="SUBSCRIPTION_RENEWED",
+        title="Subscription renewed" if not was_paused else "Subscription restored",
+        message="Your Cauldra subscription was renewed successfully." if not was_paused
+        else "Your renewal payment was confirmed and Cauldra is unlocked again.",
+        deep_link="subscription", dedup_key=f"sub_renewed:{sub.business_id}:{record.paystack_reference}",
+    )
+    db.flush()
+    return {"status": "success", "already_processed": False}
+
+
+def renewal_verification_mismatches(transaction: dict, record: "PaymentRecord") -> list:
+    mismatches = []
+    if str(transaction.get("reference") or "") != record.paystack_reference:
+        mismatches.append("reference")
+    if int(transaction.get("amount") or 0) != record.amount_kobo:
+        mismatches.append("amount")
+    if (transaction.get("currency") or "").upper() != (record.currency or "NGN").upper():
+        mismatches.append("currency")
+    if not str(transaction.get("id") or "").strip():
+        mismatches.append("transaction_id")
+    return mismatches
+
+
+def reconcile_renewal_payment(db: Session, record: "PaymentRecord", transaction: dict, now: Optional[datetime] = None) -> dict:
+    """Apply one server-verified Cauldra renewal charge exactly once. Used by
+    the engine, the webhook and Check status alike."""
+    now = now or datetime.utcnow()
+    if record.status in ("success", "duplicate_payment_review"):
+        return {"status": record.status, "already_processed": True}
+    provider_status = str(transaction.get("status") or "").strip().lower()
+    if provider_status != "success":
+        if provider_status in PAYSTACK_FAILED_STATUSES:
+            record.status = "failed"
+            meta = parse_paystack_metadata(record.transaction_metadata)
+            meta["verification_provider_status"] = provider_status
+            record.transaction_metadata = json.dumps(meta, sort_keys=True)
+            db.flush()
+            return {"status": "failed", "already_processed": False}
+        record.status = "pending"
+        db.flush()
+        return {"status": "pending", "already_processed": False}
+    mismatches = renewal_verification_mismatches(transaction, record)
+    if not transaction_id_available(db, transaction, record):
+        mismatches.append("transaction_id_reused")
+    if mismatches:
+        record.status = "flagged_verification_mismatch"
+        meta = parse_paystack_metadata(record.transaction_metadata)
+        meta["verification_mismatches"] = sorted(set(mismatches))
+        record.transaction_metadata = json.dumps(meta, sort_keys=True)
+        add_audit(db, None, "SUBSCRIPTION_PAYMENT_VERIFICATION_MISMATCH",
+                  f"Paystack verification did not match renewal {record.paystack_reference}; not applied, flagged for review.",
+                  business_id=record.business_id)
+        db.flush()
+        return {"status": "flagged_verification_mismatch", "already_processed": False}
+    sub = lock_subscription(db, record.business_id)
+    on_time = record.attempt_source == "auto" and record.renewal_attempt_slot == 0
+    return apply_renewal_success(db, sub, record, transaction, now, on_time=on_time)
+
+
+def settle_open_attempt(db: Session, record: "PaymentRecord", now: datetime) -> str:
+    """Ask Paystack about an attempt that is still open and apply the answer.
+    Returns success | failed | pending | unknown (provider unreachable)."""
+    try:
+        transaction = paystack_verify_transaction(record.paystack_reference)
+    except Exception:
+        return "unknown"
+    if record.purpose == "subscription_renewal":
+        result = reconcile_renewal_payment(db, record, transaction, now)
+    elif record.purpose == "subscription_upgrade":
+        result = reconcile_upgrade_payment(db, record, transaction)
+    else:
+        business = db.query(BusinessProfile).filter(BusinessProfile.id == record.business_id).first()
+        result = reconcile_first_subscription_payment(db, record, business, transaction, now)
+    status = result.get("status")
+    if status in ("success", "duplicate_payment_review", "flagged_verification_mismatch"):
+        return "success" if status == "success" else "failed"
+    return status or "unknown"
+
+
+class RenewalAttemptInProgress(Exception):
+    def __init__(self, record: "PaymentRecord", code: str = "RENEWAL_IN_PROGRESS"):
+        super().__init__(code)
+        self.record = record
+        self.code = code
+
+
+def checkout_resume_payload(record: "PaymentRecord") -> Optional[dict]:
+    meta = parse_paystack_metadata(record.transaction_metadata)
+    if not (meta.get("access_code") and meta.get("authorization_url") and meta.get("callback_url")):
+        return None
+    return {"reference": record.paystack_reference, "access_code": meta["access_code"],
+            "authorization_url": meta["authorization_url"], "amount_kobo": record.amount_kobo,
+            "verification_amount_kobo": None, "currency": record.currency or "NGN", "plan": record.plan,
+            "billing_interval": record.billing_interval, "callback_url": meta["callback_url"], "resumed": True}
+
+
+def enforce_one_open_renewal_attempt(db: Session, business_id: int, plan: str, interval: str, now: datetime) -> Optional[dict]:
+    """One payable renewal attempt per business at a time (Pay Now twice, two
+    devices, two Admins, or Pay Now against an automatic charge). Returns a
+    checkout to resume, raises RenewalAttemptInProgress while an attempt is
+    still being confirmed, or returns None when a new attempt may start.
+    Caller holds the subscription row lock."""
+    for row in open_renewal_attempts(db, business_id):
+        age = now - (row.created_at or now)
+        if (row.purpose == "subscription" and row.plan == plan and row.billing_interval == interval
+                and age < CHECKOUT_RESUME_WINDOW):
+            payload = checkout_resume_payload(row)
+            if payload:
+                add_audit(db, None, "SUBSCRIPTION_DUPLICATE_ATTEMPT_BLOCKED",
+                          f"A second Pay Now resumed the open checkout {row.paystack_reference} instead of creating another.",
+                          business_id=business_id)
+                return payload
+        outcome = settle_open_attempt(db, row, now)
+        if outcome == "success":
+            raise RenewalAttemptInProgress(row, "ALREADY_PAID")
+        if outcome in ("pending", "unknown"):
+            add_audit(db, None, "SUBSCRIPTION_DUPLICATE_ATTEMPT_BLOCKED",
+                      f"A new payment was not started because {row.paystack_reference} is still being confirmed.",
+                      business_id=business_id)
+            raise RenewalAttemptInProgress(row)
+        # failed / abandoned: closed, a new attempt may start
+    return None
+
+
+def charge_saved_authorization(db: Session, sub: "BusinessSubscription", business: "BusinessProfile", anchor: datetime, slot: int, now: datetime) -> Optional["PaymentRecord"]:
+    """One automatic attempt for (business, period, slot). The PaymentRecord is
+    committed before Paystack is called, so a lost response is reconciled by
+    reference and never blindly repeated."""
+    plan, interval = renewal_plan_for(sub)
+    amount_kobo = plan_amount_naira(plan, interval) * 100
+    email = str(sub.paystack_authorization_email or business.email or "").strip().casefold()
+    if not email:
+        return None
+    reference = f"cauldra-renew-{business.id}-{anchor.strftime('%Y%m%d%H%M%S')}-{slot}-{secrets.token_hex(4)}"
+    metadata = {"business_id": business.id, "plan": plan, "billing_interval": interval,
+                "purpose": "subscription_renewal", "customer_email": email,
+                "renewal_period_end": anchor.replace(microsecond=0).isoformat() + "Z", "attempt_slot": slot}
+    record = PaymentRecord(business_id=business.id, subscription_id=sub.id, plan=plan, billing_interval=interval,
+                           amount_kobo=amount_kobo, currency="NGN", paystack_reference=reference, status="initialized",
+                           purpose="subscription_renewal", transaction_metadata=json.dumps(metadata),
+                           renewal_period_end=anchor, attempt_source="auto", renewal_attempt_slot=slot)
+    db.add(record)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        return None  # another sweep owns this slot
+    add_audit(db, None, "SUBSCRIPTION_AUTO_RENEWAL_ATTEMPTED",
+              f"Automatic renewal attempt {slot + 1} of {RENEWAL_RETRY_SLOTS} for the period ending {to_utc_iso(anchor)} "
+              f"({PLAN_CONFIG[plan]['label']}, {interval}).", business_id=business.id)
+    db.commit()
+    try:
+        payload = paystack_request("POST", "/transaction/charge_authorization", {
+            "authorization_code": sub.paystack_authorization_code, "email": email, "amount": amount_kobo,
+            "currency": "NGN", "reference": reference, "metadata": json.dumps(metadata),
+        })
+        data = payload.get("data") or {}
+    except PaystackRequestError as exc:
+        record = db.query(PaymentRecord).filter_by(id=record.id).one()
+        record.status = "failed" if exc.definitive else "pending"
+        _renewal_attempt_outcome(db, record, anchor, slot, "provider_rejected" if exc.definitive else "provider_unreachable")
+        db.commit()
+        return record
+    record = db.query(PaymentRecord).filter_by(id=record.id).one()
+    if data.get("paused"):
+        # The bank asked the customer to authorise this charge; nobody is there
+        # to do it. Treated as a failed automatic attempt; Pay Now still works.
+        record.status = "failed"
+        _renewal_attempt_outcome(db, record, anchor, slot, "authorization_required")
+        db.commit()
+        return record
+    status = str(data.get("status") or "").lower()
+    if status == "success":
+        try:
+            verified = paystack_verify_transaction(reference)
+        except Exception:
+            record.status = "pending"
+            db.commit()
+            return record
+        result = reconcile_renewal_payment(db, record, verified, now)
+        if result["status"] != "success":
+            _renewal_attempt_outcome(db, record, anchor, slot, result["status"])
+        db.commit()
+        return record
+    if status in PAYSTACK_FAILED_STATUSES:
+        record.status = "failed"
+        _renewal_attempt_outcome(db, record, anchor, slot, "declined")
+    else:
+        record.status = "pending"
+    db.commit()
+    return record
+
+
+def _renewal_attempt_outcome(db: Session, record: "PaymentRecord", anchor: datetime, slot: int, reason: str) -> None:
+    sub = db.query(BusinessSubscription).filter_by(business_id=record.business_id).first()
+    if sub is not None and record.status == "failed":
+        sub.payment_status = "failed"
+    next_slot = slot + 1
+    if record.status == "failed" and next_slot < RENEWAL_RETRY_SLOTS:
+        add_audit(db, None, "SUBSCRIPTION_RENEWAL_RETRY_SCHEDULED",
+                  f"Automatic renewal attempt {slot + 1} did not succeed ({reason}). Next automatic attempt at "
+                  f"{to_utc_iso(anchor + RENEWAL_RETRY_INTERVAL * next_slot)}.", business_id=record.business_id)
+    elif record.status == "failed":
+        add_audit(db, None, "SUBSCRIPTION_AUTO_RENEWAL_EXHAUSTED",
+                  f"The last automatic renewal attempt did not succeed ({reason}). No further automatic attempts; Pay Now stays available.",
+                  business_id=record.business_id)
+
+
+def run_subscription_renewal(db: Session, business: "BusinessProfile", now: Optional[datetime] = None) -> Optional[str]:
+    """One engine pass for one business (background sweep). Returns what it
+    did, for tests and logs: charged | pending | provider_charged | waiting |
+    retired | None."""
+    now = now or datetime.utcnow()
+    sub = lock_subscription(db, business.id)
+    anchor = renewal_anchor(sub)
+    # Retire any Paystack subscription before the boundary, so the engine is
+    # the only thing that can charge this business — except while Paystack's
+    # own charge is imminent or running (its webhook then decides).
+    if sub.paystack_subscription_code and anchor and now < anchor:
+        try:
+            fetched = paystack_fetch_subscription(sub.paystack_subscription_code)
+        except Exception:
+            db.commit()
+            return None
+        next_charge = parse_provider_time(fetched.get("next_payment_date"))
+        if next_charge and abs(next_charge - now) < PROVIDER_CHARGE_IMMINENT:
+            db.commit()
+            return "provider_charging"
+        retired = retire_provider_subscription(db, sub, reason="retired ahead of the next renewal")
+        if sub.pending_downgrade_paystack_subscription_code:
+            retire_provider_subscription(db, sub, "pending_downgrade_paystack_subscription_code", "retired ahead of the next renewal")
+        db.commit()
+        return "retired" if retired else None
+    # Open attempts first: settle them, never start a second one beside them.
+    for row in open_renewal_attempts(db, business.id):
+        if now - (row.created_at or now) < RENEWAL_PENDING_RECHECK_AFTER:
+            db.commit()
+            return "waiting"
+        outcome = settle_open_attempt(db, row, now)
+        db.commit()
+        if outcome in ("pending", "unknown"):
+            return "pending"
+        if outcome == "success":
+            return "charged"
+        sub = lock_subscription(db, business.id)
+    if not auto_renewal_eligible(sub, now):
+        db.commit()
+        return None
+    anchor = renewal_anchor(sub)
+    slot = renewal_slot(anchor, now)
+    if sub.current_period_end and sub.current_period_end > now and sub.status == "active":
+        db.commit()
+        return None
+    exists = db.query(PaymentRecord.id).filter(
+        PaymentRecord.business_id == business.id, PaymentRecord.attempt_source == "auto",
+        PaymentRecord.renewal_period_end == anchor, PaymentRecord.renewal_attempt_slot == slot).first()
+    if exists:
+        db.commit()
+        return None
+    if db.query(PaymentRecord.id).filter(PaymentRecord.business_id == business.id, PaymentRecord.renewal_period_end == anchor,
+                                         PaymentRecord.status == "success").first():
+        db.commit()
+        return None
+    if sub.paystack_subscription_code or sub.pending_downgrade_paystack_subscription_code:
+        # A legacy Paystack subscription is still attached at the boundary: let
+        # its own charge land if it already happened, otherwise disable it
+        # before Cauldra charges. Never both.
+        code = sub.paystack_subscription_code or sub.pending_downgrade_paystack_subscription_code
+        try:
+            fetched = paystack_fetch_subscription(code)
+        except Exception:
+            db.commit()
+            return None
+        if provider_charged_this_cycle(fetched, anchor):
+            db.commit()
+            return "provider_charged"
+        ok = retire_provider_subscription(db, sub, reason="disabled before Cauldra's renewal attempt")
+        if sub.pending_downgrade_paystack_subscription_code:
+            ok = retire_provider_subscription(db, sub, "pending_downgrade_paystack_subscription_code", "disabled before Cauldra's renewal attempt") and ok
+        db.commit()
+        if not ok:
+            return None
+        sub = lock_subscription(db, business.id)
+    record = charge_saved_authorization(db, sub, business, anchor, slot, now)
+    if record is None:
+        return None
+    return "charged" if record.status == "success" else record.status
+
+
+# -----------------------------------------------------------------------------
+# SUB-LIFECYCLE-001 — subscription reminders (in-app + email), durable log
+# -----------------------------------------------------------------------------
+SUBSCRIPTION_REMINDER_PRE_STAGES = (
+    ("1h", timedelta(hours=1)), ("6h", timedelta(hours=6)), ("24h", timedelta(hours=24)),
+    ("3d", timedelta(days=3)), ("7d", timedelta(days=7)),
+)
+# After the pause: at once, about a day later, and at the end of the automatic
+# window. Each is only sent within a day of its time, so a business that lapsed
+# long ago is never emailed about it now.
+SUBSCRIPTION_REMINDER_POST_STAGES = (
+    ("paused", timedelta(0)), ("paused_24h", timedelta(hours=24)), ("window_end", RENEWAL_RETRY_WINDOW),
+)
+SUBSCRIPTION_REMINDER_POST_LATE_LIMIT = timedelta(hours=24)
+REMINDER_EMAIL_MAX_ATTEMPTS = 5
+REMINDER_EMAIL_RETRY_FOR = timedelta(hours=20)  # inside Resend's 24-hour idempotency window
+_EMAIL_SHAPE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def subscription_reminder_email_mode() -> str:
+    """off (default) | allowlist | all. Email reminders are opt-in per
+    environment so a deploy can never email customers by accident; production
+    sets "all" at rollout, QA uses "allowlist"."""
+    mode = os.getenv("SUBSCRIPTION_REMINDER_EMAIL_MODE", "off").strip().lower()
+    return mode if mode in ("off", "allowlist", "all") else "off"
+
+
+def subscription_reminder_email_allowed(address: str) -> bool:
+    mode = subscription_reminder_email_mode()
+    if mode == "all":
+        return True
+    if mode != "allowlist":
+        return False
+    allowed = {a.strip().casefold() for a in os.getenv("SUBSCRIPTION_REMINDER_EMAIL_ALLOWLIST", "").split(",") if a.strip()}
+    address = address.casefold()
+    return address in allowed or ("@" + address.split("@", 1)[-1]) in allowed
+
+
+def due_subscription_reminder(sub: Optional["BusinessSubscription"], now: datetime) -> Optional[tuple]:
+    """(anchor, stage) due now, or None. Only the most urgent due stage."""
+    if sub is None or sub.status in ("cancelled", "pending_payment_method"):
+        return None
+    effective, _message = subscription_access_state(sub, now)
+    anchor = sub.trial_end_at if sub.status == "trialing" else (sub.current_period_end or sub.trial_end_at)
+    if anchor is None:
+        return None
+    if effective in ("trialing", "active"):
+        if now >= anchor:
+            return None
+        remaining = anchor - now
+        for stage, before in SUBSCRIPTION_REMINDER_PRE_STAGES:
+            if remaining <= before:
+                return anchor, stage
+        return None
+    if effective in ("past_due", "expired") and now >= anchor:
+        elapsed = now - anchor
+        for stage, after in reversed(SUBSCRIPTION_REMINDER_POST_STAGES):
+            if after <= elapsed < after + SUBSCRIPTION_REMINDER_POST_LATE_LIMIT:
+                if stage != "paused" and effective == "expired" and not sub.paid_at:
+                    return None  # a trial that ran out gets the one notice
+                return anchor, stage
+    return None
+
+
+def _format_reminder_time(business: "BusinessProfile", when: datetime) -> str:
+    zone = business_local_zoneinfo(business)
+    local = when.replace(tzinfo=timezone.utc).astimezone(zone)
+    return local.strftime("%d %b %Y, %H:%M") + f" ({getattr(zone, 'key', 'UTC')})"
+
+
+def subscription_reminder_text(sub: "BusinessSubscription", business: "BusinessProfile", stage: str, anchor: datetime) -> tuple:
+    """(title, message) — plain language, no card data."""
+    when = _format_reminder_time(business, anchor)
+    trial = not sub.paid_at
+    thing = "trial" if trial else "subscription"
+    renewing = auto_renewal_possible(sub)
+    if stage in dict(SUBSCRIPTION_REMINDER_PRE_STAGES):
+        if renewing:
+            follow = "Your saved card will be charged then. If the payment can't be confirmed, Cauldra pauses until it is."
+        else:
+            follow = "Renew or choose a plan in Subscription & Billing to keep using Cauldra without a pause."
+        return ("Subscription ending soon",
+                f"Your Cauldra {thing} ends on {when}. {follow} Your business data is always kept.")
+    window_end = _format_reminder_time(business, anchor + RENEWAL_RETRY_WINDOW)
+    if stage == "paused":
+        if trial and renewing:
+            return ("Trial ended", f"Your Cauldra trial ended on {when}. Cauldra is charging your saved card for your plan and unlocks as soon as the payment is confirmed. Your business data is safe.")
+        if trial:
+            return ("Trial ended", f"Your Cauldra trial ended on {when}. Your business data is safe. Choose a plan in Subscription & Billing to continue.")
+        follow = (f"Cauldra will retry your saved card automatically until {window_end}; an Admin can also renew now from Subscription & Billing."
+                  if renewing else "An Admin can renew from Subscription & Billing at any time.")
+        return ("Subscription paused",
+                f"Your Cauldra subscription is paused because the renewal payment was not confirmed by {when}. Your business data is safe. {follow}")
+    if stage == "paused_24h":
+        follow = (f"Automatic attempts continue until {window_end}." if renewing else "")
+        return ("Subscription still paused",
+                f"Your Cauldra subscription is still paused. Your business data is safe. An Admin can renew from Subscription & Billing. {follow}".strip())
+    if renewing:
+        return ("Automatic renewal attempts have ended",
+                "Cauldra has stopped trying your saved card automatically. Your business data is safe, and an Admin can renew from Subscription & Billing at any time.")
+    return ("Subscription still paused",
+            "Your Cauldra subscription is still paused. Your business data is safe, and an Admin can renew from Subscription & Billing at any time.")
+
+
+def auto_renewal_possible(sub: "BusinessSubscription") -> bool:
+    return bool(sub.card_verified and sub.paystack_authorization_code and not sub.cancel_at_period_end
+                and (sub.paid_at or sub.trial_consent_at))
+
+
+def subscription_reminder_email_recipients(db: Session, business: "BusinessProfile") -> list:
+    """Every active Admin (the billing-authorised role) with a usable address,
+    de-duplicated; the business email only when no Admin has one."""
+    seen, out = set(), []
+    for (email,) in db.query(User.email).filter(User.business_id == business.id, User.disabled == False,
+                                                User.role == "admin").order_by(User.id).all():
+        address = str(email or "").strip().casefold()
+        if address and _EMAIL_SHAPE.match(address) and address not in seen:
+            seen.add(address)
+            out.append(address)
+    if not out:
+        address = str(business.email or "").strip().casefold()
+        if address and _EMAIL_SHAPE.match(address):
+            out.append(address)
+    return out
+
+
+def _claim_reminder(db: Session, business_id: int, anchor: datetime, stage: str, channel: str, recipient: str, status: str, now: Optional[datetime] = None) -> Optional["SubscriptionReminderDelivery"]:
+    exists = db.query(SubscriptionReminderDelivery.id).filter_by(
+        business_id=business_id, period_anchor=anchor, stage=stage, channel=channel, recipient=recipient).first()
+    if exists:
+        return None
+    row = SubscriptionReminderDelivery(business_id=business_id, period_anchor=anchor, stage=stage, channel=channel,
+                                       recipient=recipient, status=status, attempts=0,
+                                       created_at=now or datetime.utcnow(), updated_at=now or datetime.utcnow())
+    db.add(row)
+    db.flush()  # the unique key rejects a concurrent duplicate
+    return row
+
+
+def record_subscription_reminders(db: Session, business: "BusinessProfile", sub: "BusinessSubscription", now: datetime) -> Optional[str]:
+    """Create the in-app reminder and queue the email rows for the stage due
+    now. In-app is written at once and never depends on email succeeding."""
+    due = due_subscription_reminder(sub, now)
+    if due is None:
+        return None
+    anchor, stage = due
+    anchor = anchor.replace(microsecond=0)
+    title, message = subscription_reminder_text(sub, business, stage, anchor)
+    for uid in sorted(notification_recipients(db, business.id, "subscription")):
+        if _claim_reminder(db, business.id, anchor, stage, "in_app", str(uid), "sent", now) is None:
+            continue
+        create_notification(
+            db, business_id=business.id, category="subscription",
+            severity="important" if stage == "7d" else "critical",
+            type=f"SUBSCRIPTION_REMINDER_{stage.upper()}", title=title, message=message, recipient_user_ids={uid},
+            deep_link="subscription", dedup_key=f"sub_reminder:{business.id}:{anchor.isoformat()}:{stage}", stage=stage,
+        )
+        row = db.query(SubscriptionReminderDelivery).filter_by(business_id=business.id, period_anchor=anchor, stage=stage,
+                                                               channel="in_app", recipient=str(uid)).one()
+        row.sent_at = now
+    for address in subscription_reminder_email_recipients(db, business):
+        _claim_reminder(db, business.id, anchor, stage, "email", address,
+                        "pending" if subscription_reminder_email_allowed(address) else "suppressed", now)
+    if stage in ("paused", "window_end"):
+        add_audit(db, None, "SUBSCRIPTION_REMINDER_" + stage.upper(),
+                  f"Subscription reminder '{stage}' recorded for the period ending {to_utc_iso(anchor)}.", business_id=business.id)
+    db.flush()
+    return stage
+
+
+def _reminder_email_html(title: str, message: str) -> str:
+    return (f"<p><strong>{_html.escape(title)}</strong></p><p>{_html.escape(message)}</p>"
+            f"<p>Open Cauldra and go to Subscription &amp; Billing to see your plan and renew.</p>")
+
+
+def send_pending_subscription_reminder_emails(db: Session, business: "BusinessProfile", now: datetime) -> int:
+    """Send queued reminder emails. A provider failure leaves the in-app
+    reminder untouched and retries the same email (same idempotency key, so a
+    retry after a lost response is never delivered twice) for up to 20 hours."""
+    sent = 0
+    sub = get_or_create_subscription(db, business, commit=False)
+    rows = (db.query(SubscriptionReminderDelivery)
+            .filter(SubscriptionReminderDelivery.business_id == business.id, SubscriptionReminderDelivery.channel == "email",
+                    SubscriptionReminderDelivery.status.in_(("pending", "failed"))).all())
+    for row in rows:
+        if now - row.created_at > REMINDER_EMAIL_RETRY_FOR or row.attempts >= REMINDER_EMAIL_MAX_ATTEMPTS:
+            row.status = "abandoned"
+            continue
+        title, message = subscription_reminder_text(sub, business, row.stage, row.period_anchor)
+        key = "sub-reminder-" + hashlib.sha256(f"{business.id}|{row.period_anchor.isoformat()}|{row.stage}|{row.recipient}".encode()).hexdigest()[:40]
+        row.attempts = (row.attempts or 0) + 1
+        try:
+            send_resend_email(purpose="subscription_reminder", to_email=row.recipient, subject=f"Cauldra: {title}",
+                              html=_reminder_email_html(title, message), idempotency_key=key)
+        except EmailDeliveryError as exc:
+            row.status = "failed"
+            row.last_error_category = exc.category
+            continue
+        except Exception:
+            row.status = "failed"
+            row.last_error_category = "other_delivery_failure"
+            continue
+        row.status = "sent"
+        row.sent_at = now
+        row.last_error_category = None
+        sent += 1
+    db.flush()
+    return sent
+
+
+def offline_capture_paused_reason(db: Session, business_id: int, captured_at: datetime) -> Optional[str]:
+    """SUB-LIFECYCLE-001: work captured offline while the subscription was
+    paused is refused (and kept on the device for review), never applied after
+    a renewal. The current pause is enforced by the 402 on replay itself."""
+    sub = db.query(BusinessSubscription).filter_by(business_id=business_id).first()
+    if sub and sub.paused_from and sub.resumed_at and sub.paused_from <= captured_at < sub.resumed_at:
+        return ("This change was saved while the Cauldra subscription was paused, so it was not applied. "
+                "It is kept on this device for review.")
+    return None
+
 
 def paystack_get_or_create_customer(email: str) -> str:
     payload = paystack_request("POST", "/customer", {"email": email})
@@ -15985,6 +16768,7 @@ def trial_confirm(data: TrialConfirmRequest, request: Request, user: User = Depe
             "trial_start_at": now, "trial_end_at": trial_end, "current_period_start": now,
             "current_period_end": trial_end, "next_billing_at": trial_end, "trial_consent_at": now,
             "paystack_authorization_code": authorization.get("authorization_code"),
+            "paystack_authorization_email": str((tx.get("customer") or {}).get("email") or "").strip().casefold() or None,
             "card_last4": authorization.get("last4"), "card_type": authorization.get("card_type"),
             "card_exp_month": str(authorization.get("exp_month") or ""), "card_exp_year": str(authorization.get("exp_year") or ""),
             "payment_status": None, "updated_at": now,
@@ -16001,26 +16785,16 @@ def trial_confirm(data: TrialConfirmRequest, request: Request, user: User = Depe
     record.paystack_transaction_id = str(tx.get("id") or "") or None
     business.subscription_plan = plan; business.billing_interval = interval
 
+    # SUB-LIFECYCLE-001: the trial converts through Cauldra's renewal engine at
+    # trial end (charge of the saved authorization); no Paystack subscription.
     customer_code = None
-    subscription_code = None
-    plan_code = PLAN_CONFIG[plan].get("paystack_annual_plan_code" if interval == "annual" else "paystack_monthly_plan_code")
     try:
         customer_code = paystack_get_or_create_customer(business.email or user.email)
-        if plan_code:
-            # Paystack's supported start_date parameter lets Paystack itself
-            # schedule and execute the first real debit automatically at trial
-            # end — Cauldra does not need to invent its own card-charging
-            # mechanism for the conversion charge.
-            created = paystack_create_subscription(customer_code, plan_code, authorization["authorization_code"], start_date=trial_end)
-            subscription_code = created.get("subscription_code")
-        else:
-            add_audit(db, user, "TRIAL_STARTED_WITHOUT_PAYSTACK_PLAN_CODE", f"Trial started for {PLAN_CONFIG[plan]['label']} ({interval}) but no PAYSTACK_*_PLAN_CODE is configured for this plan/interval, so automatic conversion cannot be scheduled with Paystack yet. The trial will still expire correctly and require manual checkout to convert.", business_id=business.id)
     except Exception:
-        add_audit(db, user, "TRIAL_PAYSTACK_SUBSCRIPTION_CREATE_FAILED", "Card verification succeeded and the trial started, but creating the recurring Paystack subscription failed. Automatic conversion at trial end may not occur; manual checkout will be needed.", business_id=business.id)
-
-    sub.paystack_customer_code = customer_code
-    sub.paystack_subscription_code = subscription_code
-    sub.paystack_plan_code = plan_code or None
+        customer_code = None
+    sub.paystack_customer_code = customer_code or sub.paystack_customer_code
+    sub.paystack_subscription_code = None
+    sub.paystack_plan_code = None
     db.commit()
 
     refund = ensure_verification_refund(db, record, reference, tx.get("id"))
@@ -16164,7 +16938,29 @@ def start_checkout(data: CheckoutRequest, request: Request, user: User = Depends
     amount_kobo = int(amount_naira) * 100
     reference = f"cauldra_{business.business_code}_{secrets.token_hex(8)}"
 
-    sub = get_or_create_subscription(db, business)
+    get_or_create_subscription(db, business)
+    # SUB-LIFECYCLE-001: one payable renewal attempt per business. A second Pay
+    # Now (double click, another device or Admin, or against an automatic
+    # charge) resumes the open checkout or waits for it to be confirmed.
+    sub = lock_subscription(db, business.id)
+    now = datetime.utcnow()
+    try:
+        resume = enforce_one_open_renewal_attempt(db, business.id, plan, interval, now)
+    except RenewalAttemptInProgress as busy:
+        db.commit()
+        if claim is not None:
+            db.delete(claim); db.commit()
+        if busy.code == "ALREADY_PAID":
+            raise HTTPException(status_code=409, detail={"code": "ALREADY_PAID", "reference": busy.record.paystack_reference,
+                                "message": "This renewal was already paid and confirmed. Refresh Billing to see it."})
+        raise HTTPException(status_code=409, detail={"code": "RENEWAL_IN_PROGRESS", "reference": busy.record.paystack_reference,
+                            "message": "A renewal payment is already being confirmed. Check its status before paying again."})
+    if resume is not None:
+        complete_idempotent_mutation(claim, resume)
+        db.commit()
+        return resume
+    add_audit(db, user, "SUBSCRIPTION_PAY_NOW_STARTED",
+              f"Pay Now started for {PLAN_CONFIG[plan]['label']} ({interval}).", business_id=business.id)
     checkout_email = str(business.email or user.email or "").strip().casefold()
     checkout_metadata = {
         "business_id": business.id, "plan": plan, "billing_interval": interval,
@@ -16172,10 +16968,18 @@ def start_checkout(data: CheckoutRequest, request: Request, user: User = Depends
     }
     record = PaymentRecord(business_id=business.id, subscription_id=sub.id, plan=plan, billing_interval=interval,
                             amount_kobo=amount_kobo, currency="NGN", paystack_reference=reference, status="initialized",
-                            transaction_metadata=json.dumps(checkout_metadata))
+                            transaction_metadata=json.dumps(checkout_metadata),
+                            renewal_period_end=renewal_anchor(sub) if (sub.paid_at or sub.status == "trialing") else None,
+                            attempt_source="manual")
     db.add(record); db.commit()
 
     result = initialize_owned_checkout(db, request, record, checkout_email, checkout_metadata, user)
+    # Kept so a second device resumes this same checkout (access codes are
+    # browser checkout locators, not secrets or card data).
+    stored = parse_paystack_metadata(record.transaction_metadata)
+    stored.update({"access_code": result.get("access_code"), "authorization_url": result.get("authorization_url"),
+                   "callback_url": result.get("callback_url")})
+    record.transaction_metadata = json.dumps(stored)
     complete_idempotent_mutation(claim, result)
     db.commit()
     return result
@@ -16212,7 +17016,7 @@ def confirm_subscription_checkout(
         .filter(
             PaymentRecord.paystack_reference == reference,
             PaymentRecord.business_id == user.business_id,
-            PaymentRecord.purpose.in_(("subscription", "subscription_upgrade")),
+            PaymentRecord.purpose.in_(("subscription", "subscription_upgrade", "subscription_renewal")),
         )
         .with_for_update()
         .first()
@@ -16229,6 +17033,9 @@ def confirm_subscription_checkout(
 
     if record.status == "success":
         return {"status": "success", "already_processed": True, "reference": reference}
+    if record.status == "duplicate_payment_review":
+        return JSONResponse(status_code=409, content={"status": "duplicate_payment_review", "reference": reference,
+                            "detail": "This payment arrived for a period that was already paid. It will be reviewed for a refund."})
 
     try:
         verified_transaction = paystack_verify_transaction(reference)
@@ -16237,6 +17044,7 @@ def confirm_subscription_checkout(
         raise HTTPException(status_code=502, detail="Payment verification is temporarily unavailable. Please retry.")
 
     result = (reconcile_upgrade_payment(db, record, verified_transaction) if record.purpose == "subscription_upgrade"
+              else reconcile_renewal_payment(db, record, verified_transaction) if record.purpose == "subscription_renewal"
               else reconcile_first_subscription_payment(db, record, business, verified_transaction))
     db.commit()
     payload = {**result, "reference": reference}
@@ -16248,47 +17056,26 @@ def confirm_subscription_checkout(
         return JSONResponse(status_code=409, content={**payload, "detail": "Paystack reports that this payment failed."})
     if result["status"] == "flagged_verification_mismatch":
         return JSONResponse(status_code=409, content={**payload, "detail": "Payment verification did not match this checkout and was not applied."})
+    if result["status"] == "duplicate_payment_review":
+        return JSONResponse(status_code=409, content={**payload, "detail": "This payment arrived for a period that was already paid. It will be reviewed for a refund."})
     return payload
 
 
 
 def finish_recurring_setup(db, record):
-    """Persist external-write intent; never blindly repeat an uncertain write.
-
-    A transport interruption is exposed as requires_action. Existing provider
-    references remain available for reconciliation and no second debit is made.
-    """
-    meta = parse_paystack_metadata(record.transaction_metadata)
-    if meta.get('recurring_setup') in ('complete', 'not_configured', 'requires_action'):
-        return meta['recurring_setup']
+    """SUB-LIFECYCLE-001: automatic renewal is Cauldra's engine charging the
+    saved reusable authorization, so nothing is created at Paystack. A legacy
+    Paystack subscription is disabled here (Pay Now after a failed renewal
+    must not leave it able to charge again); if that cannot be confirmed now,
+    the engine disables it before any renewal charge."""
     sub = db.query(BusinessSubscription).filter_by(business_id=record.business_id).with_for_update().one()
-    plan_code = PLAN_CONFIG[sub.plan].get('paystack_annual_plan_code' if sub.billing_interval == 'annual' else 'paystack_monthly_plan_code')
-    if not plan_code or not sub.paystack_authorization_code or not sub.paystack_customer_code or sub.cancel_at_period_end:
-        meta['recurring_setup'] = 'not_configured'
-        record.transaction_metadata = json.dumps(meta); db.commit()
+    retire_provider_subscription(db, sub, reason="a new payment was confirmed")
+    if sub.pending_downgrade_paystack_subscription_code:
+        retire_provider_subscription(db, sub, "pending_downgrade_paystack_subscription_code", "a new payment was confirmed")
+    db.commit()
+    if sub.cancel_at_period_end or not sub.paystack_authorization_code:
         return 'not_configured'
-    if sub.paystack_subscription_code and record.purpose != 'subscription_upgrade':
-        return 'complete'
-    meta['recurring_setup'] = 'requires_action'
-    record.transaction_metadata = json.dumps(meta); db.commit()
-    try:
-        if sub.paystack_subscription_code:
-            old = paystack_fetch_subscription(sub.paystack_subscription_code)
-            if not old.get('email_token'):
-                return 'requires_action'
-            paystack_disable_subscription(sub.paystack_subscription_code, old['email_token'])
-        created = paystack_create_subscription(sub.paystack_customer_code, plan_code,
-            sub.paystack_authorization_code, start_date=sub.current_period_end)
-        if not created.get('subscription_code'):
-            return 'requires_action'
-        sub.paystack_subscription_code = created['subscription_code']
-        sub.paystack_plan_code = plan_code
-        meta['recurring_setup'] = 'complete'
-        record.transaction_metadata = json.dumps(meta); db.commit()
-        return 'complete'
-    except Exception:
-        # No provider payload, token, authorization or raw error is logged.
-        return 'requires_action'
+    return 'complete'
 
 
 @app.post('/subscription/payment-method/init')
@@ -16340,26 +17127,12 @@ def reconcile_payment_method(db, record, tx):
         return {'status': 'requires_action'}
     if sub.pending_downgrade_plan or sub.plan != record.plan or sub.billing_interval != record.billing_interval:
         return {'status': 'requires_action'}
-    old_code = sub.paystack_subscription_code
-    new_code = None
-    if old_code and not sub.cancel_at_period_end:
-        meta['method_schedule'] = 'requires_action'
-        record.transaction_metadata = json.dumps(meta); db.commit()
-        try:
-            old = paystack_fetch_subscription(old_code)
-            if not old.get('email_token') or not sub.paystack_plan_code or not sub.current_period_end:
-                return {'status': 'requires_action'}
-            paystack_disable_subscription(old_code, old['email_token'])
-            created = paystack_create_subscription((tx.get('customer') or {}).get('customer_code'),
-                sub.paystack_plan_code, auth['authorization_code'], start_date=sub.current_period_end)
-            new_code = created.get('subscription_code')
-            if not new_code:
-                return {'status': 'requires_action'}
-        except Exception:
-            return {'status': 'requires_action'}
+    # SUB-LIFECYCLE-001: the renewal engine charges whichever reusable
+    # authorization is saved, so replacing the card needs no new Paystack
+    # subscription; a legacy one on the old card is disabled (or disabled by
+    # the engine before it charges).
+    retire_provider_subscription(db, sub, reason="payment method replaced")
     safe_payment_method(sub, tx)
-    if new_code:
-        sub.paystack_subscription_code = new_code
     record.paystack_transaction_id = str(tx['id'])
     record.status = 'success'; record.paid_at = datetime.utcnow()
     meta['method_schedule'] = 'complete'
@@ -16720,6 +17493,20 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
                 result = reconcile_upgrade_payment(db, record, tx)
                 if result['status'] == 'pending':
                     raise HTTPException(status_code=503, detail='Payment verification is pending.')
+        elif record and record.purpose == "subscription_renewal":
+            # SUB-LIFECYCLE-001: a charge Cauldra's renewal engine made. Same
+            # authority as the engine and Check status: verify, then apply once.
+            record = db.query(PaymentRecord).filter_by(id=record.id).with_for_update().one()
+            if record.status not in ("success", "duplicate_payment_review"):
+                try:
+                    verified_transaction = paystack_verify_transaction(reference)
+                except Exception:
+                    db.rollback()
+                    raise HTTPException(status_code=502, detail="Payment verification is temporarily unavailable.")
+                result = reconcile_renewal_payment(db, record, verified_transaction, now)
+                if result["status"] == "pending":
+                    db.rollback()
+                    raise HTTPException(status_code=502, detail="Payment verification is still pending.")
         elif record and record.status != "success" and record.purpose == "subscription":
             # First-time subscribe, initiated by our own /subscription/checkout.
             # Lock the same PaymentRecord used by the authenticated callback so
@@ -16784,9 +17571,16 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
                 expected_amount_kobo = plan_amount_naira(plan, interval) * 100
                 paid_amount_kobo = int(data.get("amount") or 0)
                 paid_currency = (data.get("currency") or "").upper()
+                sub = lock_subscription(db, sub.business_id)
+                charged_at = min(parse_provider_time(data.get("paid_at") or data.get("paidAt")) or now, now)
+                # A charge that falls well inside a period already paid for
+                # renews THAT period (so it is a duplicate), not the next one.
+                anchor = renewal_anchor(sub)
+                if sub.current_period_start and anchor and sub.paid_at and charged_at < anchor - PROVIDER_SCHEDULE_DRIFT:
+                    anchor = sub.current_period_start
                 new_record = PaymentRecord(business_id=business.id, subscription_id=sub.id, plan=plan, billing_interval=interval,
                                             amount_kobo=paid_amount_kobo, currency=paid_currency or "NGN", paystack_reference=reference,
-                                            purpose="subscription_renewal",
+                                            purpose="subscription_renewal", renewal_period_end=anchor, attempt_source="provider",
                                             transaction_metadata=json.dumps({"source": "paystack_recurring_webhook", "event": event_type}))
                 if paid_amount_kobo != expected_amount_kobo or paid_currency != "NGN" or data.get("status") != "success":
                     # Section 17: never silently activate on an unexpected amount —
@@ -16797,12 +17591,29 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
                     db.add(new_record)
                     add_audit(db, None, "SUBSCRIPTION_PAYMENT_AMOUNT_MISMATCH", f"Recurring charge for reference {reference} did not match the expected amount for {PLAN_CONFIG[plan]['label']} ({interval}) (expected {expected_amount_kobo} kobo, got {paid_amount_kobo} {paid_currency}). Not activated — flagged for review.", business_id=business.id)
                     db.flush()
+                elif duplicate_success_for(db, new_record) is not None or (
+                        anchor and sub.current_period_end and sub.current_period_end > anchor and sub.status == "active"):
+                    # SUB-LIFECYCLE-001: this period was already paid (Pay Now
+                    # or Cauldra's engine). Kept for refund review, not credit.
+                    db.add(new_record)
+                    db.flush()
+                    other = duplicate_success_for(db, new_record)
+                    flag_duplicate_payment(db, new_record, other.paystack_reference if other else sub.latest_transaction_reference, data, now)
                 else:
                     new_record.status = "success"; new_record.paid_at = now
                     db.add(new_record)
+                    was_paused = subscription_access_state(sub, now)[1] is not None
+                    # Paystack charges its subscriptions on the payment date:
+                    # an on-time renewal continues from the previous paid-through
+                    # time, however late the webhook arrives.
+                    start = renewal_period_start(anchor, charged_at, bool(anchor and charged_at <= anchor + timedelta(days=1)))
+                    if anchor and start > anchor:
+                        sub.paused_from, sub.resumed_at = anchor, start
                     sub.status = "active"; sub.payment_status = "paid"; sub.paid_at = now
-                    sub.current_period_start = now; sub.current_period_end = add_billing_interval(now, interval)
+                    sub.current_period_start = start; sub.current_period_end = add_billing_interval(start, interval)
                     sub.next_billing_at = sub.current_period_end
+                    if was_paused:
+                        add_audit(db, None, "SUBSCRIPTION_RESTORED", f"Paystack renewal {reference} confirmed; access restored.", business_id=business.id)
                     sub.latest_transaction_reference = reference
                     sub.grace_period_ends_at = None
                     # Any charge landing successfully here (renewal or a

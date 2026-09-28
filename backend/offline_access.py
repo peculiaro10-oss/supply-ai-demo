@@ -531,6 +531,11 @@ def install(g):
         captured = op.captured_at.replace(tzinfo=None)
         if captured < device.issued_at - timedelta(seconds=60) or captured > device.expires_at or captured > _utcnow() + timedelta(minutes=5):
             failure("AUTH_EXPIRED", "The operation was captured outside its authorized period.", 403)
+        paused_reason = g["offline_capture_paused_reason"](db, user.business_id, captured)
+        if paused_reason:
+            # SUB-LIFECYCLE-001: captured while the subscription was paused.
+            # Refused and kept on the device for review, never applied.
+            failure("SUBSCRIPTION_PAUSED", paused_reason, 409)
         payload = dict(op.payload)
         ref = str(op.op_id)
         payload["client_ref"] = ref

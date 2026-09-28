@@ -155,11 +155,11 @@ class SubscriptionLifecycleTests(unittest.TestCase):
         biz, admin, _ = self.paid_business(-DAY)
         self.client.get('/products/', headers=self.auth(admin))
         sub = self.stored(biz)
-        sub.current_period_end -= 3 * DAY; self.db.commit()
+        sub.current_period_end = datetime.utcnow() - 73 * HOUR; self.db.commit()
         for _ in range(3):
             self.assertEqual(self.client.get('/products/', headers=self.auth(admin)).status_code, 402)
         self.assertEqual(self.stored(biz).status, 'expired')
-        self.assertEqual(len([n for n in self.notices(biz) if n.type == 'SUBSCRIPTION_EXPIRED']), 1)
+        self.assertEqual(len([n for n in self.notices(biz) if n.type == 'SUBSCRIPTION_REMINDER_WINDOW_END']), 1)
         actions = [a.action for a in self.db.query(main.AuditLog).filter_by(business_id=biz.id)]
         self.assertIn('SUBSCRIPTION_PAUSED', actions)
         self.assertIn('SUBSCRIPTION_RENEWAL_WINDOW_ENDED', actions)
@@ -340,12 +340,12 @@ class SubscriptionLifecycleTests(unittest.TestCase):
     def _stage_after(self, remaining):
         biz, _, _ = self.paid_business(remaining)
         now = datetime.utcnow()
-        main.check_subscription_countdown_notifications(self.db, biz, now=now)
+        main.record_subscription_reminders(self.db, biz, self.stored(biz), now)
         self.db.commit()
-        return biz, [n.stage for n in self.notices(biz, 'SUBSCRIPTION_EXPIRY_')]
+        return biz, [n.stage for n in self.notices(biz, 'SUBSCRIPTION_REMINDER_')]
 
     def test_19_to_23_each_stage_fires_at_its_exact_offset(self):
-        cases = [(7 * DAY - timedelta(minutes=1), '7'), (3 * DAY - timedelta(minutes=1), '3'),
+        cases = [(7 * DAY - timedelta(minutes=1), '7d'), (3 * DAY - timedelta(minutes=1), '3d'),
                  (24 * HOUR - timedelta(minutes=1), '24h'), (6 * HOUR - timedelta(minutes=1), '6h'),
                  (HOUR - timedelta(minutes=1), '1h')]
         for remaining, stage in cases:
@@ -357,8 +357,8 @@ class SubscriptionLifecycleTests(unittest.TestCase):
     def test_25_a_sweep_running_twice_never_sends_a_stage_twice(self):
         biz, _, _ = self.paid_business(5 * HOUR)
         for _ in range(3):
-            main.check_subscription_countdown_notifications(self.db, biz); self.db.commit()
-        rows = self.notices(biz, 'SUBSCRIPTION_EXPIRY_')
+            main.record_subscription_reminders(self.db, biz, self.stored(biz), datetime.utcnow()); self.db.commit()
+        rows = self.notices(biz, 'SUBSCRIPTION_REMINDER_')
         self.assertEqual([n.stage for n in rows], ['6h'])
         self.assertEqual(rows[0].recipient_user_id, self.db.query(main.User).filter_by(business_id=biz.id, role='admin').one().id,
                          'billing reminders go to the Admin only')
@@ -368,7 +368,7 @@ class SubscriptionLifecycleTests(unittest.TestCase):
         sub = main.get_or_create_subscription(self.db, biz, commit=False)
         main.refresh_subscription_status(self.db, sub)
         main.refresh_subscription_status(self.db, sub)
-        paused = [n for n in self.notices(biz) if n.type == 'SUBSCRIPTION_PAYMENT_FAILED']
+        paused = [n for n in self.notices(biz) if n.type == 'SUBSCRIPTION_REMINDER_PAUSED']
         self.assertEqual(len(paused), 1)
         self.assertEqual(paused[0].title, 'Subscription paused')
         self.assertIn('data is safe', paused[0].message)
@@ -378,9 +378,9 @@ class SubscriptionLifecycleTests(unittest.TestCase):
         self.assertEqual(main.to_utc_iso(end), '2026-10-01T23:30:00Z')
         biz, _, _ = self.paid_business(2 * DAY)
         sub = self.stored(biz)
-        main.check_subscription_countdown_notifications(self.db, biz, now=sub.current_period_end - 23 * HOUR)
+        main.record_subscription_reminders(self.db, biz, sub, sub.current_period_end - 23 * HOUR)
         self.db.commit()
-        self.assertEqual([n.stage for n in self.notices(biz, 'SUBSCRIPTION_EXPIRY_')], ['24h'],
+        self.assertEqual([n.stage for n in self.notices(biz, 'SUBSCRIPTION_REMINDER_')], ['24h'],
                          'stage chosen by the exact timestamp, not the calendar date')
 
 
