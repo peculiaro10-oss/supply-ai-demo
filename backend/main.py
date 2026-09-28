@@ -15177,6 +15177,7 @@ def retire_provider_subscription(db: Session, sub: "BusinessSubscription", attr:
     code = getattr(sub, attr)
     if not code:
         return True
+    disabled_now = False
     try:
         fetched = paystack_fetch_subscription(code)
         provider_status = str(fetched.get("status") or "").lower()
@@ -15185,13 +15186,16 @@ def retire_provider_subscription(db: Session, sub: "BusinessSubscription", attr:
             if not token:
                 return False
             paystack_disable_subscription(code, token)
+            disabled_now = True
     except Exception:
         return False
     setattr(sub, attr, None)
     if attr == "paystack_subscription_code":
         sub.paystack_plan_code = None
+    what = ("The Paystack recurring subscription was disabled" if disabled_now
+            else "The Paystack recurring subscription was already inactive at Paystack and is no longer linked")
     add_audit(db, None, "SUBSCRIPTION_PROVIDER_SCHEDULE_RETIRED",
-              "The Paystack recurring subscription was disabled; Cauldra's renewal engine charges the saved card at the paid-through time instead"
+              what + "; Cauldra's renewal engine charges the saved card at the paid-through time instead"
               + (f" ({reason})." if reason else "."), business_id=sub.business_id)
     return True
 

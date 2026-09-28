@@ -386,6 +386,14 @@ class RenewalEngineTests(unittest.TestCase):
         biz, anchor, _, _ = self.business(anchor_offset=10 * DAY, legacy_code='SUB_legacy3')
         self.assertEqual(self.run_engine(biz, datetime.utcnow()), 'retired')
         self.assertEqual(self.ps.disabled, ['SUB_legacy3'])
+        # One already cancelled at Paystack is only unlinked, and the audit says so.
+        biz2, _, _, _ = self.business(anchor_offset=10 * DAY, legacy_code='SUB_legacy6')
+        self.ps.subscriptions['SUB_legacy6']['status'] = 'cancelled'
+        self.assertEqual(self.run_engine(biz2, datetime.utcnow()), 'retired')
+        self.assertEqual(self.ps.disabled, ['SUB_legacy3'])
+        self.assertIsNone(self.sub(biz2).paystack_subscription_code)
+        log = self.db.query(main.AuditLog).filter_by(business_id=biz2.id, action='SUBSCRIPTION_PROVIDER_SCHEDULE_RETIRED').one()
+        self.assertIn('already inactive at Paystack', log.description)
 
     def test_pay_now_after_a_failed_renewal_disables_the_old_paystack_subscription(self):
         biz, anchor, admins, _ = self.business(anchor_offset=-2 * HOUR, legacy_code='SUB_legacy4')
