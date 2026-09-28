@@ -22,6 +22,8 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r re
 
 COPY backend ./backend
 COPY frontend ./frontend
+# Launch-language catalogue: subscription emails are sent in the reader's language.
+COPY i18n ./i18n
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY scripts ./scripts

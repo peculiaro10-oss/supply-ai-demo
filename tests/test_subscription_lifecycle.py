@@ -346,7 +346,7 @@ class SubscriptionLifecycleTests(unittest.TestCase):
 
     def test_19_to_23_each_stage_fires_at_its_exact_offset(self):
         cases = [(7 * DAY - timedelta(minutes=1), '7d'), (3 * DAY - timedelta(minutes=1), '3d'),
-                 (24 * HOUR - timedelta(minutes=1), '24h'), (6 * HOUR - timedelta(minutes=1), '6h'),
+                 (24 * HOUR - timedelta(minutes=1), '24h'), (5 * HOUR - timedelta(minutes=1), '5h'),
                  (HOUR - timedelta(minutes=1), '1h')]
         for remaining, stage in cases:
             _, stages = self._stage_after(remaining)
@@ -359,7 +359,7 @@ class SubscriptionLifecycleTests(unittest.TestCase):
         for _ in range(3):
             main.record_subscription_reminders(self.db, biz, self.stored(biz), datetime.utcnow()); self.db.commit()
         rows = self.notices(biz, 'SUBSCRIPTION_REMINDER_')
-        self.assertEqual([n.stage for n in rows], ['6h'])
+        self.assertEqual([n.stage for n in rows], ['5h'])
         self.assertEqual(rows[0].recipient_user_id, self.db.query(main.User).filter_by(business_id=biz.id, role='admin').one().id,
                          'billing reminders go to the Admin only')
 

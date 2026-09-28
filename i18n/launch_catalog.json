@@ -12562,5 +12562,323 @@
   "Tu suscripción de Cauldra sigue en pausa. Los datos de tu empresa están seguros y un administrador puede renovar en cualquier momento desde Suscripción y facturación.",
   "لا يزال اشتراكك في Cauldra متوقفًا مؤقتًا. بيانات نشاطك التجاري آمنة، ويمكن للمسؤول التجديد في أي وقت من الاشتراك والفوترة.",
   "Sua assinatura do Cauldra continua pausada. Os dados da sua empresa estão seguros, e um administrador pode renovar a qualquer momento em Assinatura e cobrança."
+ ],
+ "Subscription renews soon": [
+  "L’abonnement se renouvelle bientôt",
+  "La suscripción se renueva pronto",
+  "سيتم تجديد الاشتراك قريبًا",
+  "A assinatura será renovada em breve"
+ ],
+ "Automatic renewal failed": [
+  "Échec du renouvellement automatique",
+  "Falló la renovación automática",
+  "فشل التجديد التلقائي",
+  "A renovação automática falhou"
+ ],
+ "Automatic renewal attempt failed": [
+  "Échec d’une tentative de renouvellement automatique",
+  "Falló un intento de renovación automática",
+  "فشلت محاولة التجديد التلقائي",
+  "Uma tentativa de renovação automática falhou"
+ ],
+ "Subscription renewed": [
+  "Abonnement renouvelé",
+  "Suscripción renovada",
+  "تم تجديد الاشتراك",
+  "Assinatura renovada"
+ ],
+ "Subscription restored": [
+  "Abonnement rétabli",
+  "Suscripción restablecida",
+  "تمت استعادة الاشتراك",
+  "Assinatura restabelecida"
+ ],
+ "Subscription update": [
+  "Mise à jour de l’abonnement",
+  "Actualización de la suscripción",
+  "تحديث الاشتراك",
+  "Atualização da assinatura"
+ ],
+ "Your business data is safe.": [
+  "Les données de votre entreprise sont en sécurité.",
+  "Los datos de tu empresa están seguros.",
+  "بيانات نشاطك التجاري آمنة.",
+  "Os dados da sua empresa estão seguros."
+ ],
+ "Your business data is always kept.": [
+  "Les données de votre entreprise sont toujours conservées.",
+  "Los datos de tu empresa siempre se conservan.",
+  "تُحفظ بيانات نشاطك التجاري دائمًا.",
+  "Os dados da sua empresa são sempre mantidos."
+ ],
+ "Your Cauldra subscription is paid through {when}.": [
+  "Votre abonnement Cauldra est payé jusqu’au {when}.",
+  "Tu suscripción de Cauldra está pagada hasta el {when}.",
+  "اشتراكك في Cauldra مدفوع حتى {when}.",
+  "Sua assinatura do Cauldra está paga até {when}."
+ ],
+ "Cauldra will charge your saved card automatically at that time.": [
+  "Cauldra débitera automatiquement votre carte enregistrée à ce moment-là.",
+  "Cauldra cobrará automáticamente tu tarjeta guardada en ese momento.",
+  "سيخصم Cauldra تلقائيًا من بطاقتك المحفوظة في ذلك الوقت.",
+  "O Cauldra cobrará automaticamente o seu cartão salvo nesse momento."
+ ],
+ "Cauldra will charge your saved card for your plan automatically at that time.": [
+  "Cauldra débitera automatiquement votre carte enregistrée pour votre forfait à ce moment-là.",
+  "Cauldra cobrará automáticamente tu plan en tu tarjeta guardada en ese momento.",
+  "سيخصم Cauldra قيمة خطتك تلقائيًا من بطاقتك المحفوظة في ذلك الوقت.",
+  "O Cauldra cobrará automaticamente o seu plano no cartão salvo nesse momento."
+ ],
+ "Please make sure the card can be charged.": [
+  "Veuillez vous assurer que la carte peut être débitée.",
+  "Asegúrate de que se pueda cobrar la tarjeta.",
+  "يُرجى التأكد من إمكانية الخصم من البطاقة.",
+  "Verifique se o cartão pode ser cobrado."
+ ],
+ "Your Cauldra trial ends on {when}.": [
+  "Votre essai Cauldra se termine le {when}.",
+  "Tu prueba de Cauldra termina el {when}.",
+  "تنتهي فترتك التجريبية في Cauldra في {when}.",
+  "Seu teste do Cauldra termina em {when}."
+ ],
+ "Your Cauldra subscription was cancelled and ends on {when}.": [
+  "Votre abonnement Cauldra a été annulé et se termine le {when}.",
+  "Tu suscripción de Cauldra se canceló y termina el {when}.",
+  "تم إلغاء اشتراكك في Cauldra وينتهي في {when}.",
+  "Sua assinatura do Cauldra foi cancelada e termina em {when}."
+ ],
+ "It will not renew.": [
+  "Il ne sera pas renouvelé.",
+  "No se renovará.",
+  "لن يتم تجديده.",
+  "Ela não será renovada."
+ ],
+ "Choose a plan in Subscription & Billing to keep using Cauldra without a pause.": [
+  "Choisissez un forfait dans Abonnement et facturation pour continuer à utiliser Cauldra sans interruption.",
+  "Elige un plan en Suscripción y facturación para seguir usando Cauldra sin pausa.",
+  "اختر خطة من الاشتراك والفوترة لمواصلة استخدام Cauldra دون توقف.",
+  "Escolha um plano em Assinatura e faturamento para continuar usando o Cauldra sem pausa."
+ ],
+ "There is no saved card for automatic renewal.": [
+  "Aucune carte n’est enregistrée pour le renouvellement automatique.",
+  "No hay ninguna tarjeta guardada para la renovación automática.",
+  "لا توجد بطاقة محفوظة للتجديد التلقائي.",
+  "Não há cartão salvo para a renovação automática."
+ ],
+ "An Admin can add one in Subscription & Billing before then; otherwise Cauldra pauses at that time until an Admin renews.": [
+  "Un administrateur peut en ajouter une dans Abonnement et facturation d’ici là ; sinon, Cauldra est suspendu à ce moment-là jusqu’à ce qu’un administrateur renouvelle.",
+  "Un administrador puede añadir una en Suscripción y facturación antes de esa fecha; si no, Cauldra se pausa en ese momento hasta que un administrador renueve.",
+  "يمكن للمسؤول إضافة بطاقة من الاشتراك والفوترة قبل ذلك؛ وإلا يتوقف Cauldra مؤقتًا في ذلك الوقت حتى يجدّد المسؤول.",
+  "Um administrador pode adicionar um em Assinatura e faturamento antes disso; caso contrário, o Cauldra fica pausado nesse momento até que um administrador renove."
+ ],
+ "Your Cauldra trial ended on {when}.": [
+  "Votre essai Cauldra s’est terminé le {when}.",
+  "Tu prueba de Cauldra terminó el {when}.",
+  "انتهت فترتك التجريبية في Cauldra في {when}.",
+  "Seu teste do Cauldra terminou em {when}."
+ ],
+ "Cauldra is charging your saved card for your plan and unlocks as soon as the payment is confirmed.": [
+  "Cauldra débite votre carte enregistrée pour votre forfait et se débloque dès que le paiement est confirmé.",
+  "Cauldra está cobrando tu tarjeta guardada por tu plan y se desbloquea en cuanto se confirme el pago.",
+  "يقوم Cauldra بالخصم من بطاقتك المحفوظة مقابل خطتك، ويُفتح فور تأكيد الدفع.",
+  "O Cauldra está cobrando seu cartão salvo pelo seu plano e é desbloqueado assim que o pagamento for confirmado."
+ ],
+ "Choose a plan in Subscription & Billing to continue.": [
+  "Choisissez un forfait dans Abonnement et facturation pour continuer.",
+  "Elige un plan en Suscripción y facturación para continuar.",
+  "اختر خطة من الاشتراك والفوترة للمتابعة.",
+  "Escolha um plano em Assinatura e faturamento para continuar."
+ ],
+ "Your Cauldra subscription is paused because the renewal payment was not confirmed by {when}.": [
+  "Votre abonnement Cauldra est suspendu car le paiement du renouvellement n’a pas été confirmé avant le {when}.",
+  "Tu suscripción de Cauldra está en pausa porque el pago de la renovación no se confirmó antes del {when}.",
+  "اشتراكك في Cauldra متوقف مؤقتًا لأن دفعة التجديد لم تُؤكَّد بحلول {when}.",
+  "Sua assinatura do Cauldra está pausada porque o pagamento da renovação não foi confirmado até {when}."
+ ],
+ "Cauldra will retry your saved card automatically until {end}; an Admin can also renew now from Subscription & Billing.": [
+  "Cauldra réessaiera automatiquement votre carte enregistrée jusqu’au {end} ; un administrateur peut aussi renouveler dès maintenant depuis Abonnement et facturation.",
+  "Cauldra volverá a intentar con tu tarjeta guardada automáticamente hasta el {end}; un administrador también puede renovar ahora desde Suscripción y facturación.",
+  "سيعيد Cauldra محاولة الخصم من بطاقتك المحفوظة تلقائيًا حتى {end}، ويمكن للمسؤول أيضًا التجديد الآن من الاشتراك والفوترة.",
+  "O Cauldra tentará novamente seu cartão salvo automaticamente até {end}; um administrador também pode renovar agora em Assinatura e faturamento."
+ ],
+ "An Admin can renew from Subscription & Billing at any time.": [
+  "Un administrateur peut renouveler à tout moment depuis Abonnement et facturation.",
+  "Un administrador puede renovar en cualquier momento desde Suscripción y facturación.",
+  "يمكن للمسؤول التجديد في أي وقت من الاشتراك والفوترة.",
+  "Um administrador pode renovar a qualquer momento em Assinatura e faturamento."
+ ],
+ "Your Cauldra subscription is still paused.": [
+  "Votre abonnement Cauldra est toujours suspendu.",
+  "Tu suscripción de Cauldra sigue en pausa.",
+  "لا يزال اشتراكك في Cauldra متوقفًا مؤقتًا.",
+  "Sua assinatura do Cauldra continua pausada."
+ ],
+ "An Admin can renew from Subscription & Billing.": [
+  "Un administrateur peut renouveler depuis Abonnement et facturation.",
+  "Un administrador puede renovar desde Suscripción y facturación.",
+  "يمكن للمسؤول التجديد من الاشتراك والفوترة.",
+  "Um administrador pode renovar em Assinatura e faturamento."
+ ],
+ "Automatic attempts continue until {end}.": [
+  "Les tentatives automatiques continuent jusqu’au {end}.",
+  "Los intentos automáticos continúan hasta el {end}.",
+  "تستمر المحاولات التلقائية حتى {end}.",
+  "As tentativas automáticas continuam até {end}."
+ ],
+ "Cauldra has stopped trying your saved card automatically.": [
+  "Cauldra a cessé de tenter automatiquement de débiter votre carte enregistrée.",
+  "Cauldra dejó de intentar cobrar tu tarjeta guardada automáticamente.",
+  "توقف Cauldra عن محاولة الخصم من بطاقتك المحفوظة تلقائيًا.",
+  "O Cauldra parou de tentar cobrar seu cartão salvo automaticamente."
+ ],
+ "Your business data is safe, and an Admin can renew from Subscription & Billing at any time.": [
+  "Les données de votre entreprise sont en sécurité, et un administrateur peut renouveler à tout moment depuis Abonnement et facturation.",
+  "Los datos de tu empresa están seguros, y un administrador puede renovar en cualquier momento desde Suscripción y facturación.",
+  "بيانات نشاطك التجاري آمنة، ويمكن للمسؤول التجديد في أي وقت من الاشتراك والفوترة.",
+  "Os dados da sua empresa estão seguros, e um administrador pode renovar a qualquer momento em Assinatura e faturamento."
+ ],
+ "Cauldra could not renew your subscription automatically at {when}.": [
+  "Cauldra n’a pas pu renouveler automatiquement votre abonnement le {when}.",
+  "Cauldra no pudo renovar tu suscripción automáticamente el {when}.",
+  "تعذّر على Cauldra تجديد اشتراكك تلقائيًا في {when}.",
+  "O Cauldra não conseguiu renovar sua assinatura automaticamente em {when}."
+ ],
+ "The card issuer reported insufficient funds.": [
+  "L’émetteur de la carte a signalé des fonds insuffisants.",
+  "El emisor de la tarjeta informó fondos insuficientes.",
+  "أفاد مُصدر البطاقة بعدم كفاية الرصيد.",
+  "O emissor do cartão informou saldo insuficiente."
+ ],
+ "The card issuer declined the payment.": [
+  "L’émetteur de la carte a refusé le paiement.",
+  "El emisor de la tarjeta rechazó el pago.",
+  "رفض مُصدر البطاقة عملية الدفع.",
+  "O emissor do cartão recusou o pagamento."
+ ],
+ "The saved card has expired.": [
+  "La carte enregistrée a expiré.",
+  "La tarjeta guardada ha vencido.",
+  "انتهت صلاحية البطاقة المحفوظة.",
+  "O cartão salvo expirou."
+ ],
+ "The bank asked the cardholder to approve the payment, which cannot happen automatically.": [
+  "La banque a demandé au titulaire de la carte d’approuver le paiement, ce qui ne peut pas se faire automatiquement.",
+  "El banco pidió al titular de la tarjeta que aprobara el pago, lo que no puede hacerse automáticamente.",
+  "طلب البنك من حامل البطاقة الموافقة على الدفع، وهذا لا يمكن أن يتم تلقائيًا.",
+  "O banco pediu ao titular do cartão que aprovasse o pagamento, o que não pode acontecer automaticamente."
+ ],
+ "Cauldra stays paused until a renewal payment is confirmed.": [
+  "Cauldra reste suspendu jusqu’à ce qu’un paiement de renouvellement soit confirmé.",
+  "Cauldra permanece en pausa hasta que se confirme un pago de renovación.",
+  "يبقى Cauldra متوقفًا مؤقتًا حتى يتم تأكيد دفعة تجديد.",
+  "O Cauldra permanece pausado até que um pagamento de renovação seja confirmado."
+ ],
+ "Cauldra will try your saved card again every 12 hours until {end}.": [
+  "Cauldra réessaiera votre carte enregistrée toutes les 12 heures jusqu’au {end}.",
+  "Cauldra volverá a intentar con tu tarjeta guardada cada 12 horas hasta el {end}.",
+  "سيعيد Cauldra المحاولة باستخدام بطاقتك المحفوظة كل 12 ساعة حتى {end}.",
+  "O Cauldra tentará novamente seu cartão salvo a cada 12 horas até {end}."
+ ],
+ "Automatic attempts have now ended.": [
+  "Les tentatives automatiques sont désormais terminées.",
+  "Los intentos automáticos ya terminaron.",
+  "انتهت المحاولات التلقائية الآن.",
+  "As tentativas automáticas terminaram."
+ ],
+ "An Admin can renew now with Pay Now, or change the card, in Subscription & Billing.": [
+  "Un administrateur peut renouveler maintenant avec Payer maintenant, ou changer de carte, dans Abonnement et facturation.",
+  "Un administrador puede renovar ahora con Pagar ahora, o cambiar la tarjeta, en Suscripción y facturación.",
+  "يمكن للمسؤول التجديد الآن باستخدام «ادفع الآن» أو تغيير البطاقة من الاشتراك والفوترة.",
+  "Um administrador pode renovar agora com Pagar agora, ou trocar o cartão, em Assinatura e faturamento."
+ ],
+ "Automatic renewal attempt {attempt} of {total} did not go through.": [
+  "La tentative de renouvellement automatique {attempt} sur {total} n’a pas abouti.",
+  "El intento de renovación automática {attempt} de {total} no se completó.",
+  "لم تنجح محاولة التجديد التلقائي {attempt} من {total}.",
+  "A tentativa de renovação automática {attempt} de {total} não foi concluída."
+ ],
+ "Cauldra will try again at {next}.": [
+  "Cauldra réessaiera le {next}.",
+  "Cauldra volverá a intentarlo el {next}.",
+  "سيعيد Cauldra المحاولة في {next}.",
+  "O Cauldra tentará novamente em {next}."
+ ],
+ "An Admin can renew now with Pay Now in Subscription & Billing.": [
+  "Un administrateur peut renouveler maintenant avec Payer maintenant dans Abonnement et facturation.",
+  "Un administrador puede renovar ahora con Pagar ahora en Suscripción y facturación.",
+  "يمكن للمسؤول التجديد الآن باستخدام «ادفع الآن» من الاشتراك والفوترة.",
+  "Um administrador pode renovar agora com Pagar agora em Assinatura e faturamento."
+ ],
+ "Your Cauldra subscription was renewed.": [
+  "Votre abonnement Cauldra a été renouvelé.",
+  "Tu suscripción de Cauldra se renovó.",
+  "تم تجديد اشتراكك في Cauldra.",
+  "Sua assinatura do Cauldra foi renovada."
+ ],
+ "Paystack confirmed the payment of {amount} on {confirmed}.": [
+  "Paystack a confirmé le paiement de {amount} le {confirmed}.",
+  "Paystack confirmó el pago de {amount} el {confirmed}.",
+  "أكّدت Paystack دفع {amount} في {confirmed}.",
+  "A Paystack confirmou o pagamento de {amount} em {confirmed}."
+ ],
+ "Your subscription is now paid through {end}.": [
+  "Votre abonnement est désormais payé jusqu’au {end}.",
+  "Tu suscripción ahora está pagada hasta el {end}.",
+  "اشتراكك مدفوع الآن حتى {end}.",
+  "Sua assinatura agora está paga até {end}."
+ ],
+ "Your Cauldra subscription was renewed successfully.": [
+  "Votre abonnement Cauldra a été renouvelé avec succès.",
+  "Tu suscripción de Cauldra se renovó correctamente.",
+  "تم تجديد اشتراكك في Cauldra بنجاح.",
+  "Sua assinatura do Cauldra foi renovada com sucesso."
+ ],
+ "Your renewal payment was confirmed and Cauldra is unlocked again.": [
+  "Votre paiement de renouvellement a été confirmé et Cauldra est de nouveau débloqué.",
+  "Tu pago de renovación se confirmó y Cauldra está desbloqueado de nuevo.",
+  "تم تأكيد دفعة التجديد وأصبح Cauldra مفتوحًا من جديد.",
+  "Seu pagamento de renovação foi confirmado e o Cauldra está desbloqueado novamente."
+ ],
+ "Open Subscription & Billing in Cauldra to see your subscription.": [
+  "Ouvrez Abonnement et facturation dans Cauldra pour voir votre abonnement.",
+  "Abre Suscripción y facturación en Cauldra para ver tu suscripción.",
+  "افتح الاشتراك والفوترة في Cauldra لعرض اشتراكك.",
+  "Abra Assinatura e faturamento no Cauldra para ver sua assinatura."
+ ],
+ "Hello,": [
+  "Bonjour,",
+  "Hola:",
+  "مرحبًا،",
+  "Olá,"
+ ],
+ "This is an automatic account notice for {business} on Cauldra.": [
+  "Ceci est un avis de compte automatique pour {business} sur Cauldra.",
+  "Este es un aviso automático de la cuenta de {business} en Cauldra.",
+  "هذا إشعار تلقائي بخصوص حساب {business} على Cauldra.",
+  "Este é um aviso automático da conta de {business} no Cauldra."
+ ],
+ "You are receiving it because you are an Admin of this business. No reply is needed.": [
+  "Vous le recevez parce que vous êtes administrateur de cette entreprise. Aucune réponse n’est nécessaire.",
+  "Lo recibes porque eres administrador de esta empresa. No es necesario responder.",
+  "تتلقى هذا الإشعار لأنك مسؤول في هذا النشاط التجاري. لا حاجة إلى الرد.",
+  "Você está recebendo este aviso porque é administrador desta empresa. Não é necessário responder."
+ ],
+ "Your subscription is paid through {time}. Cauldra will charge your saved card automatically at that time; please make sure it can be charged. Your data stays safe.": [
+  "Votre abonnement est payé jusqu’au {time}. Cauldra débitera automatiquement votre carte enregistrée à ce moment-là ; veuillez vous assurer qu’elle peut être débitée. Vos données restent en sécurité.",
+  "Tu suscripción está pagada hasta el {time}. Cauldra cobrará automáticamente tu tarjeta guardada en ese momento; asegúrate de que se pueda cobrar. Tus datos siguen seguros.",
+  "اشتراكك مدفوع حتى {time}. سيخصم Cauldra تلقائيًا من بطاقتك المحفوظة في ذلك الوقت؛ يُرجى التأكد من إمكانية الخصم منها. تبقى بياناتك آمنة.",
+  "Sua assinatura está paga até {time}. O Cauldra cobrará automaticamente seu cartão salvo nesse momento; verifique se ele pode ser cobrado. Seus dados continuam seguros."
+ ],
+ "Available after this period ends": [
+  "Disponible à la fin de cette période",
+  "Disponible cuando termine este período",
+  "متاح بعد انتهاء هذه الفترة",
+  "Disponível quando este período terminar"
+ ],
+ "Your subscription is already paid through {when}. Pay Now becomes available at that time if the renewal has not gone through.": [
+  "Votre abonnement est déjà payé jusqu’au {when}. Payer maintenant sera disponible à ce moment-là si le renouvellement n’a pas abouti.",
+  "Tu suscripción ya está pagada hasta el {when}. Pagar ahora estará disponible en ese momento si la renovación no se completa.",
+  "اشتراكك مدفوع بالفعل حتى {when}. سيتوفر «ادفع الآن» في ذلك الوقت إذا لم يكتمل التجديد.",
+  "Sua assinatura já está paga até {when}. Pagar agora ficará disponível nesse momento se a renovação não for concluída."
  ]
 }

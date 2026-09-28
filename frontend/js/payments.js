@@ -161,6 +161,12 @@ window.CauldraPayments = (() => {
                 // SUB-LIFECYCLE-001: one renewal attempt at a time. Another
                 // attempt is being confirmed (or is already paid): say so and
                 // offer Check status, never a second payment.
+                // Owner policy (pre-freeze): no payment for the next period while
+                // the current one is paid; the server says until when.
+                if (data.detail?.code === 'RENEWAL_NOT_DUE') {
+                    status('error', data.detail.message || 'Your subscription is already paid. Pay Now becomes available when the paid period ends.');
+                    return;
+                }
                 if (['RENEWAL_IN_PROGRESS', 'ALREADY_PAID'].includes(data.detail?.code) && data.detail?.reference) {
                     status('pending', data.detail.code === 'ALREADY_PAID'
                         ? 'This renewal was already paid. Check its status to refresh your subscription.'

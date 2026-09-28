@@ -457,10 +457,13 @@ class RenewalEngineTests(unittest.TestCase):
         self.db.expire_all()
         return self.db.query(main.SubscriptionReminderDelivery).filter_by(business_id=biz.id, channel=channel).all()
 
-    def test_every_stage_in_app_and_email_once(self):
+    def test_every_stage_in_app_once_and_only_the_policy_stages_by_email(self):
+        # Owner policy (pre-freeze): 24 h and 5 h before by email; 7d/3d/1h in-app
+        # only; a business with a saved card is not emailed at the pause (its
+        # first failed charge is), and gets the end-of-window email.
         biz, anchor, _, _ = self.business(anchor_offset=8 * DAY)
         sub = self.sub(biz); anchor = sub.current_period_end
-        offsets = [(-7 * DAY, '7d'), (-3 * DAY, '3d'), (-24 * HOUR, '24h'), (-6 * HOUR, '6h'), (-HOUR, '1h')]
+        offsets = [(-7 * DAY, '7d'), (-3 * DAY, '3d'), (-24 * HOUR, '24h'), (-5 * HOUR, '5h'), (-HOUR, '1h')]
         for before, stage in offsets:
             for _ in range(2):                    # the sweep runs twice
                 self.lifecycle(biz, anchor + before + MIN)
@@ -469,11 +472,12 @@ class RenewalEngineTests(unittest.TestCase):
             for _ in range(2):
                 self.lifecycle(biz, anchor + after)
         self.lifecycle(biz, anchor + 48 * HOUR)    # no stage between +24h and +72h
-        stages = ['7d', '3d', '24h', '6h', '1h', 'paused', 'paused_24h', 'window_end']
+        stages = ['7d', '3d', '24h', '5h', '1h', 'paused', 'paused_24h', 'window_end']
+        emailed = ['24h', '5h', 'window_end']
         self.assertEqual([r.stage for r in self.reminders(biz, 'in_app')], stages)
-        self.assertEqual([r.stage for r in self.reminders(biz, 'email')], stages)
-        self.assertEqual(len(self.emails), len(stages), 'one email per stage and address')
-        self.assertEqual(len({e['idempotency_key'] for e in self.emails}), len(stages))
+        self.assertEqual([r.stage for r in self.reminders(biz, 'email')], emailed)
+        self.assertEqual(len(self.emails), len(emailed), 'one email per emailed stage and address')
+        self.assertEqual(len({e['idempotency_key'] for e in self.emails}), len(emailed))
         types = [n.type for n in self.db.query(main.Notification).filter_by(business_id=biz.id).filter(main.Notification.type.like('SUBSCRIPTION_REMINDER_%'))]
         self.assertEqual(len(types), len(stages))
 
@@ -483,17 +487,17 @@ class RenewalEngineTests(unittest.TestCase):
         self.assertEqual((self.reminders(biz, 'email'), self.emails), ([], []))
 
     def test_recipients_are_admins_deduplicated_never_staff_business_email_fallback(self):
-        biz, anchor, admins, staff = self.business(anchor_offset=30 * MIN, admin_emails=['Boss@Example.com', 'boss@example.com', 'second@example.com', 'not-an-email'])
+        biz, anchor, admins, staff = self.business(anchor_offset=4 * HOUR, admin_emails=['Boss@Example.com', 'boss@example.com', 'second@example.com', 'not-an-email'])
         self.lifecycle(biz, datetime.utcnow())
         self.assertEqual(sorted(e['to_email'] for e in self.emails), ['boss@example.com', 'second@example.com'])
         self.assertNotIn(staff.email, [e['to_email'] for e in self.emails])
-        biz2, _, _, _ = self.business(anchor_offset=30 * MIN, admin_emails=[''])
+        biz2, _, _, _ = self.business(anchor_offset=4 * HOUR, admin_emails=[''])
         self.emails.clear()
         self.lifecycle(biz2, datetime.utcnow())
         self.assertEqual([e['to_email'] for e in self.emails], [biz2.email.casefold()])
 
     def test_email_failure_keeps_in_app_and_retries_with_the_same_key_once(self):
-        biz, anchor, _, _ = self.business(anchor_offset=30 * MIN)
+        biz, anchor, _, _ = self.business(anchor_offset=4 * HOUR)
         self.email_failures = 1
         self.lifecycle(biz, datetime.utcnow())
         self.assertEqual(len(self.reminders(biz, 'in_app')), 1, 'in-app reminder stands on its own')
@@ -506,7 +510,7 @@ class RenewalEngineTests(unittest.TestCase):
         self.assertEqual(len(self.emails), 1)
 
     def test_email_mode_off_suppresses_email_but_not_in_app(self):
-        biz, anchor, _, _ = self.business(anchor_offset=30 * MIN)
+        biz, anchor, _, _ = self.business(anchor_offset=4 * HOUR)
         with patch.dict(os.environ, {'SUBSCRIPTION_REMINDER_EMAIL_MODE': 'off'}):
             self.lifecycle(biz, datetime.utcnow())
         self.assertEqual(self.emails, [])
@@ -514,7 +518,7 @@ class RenewalEngineTests(unittest.TestCase):
         self.assertEqual(len(self.reminders(biz, 'in_app')), 1)
 
     def test_email_allowlist_mode_only_emails_allowed_addresses(self):
-        biz, anchor, _, _ = self.business(anchor_offset=30 * MIN, admin_emails=['qa@owner-test.example', 'customer@elsewhere.example'])
+        biz, anchor, _, _ = self.business(anchor_offset=4 * HOUR, admin_emails=['qa@owner-test.example', 'customer@elsewhere.example'])
         with patch.dict(os.environ, {'SUBSCRIPTION_REMINDER_EMAIL_MODE': 'allowlist', 'SUBSCRIPTION_REMINDER_EMAIL_ALLOWLIST': '@owner-test.example'}):
             self.lifecycle(biz, datetime.utcnow())
         self.assertEqual([e['to_email'] for e in self.emails], ['qa@owner-test.example'])

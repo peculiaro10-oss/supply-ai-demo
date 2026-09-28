@@ -2974,6 +2974,9 @@ def usage_summary(db: Session, business: BusinessProfile) -> dict:
             # A renewal charge or checkout that Paystack has not yet confirmed:
             # Billing shows "Renewal being confirmed", never "failed".
             "renewal_in_progress": bool(open_renewal_attempts(db, business.id)),
+            # Owner policy (pre-freeze): no manual payment for the next period
+            # while the current paid period is still active.
+            "pay_now_available": early_renewal_refusal(sub, business, datetime.utcnow()) is None,
             "auto_renewal": ({"next_attempt_at": to_utc_iso(schedule["next_attempt_at"]), "ends_at": to_utc_iso(schedule["ends_at"]),
                               "exhausted": schedule["exhausted"]} if (schedule := (auto_renewal_schedule(sub, datetime.utcnow()) if auto_renewal_possible(sub) else None)) else None),
             # A scheduled downgrade never changes `plan`/`billing_interval` above —
@@ -6156,6 +6159,39 @@ def subscription_lifecycle_pass(db: Session, business: "BusinessProfile", now: O
             db.rollback()
 
 NOTIFICATION_SWEEP_INTERVAL_SECONDS = int(os.getenv("SUPPLY_AI_NOTIFICATION_SWEEP_SECONDS", str(5 * 60)))
+# Owner policy (pre-freeze): the first automatic renewal attempt starts at the
+# exact paid-through time. Between full sweeps the loop wakes at the next
+# paid-through / trial-end instant (checked at least once a minute) and runs the
+# lifecycle pass only for the businesses whose boundary has just passed.
+LIFECYCLE_BOUNDARY_CHECK_SECONDS = 60
+
+
+def next_lifecycle_boundary(db: Session, now: datetime) -> Optional[datetime]:
+    """The soonest paid-through or trial-end instant still ahead."""
+    paid = db.query(func.min(BusinessSubscription.current_period_end)).filter(
+        BusinessSubscription.status == "active", BusinessSubscription.current_period_end > now).scalar()
+    trial = db.query(func.min(BusinessSubscription.trial_end_at)).filter(
+        BusinessSubscription.status == "trialing", BusinessSubscription.trial_end_at > now).scalar()
+    upcoming = [v for v in (paid, trial) if v is not None]
+    return min(upcoming) if upcoming else None
+
+
+def businesses_at_lifecycle_boundary(db: Session, since: datetime, now: datetime) -> list:
+    """Businesses whose paid-through (still active) or trial end (still
+    trialing) fell in (since, now] — the ones due for their first attempt."""
+    ids = [bid for (bid,) in db.query(BusinessSubscription.business_id).filter(or_(
+        and_(BusinessSubscription.status == "active", BusinessSubscription.current_period_end > since,
+             BusinessSubscription.current_period_end <= now),
+        and_(BusinessSubscription.status == "trialing", BusinessSubscription.trial_end_at > since,
+             BusinessSubscription.trial_end_at <= now)))]
+    return db.query(BusinessProfile).filter(BusinessProfile.id.in_(ids)).order_by(BusinessProfile.id).all() if ids else []
+
+
+def lifecycle_sleep_seconds(boundary: Optional[datetime], now: datetime, until_full_sweep: float) -> float:
+    wait = min(until_full_sweep, LIFECYCLE_BOUNDARY_CHECK_SECONDS)
+    if boundary is not None:
+        wait = min(wait, (boundary - now).total_seconds() + 0.5)
+    return max(0.5, wait)
 
 async def notification_sweep_loop():
     """Periodic background sweep for the one notification category that is
@@ -6169,19 +6205,36 @@ async def notification_sweep_loop():
     loop) can only ever produce redundant no-op work, never a duplicate
     notification. Deliberately has no external scheduler dependency (no
     APScheduler/Celery/cron) — a single asyncio task the app owns."""
+    last_full = time.monotonic()
+    since = datetime.utcnow()
     while True:
         try:
-            await asyncio.sleep(NOTIFICATION_SWEEP_INTERVAL_SECONDS)
             db = SessionLocal()
             try:
-                for business in db.query(BusinessProfile).all():
-                    subscription_lifecycle_pass(db, business)
+                boundary = next_lifecycle_boundary(db, datetime.utcnow())
             finally:
                 db.close()
-            # OPS-ACCURACY-001: System Health reads when the sweep last completed.
-            record_ops_signal("ops_sweep_last_run_at", datetime.utcnow().isoformat())
+            await asyncio.sleep(lifecycle_sleep_seconds(boundary, datetime.utcnow(),
+                                                        NOTIFICATION_SWEEP_INTERVAL_SECONDS - (time.monotonic() - last_full)))
+            now = datetime.utcnow()
+            full = time.monotonic() - last_full >= NOTIFICATION_SWEEP_INTERVAL_SECONDS
+            db = SessionLocal()
+            try:
+                if full:
+                    for business in db.query(BusinessProfile).all():
+                        subscription_lifecycle_pass(db, business)
+                else:
+                    for business in businesses_at_lifecycle_boundary(db, since, now):
+                        subscription_lifecycle_pass(db, business, now)
+            finally:
+                db.close()
+            since = now
+            if full:
+                last_full = time.monotonic()
+                # OPS-ACCURACY-001: System Health reads when the sweep last completed.
+                record_ops_signal("ops_sweep_last_run_at", datetime.utcnow().isoformat())
         except Exception:
-            pass  # a sweep-loop error must never kill the background task permanently
+            await asyncio.sleep(5)  # a sweep-loop error must never kill the background task permanently
 
 @app.on_event("startup")
 async def _start_notification_sweep():
@@ -7323,10 +7376,12 @@ def log_email_delivery_failure(purpose: str, category: str, **fields) -> None:
     record_ops_signal("ops_email_last_failure_at", datetime.utcnow().isoformat())
     record_ops_signal("ops_email_last_failure_category", category)
 
-def send_resend_email(*, purpose: str, to_email: str, subject: str, html: str, idempotency_key: Optional[str] = None) -> None:
+def send_resend_email(*, purpose: str, to_email: str, subject: str, html: str, idempotency_key: Optional[str] = None,
+                      text: Optional[str] = None, headers: Optional[dict] = None) -> None:
     """idempotency_key (OFFLINE-EXTERNAL-001): Resend answers a repeat with the
     same key (within 24 hours) without sending a second email, so a queued
-    send retried after a lost response is never delivered twice."""
+    send retried after a lost response is never delivered twice. text is the
+    plain-text part; headers are extra email headers (not HTTP headers)."""
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     if not api_key:
         log_email_delivery_failure(purpose, "configuration_error", setting="RESEND_API_KEY")
@@ -7340,7 +7395,8 @@ def send_resend_email(*, purpose: str, to_email: str, subject: str, html: str, i
             "https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
                      **({"Idempotency-Key": idempotency_key} if idempotency_key else {})},
-            json={"from": RESEND_FROM, "to": [to_email], "subject": subject, "html": html},
+            json={"from": RESEND_FROM, "to": [to_email], "subject": subject, "html": html,
+                  **({"text": text} if text else {}), **({"headers": headers} if headers else {})},
             timeout=15,
         )
     except requests.exceptions.RequestException as exc:
@@ -15008,12 +15064,17 @@ def reconcile_first_subscription_payment(
         return flag_duplicate_payment(db, record, other.paystack_reference, verified_transaction, now)
     record.paystack_transaction_id = str(verified_transaction.get("id") or "") or None
     record.status = "success"
-    record.paid_at = now
+    # Owner policy (pre-freeze): a late renewal starts when Paystack confirmed
+    # the payment, not when Cauldra happened to check it.
+    confirmed_at = provider_confirmed_at(verified_transaction, now)
+    record.paid_at = confirmed_at
     anchor = record.renewal_period_end
     same_plan = (sub.plan or "").strip().lower() == record.plan and (sub.billing_interval or "").strip().lower() == record.billing_interval
-    # An early renewal of the same plan continues from the paid-through time; a
-    # renewal after a genuine pause (or a plan switch) starts now.
-    start = anchor if (anchor is not None and sub.paid_at and same_plan and now < anchor) else now
+    renewal = anchor is not None and sub.paid_at is not None
+    # A payment confirmed before the paid-through time (a checkout begun while
+    # paused for a trial, or an older attempt) continues from it; a renewal
+    # after a genuine pause (or a plan switch) starts at confirmation.
+    start = anchor if (anchor is not None and sub.paid_at and same_plan and confirmed_at < anchor) else confirmed_at
     was_paused = sub.paid_at is not None and subscription_access_state(sub, now)[1] is not None
     if anchor is not None and sub.paid_at and start > anchor:
         sub.paused_from, sub.resumed_at = anchor, start
@@ -15021,10 +15082,12 @@ def reconcile_first_subscription_payment(
     sub.billing_interval = record.billing_interval
     sub.status = "active"
     sub.payment_status = "paid"
-    sub.paid_at = now
+    sub.paid_at = confirmed_at
     sub.current_period_start = start
     sub.current_period_end = add_billing_interval(start, record.billing_interval)
     sub.next_billing_at = sub.current_period_end
+    metadata.update({"period_start": to_utc_iso(start), "period_end": to_utc_iso(sub.current_period_end)})
+    record.transaction_metadata = json.dumps(metadata, sort_keys=True)
     safe_payment_method(sub, verified_transaction)
     sub.latest_transaction_reference = record.paystack_reference
     sub.cancel_at_period_end = False
@@ -15044,6 +15107,8 @@ def reconcile_first_subscription_payment(
                   business_id=business.id)
     resolve_notifications(db, f"sub_expired:{business.id}", business.id)
     resolve_notifications(db, f"payment_failed:{business.id}", business.id)
+    if renewal:
+        queue_renewal_confirmation(db, sub, record, now)
     db.flush()
     return {"status": "success", "already_processed": False}
 
@@ -15255,25 +15320,28 @@ def apply_renewal_success(db: Session, sub: "BusinessSubscription", record: "Pay
         # The period already moved past this boundary through another payment.
         return flag_duplicate_payment(db, record, sub.latest_transaction_reference, transaction, now)
     was_paused = subscription_access_state(sub, now)[1] is not None
-    confirmed_at = parse_provider_time(transaction.get("paid_at") or transaction.get("paidAt")) or now
-    confirmed_at = min(confirmed_at, now)
+    # Owner policy (pre-freeze, SUB-RENEW-TS-001): the time Paystack confirmed
+    # the payment — not the time this pass started — is the payment time and,
+    # for a late renewal, the start of the new period.
+    confirmed_at = provider_confirmed_at(transaction, now)
     start = renewal_period_start(anchor, confirmed_at, on_time)
     plan, interval = record.plan, record.billing_interval
     meta = parse_paystack_metadata(record.transaction_metadata)
     meta.update({"paystack_transaction_id": str(transaction.get("id") or ""),
                  "server_verified_at": now.replace(microsecond=0).isoformat() + "Z",
-                 "period_start": start.replace(microsecond=0).isoformat() + "Z"})
+                 "period_start": start.replace(microsecond=0).isoformat() + "Z",
+                 "period_end": to_utc_iso(add_billing_interval(start, record.billing_interval or "monthly"))})
     record.transaction_metadata = json.dumps(meta, sort_keys=True)
     record.paystack_transaction_id = str(transaction.get("id") or "") or None
     record.status = "success"
-    record.paid_at = now
+    record.paid_at = confirmed_at
     applying_downgrade = bool(sub.pending_downgrade_plan) and plan == sub.pending_downgrade_plan
     old_plan = (sub.plan or "starter").strip().lower()
     sub.plan = plan
     sub.billing_interval = interval
     sub.status = "active"
     sub.payment_status = "paid"
-    sub.paid_at = now
+    sub.paid_at = confirmed_at
     sub.current_period_start = start
     sub.current_period_end = add_billing_interval(start, interval)
     sub.next_billing_at = sub.current_period_end
@@ -15306,6 +15374,7 @@ def apply_renewal_success(db: Session, sub: "BusinessSubscription", record: "Pay
         else "Your renewal payment was confirmed and Cauldra is unlocked again.",
         deep_link="subscription", dedup_key=f"sub_renewed:{sub.business_id}:{record.paystack_reference}",
     )
+    queue_renewal_confirmation(db, sub, record, now)
     db.flush()
     return {"status": "success", "already_processed": False}
 
@@ -15335,6 +15404,9 @@ def reconcile_renewal_payment(db: Session, record: "PaymentRecord", transaction:
             record.status = "failed"
             meta = parse_paystack_metadata(record.transaction_metadata)
             meta["verification_provider_status"] = provider_status
+            reason = renewal_failure_reason(transaction.get("gateway_response"))
+            if reason:
+                meta["failure_reason"] = reason
             record.transaction_metadata = json.dumps(meta, sort_keys=True)
             db.flush()
             return {"status": "failed", "already_processed": False}
@@ -15460,7 +15532,7 @@ def charge_saved_authorization(db: Session, sub: "BusinessSubscription", busines
     except PaystackRequestError as exc:
         record = db.query(PaymentRecord).filter_by(id=record.id).one()
         record.status = "failed" if exc.definitive else "pending"
-        _renewal_attempt_outcome(db, record, anchor, slot, "provider_rejected" if exc.definitive else "provider_unreachable")
+        _renewal_attempt_outcome(db, record, anchor, slot, "provider_rejected" if exc.definitive else "provider_unreachable", now)
         db.commit()
         return record
     record = db.query(PaymentRecord).filter_by(id=record.id).one()
@@ -15468,7 +15540,8 @@ def charge_saved_authorization(db: Session, sub: "BusinessSubscription", busines
         # The bank asked the customer to authorise this charge; nobody is there
         # to do it. Treated as a failed automatic attempt; Pay Now still works.
         record.status = "failed"
-        _renewal_attempt_outcome(db, record, anchor, slot, "authorization_required")
+        _set_failure_reason(record, "authorization_required")
+        _renewal_attempt_outcome(db, record, anchor, slot, "authorization_required", now)
         db.commit()
         return record
     status = str(data.get("status") or "").lower()
@@ -15481,19 +15554,30 @@ def charge_saved_authorization(db: Session, sub: "BusinessSubscription", busines
             return record
         result = reconcile_renewal_payment(db, record, verified, now)
         if result["status"] != "success":
-            _renewal_attempt_outcome(db, record, anchor, slot, result["status"])
+            _renewal_attempt_outcome(db, record, anchor, slot, result["status"], now)
         db.commit()
         return record
     if status in PAYSTACK_FAILED_STATUSES:
         record.status = "failed"
-        _renewal_attempt_outcome(db, record, anchor, slot, "declined")
+        _set_failure_reason(record, renewal_failure_reason(data.get("gateway_response")))
+        _renewal_attempt_outcome(db, record, anchor, slot, "declined", now)
     else:
         record.status = "pending"
     db.commit()
     return record
 
 
-def _renewal_attempt_outcome(db: Session, record: "PaymentRecord", anchor: datetime, slot: int, reason: str) -> None:
+def _set_failure_reason(record: "PaymentRecord", reason: Optional[str]) -> None:
+    if reason:
+        meta = parse_paystack_metadata(record.transaction_metadata)
+        meta["failure_reason"] = reason
+        record.transaction_metadata = json.dumps(meta, sort_keys=True)
+
+
+def _renewal_attempt_outcome(db: Session, record: "PaymentRecord", anchor: datetime, slot: int, reason: str,
+                             now: Optional[datetime] = None) -> None:
+    if record.status == "failed":
+        record_renewal_attempt_failure(db, record, now or datetime.utcnow())
     sub = db.query(BusinessSubscription).filter_by(business_id=record.business_id).first()
     if sub is not None and record.status == "failed":
         sub.payment_status = "failed"
@@ -15539,6 +15623,8 @@ def run_subscription_renewal(db: Session, business: "BusinessProfile", now: Opti
             db.commit()
             return "waiting"
         outcome = settle_open_attempt(db, row, now)
+        if row.status == "failed" and row.attempt_source == "auto":
+            record_renewal_attempt_failure(db, row, now)
         db.commit()
         if outcome in ("pending", "unknown"):
             return "pending"
@@ -15593,7 +15679,7 @@ def run_subscription_renewal(db: Session, business: "BusinessProfile", now: Opti
 # SUB-LIFECYCLE-001 — subscription reminders (in-app + email), durable log
 # -----------------------------------------------------------------------------
 SUBSCRIPTION_REMINDER_PRE_STAGES = (
-    ("1h", timedelta(hours=1)), ("6h", timedelta(hours=6)), ("24h", timedelta(hours=24)),
+    ("1h", timedelta(hours=1)), ("5h", timedelta(hours=5)), ("24h", timedelta(hours=24)),
     ("3d", timedelta(days=3)), ("7d", timedelta(days=7)),
 )
 # After the pause: at once, about a day later, and at the end of the automatic
@@ -15606,6 +15692,26 @@ SUBSCRIPTION_REMINDER_POST_LATE_LIMIT = timedelta(hours=24)
 REMINDER_EMAIL_MAX_ATTEMPTS = 5
 REMINDER_EMAIL_RETRY_FOR = timedelta(hours=20)  # inside Resend's 24-hour idempotency window
 _EMAIL_SHAPE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Owner policy (pre-freeze, 2026-09-28) — subscription email volume:
+#   * before the paid-through time only the 24-hour and 5-hour notices are
+#     emailed; 7 days, 3 days and 1 hour stay in-app only;
+#   * at the pause an email goes only when no automatic renewal is possible
+#     (the expiry notice); a business with a saved card is emailed only if its
+#     first automatic charge fails ("renewal_failed");
+#   * later 12-hour retry failures are in-app only ("retry_<slot>");
+#   * the end of the 3-day window after automatic attempts: one final email;
+#   * a confirmed renewal: one confirmation email ("renewed").
+SUBSCRIPTION_EMAIL_PRE_STAGES = frozenset({"24h", "5h"})
+
+
+def subscription_stage_emails(stage: str, sub: "BusinessSubscription") -> bool:
+    if stage in SUBSCRIPTION_EMAIL_PRE_STAGES or stage in ("renewal_failed", "renewed"):
+        return True
+    if stage == "paused":
+        return not auto_renewal_possible(sub)
+    if stage == "window_end":
+        return auto_renewal_possible(sub)
+    return False
 
 
 def subscription_reminder_email_mode() -> str:
@@ -15653,44 +15759,186 @@ def due_subscription_reminder(sub: Optional["BusinessSubscription"], now: dateti
     return None
 
 
-def _format_reminder_time(business: "BusinessProfile", when: datetime) -> str:
+# --- Launch languages for subscription messages -------------------------------
+# Every sentence below is an English template that is also a key of the
+# reviewed launch catalogue (i18n/launch_catalog.json: {English: [fr, es, ar,
+# pt]}), so the app translates a stored in-app message sentence by sentence and
+# the email is written in the reader's language.
+SUBSCRIPTION_EMAIL_LANGUAGES = ("en", "fr", "es", "ar", "pt")
+_CATALOG_LANGUAGE_INDEX = {"fr": 0, "es": 1, "ar": 2, "pt": 3}
+_LAUNCH_CATALOG: Optional[dict] = None
+
+
+def launch_catalog() -> dict:
+    global _LAUNCH_CATALOG
+    if _LAUNCH_CATALOG is None:
+        try:
+            path = Path(__file__).resolve().parent.parent / "i18n" / "launch_catalog.json"
+            _LAUNCH_CATALOG = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            _LAUNCH_CATALOG = {}
+    return _LAUNCH_CATALOG
+
+
+def catalog_text(template: str, lang: str) -> str:
+    """The reviewed translation of one English template; the English itself
+    when the language is English or the entry is missing."""
+    index = _CATALOG_LANGUAGE_INDEX.get(lang)
+    if index is None:
+        return template
+    row = launch_catalog().get(template)
+    return row[index] if isinstance(row, list) and len(row) > index and row[index] else template
+
+
+def _format_reminder_time(business: "BusinessProfile", when: datetime, lang: str = "en") -> str:
     zone = business_local_zoneinfo(business)
     local = when.replace(tzinfo=timezone.utc).astimezone(zone)
-    return local.strftime("%d %b %Y, %H:%M") + f" ({getattr(zone, 'key', 'UTC')})"
+    label = getattr(zone, 'key', 'UTC')
+    if lang == "en":
+        return local.strftime("%d %b %Y, %H:%M") + f" ({label})"
+    return local.strftime("%d/%m/%Y %H:%M") + f" ({label})"
 
 
-def subscription_reminder_text(sub: "BusinessSubscription", business: "BusinessProfile", stage: str, anchor: datetime) -> tuple:
-    """(title, message) — plain language, no card data."""
-    when = _format_reminder_time(business, anchor)
+# Only Paystack failure reasons that are safe and useful to repeat to the
+# customer; anything else is left out rather than guessed.
+RENEWAL_FAILURE_SENTENCES = {
+    "insufficient_funds": "The card issuer reported insufficient funds.",
+    "declined": "The card issuer declined the payment.",
+    "expired_card": "The saved card has expired.",
+    "authorization_required": "The bank asked the cardholder to approve the payment, which cannot happen automatically.",
+}
+
+
+def renewal_failure_reason(gateway_response) -> Optional[str]:
+    text = str(gateway_response or "").strip().lower()
+    if not text:
+        return None
+    if "insufficient" in text:
+        return "insufficient_funds"
+    if "expired" in text:
+        return "expired_card"
+    if re.search(r"declin|do not hono|not permitted|restricted", text):
+        return "declined"
+    return None
+
+
+def _renewal_records(db: Optional[Session], business_id: int, anchor: datetime, **filters) -> list:
+    if db is None:
+        return []
+    return (db.query(PaymentRecord)
+            .filter(PaymentRecord.business_id == business_id, PaymentRecord.renewal_period_end >= anchor,
+                    PaymentRecord.renewal_period_end < anchor + timedelta(seconds=1))
+            .filter_by(**filters).order_by(PaymentRecord.id).all())
+
+
+def subscription_reminder_parts(sub: "BusinessSubscription", business: "BusinessProfile", stage: str, anchor: datetime,
+                                db: Optional[Session] = None) -> tuple:
+    """(title, [(sentence template, params)]) — plain language, no card data.
+    Datetime params are written in the business timezone when rendered."""
     trial = not sub.paid_at
-    thing = "trial" if trial else "subscription"
     renewing = auto_renewal_possible(sub)
+    window_end = anchor + RENEWAL_RETRY_WINDOW
+    safe = ("Your business data is safe.", {})
+    kept = ("Your business data is always kept.", {})
     if stage in dict(SUBSCRIPTION_REMINDER_PRE_STAGES):
+        when = {"when": anchor}
+        if sub.cancel_at_period_end:
+            return ("Subscription ending soon", [("Your Cauldra subscription was cancelled and ends on {when}.", when),
+                                                 ("It will not renew.", {}), kept])
+        if renewing and trial:
+            return ("Subscription renews soon", [("Your Cauldra trial ends on {when}.", when),
+                                                 ("Cauldra will charge your saved card for your plan automatically at that time.", {}),
+                                                 ("Please make sure the card can be charged.", {}), kept])
         if renewing:
-            follow = "Your saved card will be charged then. If the payment can't be confirmed, Cauldra pauses until it is."
-        else:
-            follow = "Renew or choose a plan in Subscription & Billing to keep using Cauldra without a pause."
-        return ("Subscription ending soon",
-                f"Your Cauldra {thing} ends on {when}. {follow} Your business data is always kept.")
-    window_end = _format_reminder_time(business, anchor + RENEWAL_RETRY_WINDOW)
-    if stage == "paused":
-        if trial and renewing:
-            return ("Trial ended", f"Your Cauldra trial ended on {when}. Cauldra is charging your saved card for your plan and unlocks as soon as the payment is confirmed. Your business data is safe.")
+            return ("Subscription renews soon", [("Your Cauldra subscription is paid through {when}.", when),
+                                                 ("Cauldra will charge your saved card automatically at that time.", {}),
+                                                 ("Please make sure the card can be charged.", {}), kept])
         if trial:
-            return ("Trial ended", f"Your Cauldra trial ended on {when}. Your business data is safe. Choose a plan in Subscription & Billing to continue.")
-        follow = (f"Cauldra will retry your saved card automatically until {window_end}; an Admin can also renew now from Subscription & Billing."
-                  if renewing else "An Admin can renew from Subscription & Billing at any time.")
-        return ("Subscription paused",
-                f"Your Cauldra subscription is paused because the renewal payment was not confirmed by {when}. Your business data is safe. {follow}")
+            return ("Subscription ending soon", [("Your Cauldra trial ends on {when}.", when),
+                                                 ("Choose a plan in Subscription & Billing to keep using Cauldra without a pause.", {}), kept])
+        return ("Subscription ending soon", [("Your Cauldra subscription is paid through {when}.", when),
+                                             ("There is no saved card for automatic renewal.", {}),
+                                             ("An Admin can add one in Subscription & Billing before then; otherwise Cauldra pauses at that time until an Admin renews.", {}),
+                                             kept])
+    if stage == "paused":
+        when = {"when": anchor}
+        if trial and renewing:
+            return ("Trial ended", [("Your Cauldra trial ended on {when}.", when),
+                                    ("Cauldra is charging your saved card for your plan and unlocks as soon as the payment is confirmed.", {}), safe])
+        if trial:
+            return ("Trial ended", [("Your Cauldra trial ended on {when}.", when), safe,
+                                    ("Choose a plan in Subscription & Billing to continue.", {})])
+        follow = (("Cauldra will retry your saved card automatically until {end}; an Admin can also renew now from Subscription & Billing.", {"end": window_end})
+                  if renewing else ("An Admin can renew from Subscription & Billing at any time.", {}))
+        return ("Subscription paused", [("Your Cauldra subscription is paused because the renewal payment was not confirmed by {when}.", when),
+                                        safe, follow])
     if stage == "paused_24h":
-        follow = (f"Automatic attempts continue until {window_end}." if renewing else "")
-        return ("Subscription still paused",
-                f"Your Cauldra subscription is still paused. Your business data is safe. An Admin can renew from Subscription & Billing. {follow}".strip())
-    if renewing:
-        return ("Automatic renewal attempts have ended",
-                "Cauldra has stopped trying your saved card automatically. Your business data is safe, and an Admin can renew from Subscription & Billing at any time.")
-    return ("Subscription still paused",
-            "Your Cauldra subscription is still paused. Your business data is safe, and an Admin can renew from Subscription & Billing at any time.")
+        parts = [("Your Cauldra subscription is still paused.", {}), safe, ("An Admin can renew from Subscription & Billing.", {})]
+        if renewing:
+            parts.append(("Automatic attempts continue until {end}.", {"end": window_end}))
+        return ("Subscription still paused", parts)
+    if stage == "window_end":
+        if renewing:
+            return ("Automatic renewal attempts have ended", [("Cauldra has stopped trying your saved card automatically.", {}),
+                                                              ("Your business data is safe, and an Admin can renew from Subscription & Billing at any time.", {})])
+        return ("Subscription still paused", [("Your Cauldra subscription is still paused.", {}),
+                                              ("Your business data is safe, and an Admin can renew from Subscription & Billing at any time.", {})])
+    if stage == "renewal_failed":
+        failed = _renewal_records(db, business.id, anchor, attempt_source="auto", status="failed")
+        first = failed[0] if failed else None
+        reason = parse_paystack_metadata(first.transaction_metadata).get("failure_reason") if first else None
+        slot = first.renewal_attempt_slot if first and first.renewal_attempt_slot is not None else 0
+        parts = [("Cauldra could not renew your subscription automatically at {when}.", {"when": anchor + RENEWAL_RETRY_INTERVAL * slot})]
+        if reason in RENEWAL_FAILURE_SENTENCES:
+            parts.append((RENEWAL_FAILURE_SENTENCES[reason], {}))
+        parts.append(("Cauldra stays paused until a renewal payment is confirmed.", {}))
+        if slot + 1 < RENEWAL_RETRY_SLOTS:
+            parts.append(("Cauldra will try your saved card again every 12 hours until {end}.", {"end": window_end}))
+        else:
+            parts.append(("Automatic attempts have now ended.", {}))
+        parts += [("An Admin can renew now with Pay Now, or change the card, in Subscription & Billing.", {}), safe]
+        return ("Automatic renewal failed", parts)
+    if stage.startswith("retry_") and stage[6:].isdigit():
+        slot = int(stage[6:])
+        return ("Automatic renewal attempt failed", [
+            ("Automatic renewal attempt {attempt} of {total} did not go through.", {"attempt": slot + 1, "total": RENEWAL_RETRY_SLOTS}),
+            ("Cauldra will try again at {next}.", {"next": anchor + RENEWAL_RETRY_INTERVAL * (slot + 1)}),
+            ("An Admin can renew now with Pay Now in Subscription & Billing.", {}), safe])
+    if stage == "renewed":
+        paid = _renewal_records(db, business.id, anchor, status="success")
+        record = paid[0] if paid else None
+        meta = parse_paystack_metadata(record.transaction_metadata) if record else {}
+        end = parse_provider_time(meta.get("period_end")) or sub.current_period_end
+        parts = [("Your Cauldra subscription was renewed.", {})]
+        if record is not None and record.paid_at:
+            parts.append(("Paystack confirmed the payment of {amount} on {confirmed}.",
+                          {"amount": f"₦{(record.amount_kobo or 0) / 100:,.2f}", "confirmed": record.paid_at}))
+        if end:
+            parts.append(("Your subscription is now paid through {end}.", {"end": end}))
+        return ("Subscription renewed", parts)
+    return ("Subscription update", [("Open Subscription & Billing in Cauldra to see your subscription.", {})])
+
+
+def _render_sentence(template: str, params: dict, business: "BusinessProfile", lang: str) -> str:
+    def value(match):
+        name = match.group(1)
+        if name not in params:
+            return match.group(0)
+        v = params[name]
+        return _format_reminder_time(business, v, lang) if isinstance(v, datetime) else str(v)
+    return re.sub(r"\{(\w+)\}", value, catalog_text(template, lang))
+
+
+def render_subscription_parts(parts: tuple, business: "BusinessProfile", lang: str = "en") -> tuple:
+    title, sentences = parts
+    return catalog_text(title, lang), [_render_sentence(t, p, business, lang) for t, p in sentences]
+
+
+def subscription_reminder_text(sub: "BusinessSubscription", business: "BusinessProfile", stage: str, anchor: datetime,
+                               db: Optional[Session] = None, lang: str = "en") -> tuple:
+    """(title, message) — plain language, no card data."""
+    title, sentences = render_subscription_parts(subscription_reminder_parts(sub, business, stage, anchor, db), business, lang)
+    return title, " ".join(sentences)
 
 
 def auto_renewal_possible(sub: "BusinessSubscription") -> bool:
@@ -15715,6 +15963,19 @@ def subscription_reminder_email_recipients(db: Session, business: "BusinessProfi
     return out
 
 
+def subscription_email_language(db: Session, business: "BusinessProfile", address: str) -> str:
+    """The reader's language: the first active Admin with this address who
+    chose one, else the business language, else English."""
+    for (lang,) in db.query(User.preferred_language).filter(
+            User.business_id == business.id, User.disabled == False, User.role == "admin",
+            func.lower(User.email) == address.casefold()).order_by(User.id).all():
+        lang = str(lang or "").split("-")[0].lower()
+        if lang in SUBSCRIPTION_EMAIL_LANGUAGES:
+            return lang
+    lang = str(business.language or "en").split("-")[0].lower()
+    return lang if lang in SUBSCRIPTION_EMAIL_LANGUAGES else "en"
+
+
 def _claim_reminder(db: Session, business_id: int, anchor: datetime, stage: str, channel: str, recipient: str, status: str, now: Optional[datetime] = None) -> Optional["SubscriptionReminderDelivery"]:
     exists = db.query(SubscriptionReminderDelivery.id).filter_by(
         business_id=business_id, period_anchor=anchor, stage=stage, channel=channel, recipient=recipient).first()
@@ -15728,6 +15989,32 @@ def _claim_reminder(db: Session, business_id: int, anchor: datetime, stage: str,
     return row
 
 
+def record_subscription_event(db: Session, business: "BusinessProfile", sub: "BusinessSubscription", anchor: datetime,
+                              stage: str, now: datetime, *, in_app: bool = True, severity: str = "critical") -> None:
+    """One lifecycle message, at most once per business, period, stage, channel
+    and recipient (the durable log). In-app is written at once and never
+    depends on email; email rows are queued only for the stages the owner
+    policy emails, and sent by the background pass."""
+    anchor = anchor.replace(microsecond=0)
+    title, message = subscription_reminder_text(sub, business, stage, anchor, db)
+    if in_app:
+        for uid in sorted(notification_recipients(db, business.id, "subscription")):
+            if _claim_reminder(db, business.id, anchor, stage, "in_app", str(uid), "sent", now) is None:
+                continue
+            create_notification(
+                db, business_id=business.id, category="subscription", severity=severity,
+                type=f"SUBSCRIPTION_REMINDER_{stage.upper()}", title=title, message=message, recipient_user_ids={uid},
+                deep_link="subscription", dedup_key=f"sub_reminder:{business.id}:{anchor.isoformat()}:{stage}", stage=stage,
+            )
+            row = db.query(SubscriptionReminderDelivery).filter_by(business_id=business.id, period_anchor=anchor, stage=stage,
+                                                                   channel="in_app", recipient=str(uid)).one()
+            row.sent_at = now
+    if subscription_stage_emails(stage, sub):
+        for address in subscription_reminder_email_recipients(db, business):
+            _claim_reminder(db, business.id, anchor, stage, "email", address,
+                            "pending" if subscription_reminder_email_allowed(address) else "suppressed", now)
+
+
 def record_subscription_reminders(db: Session, business: "BusinessProfile", sub: "BusinessSubscription", now: datetime) -> Optional[str]:
     """Create the in-app reminder and queue the email rows for the stage due
     now. In-app is written at once and never depends on email succeeding."""
@@ -15736,22 +16023,7 @@ def record_subscription_reminders(db: Session, business: "BusinessProfile", sub:
         return None
     anchor, stage = due
     anchor = anchor.replace(microsecond=0)
-    title, message = subscription_reminder_text(sub, business, stage, anchor)
-    for uid in sorted(notification_recipients(db, business.id, "subscription")):
-        if _claim_reminder(db, business.id, anchor, stage, "in_app", str(uid), "sent", now) is None:
-            continue
-        create_notification(
-            db, business_id=business.id, category="subscription",
-            severity="important" if stage == "7d" else "critical",
-            type=f"SUBSCRIPTION_REMINDER_{stage.upper()}", title=title, message=message, recipient_user_ids={uid},
-            deep_link="subscription", dedup_key=f"sub_reminder:{business.id}:{anchor.isoformat()}:{stage}", stage=stage,
-        )
-        row = db.query(SubscriptionReminderDelivery).filter_by(business_id=business.id, period_anchor=anchor, stage=stage,
-                                                               channel="in_app", recipient=str(uid)).one()
-        row.sent_at = now
-    for address in subscription_reminder_email_recipients(db, business):
-        _claim_reminder(db, business.id, anchor, stage, "email", address,
-                        "pending" if subscription_reminder_email_allowed(address) else "suppressed", now)
+    record_subscription_event(db, business, sub, anchor, stage, now, severity="important" if stage == "7d" else "critical")
     if stage in ("paused", "window_end"):
         add_audit(db, None, "SUBSCRIPTION_REMINDER_" + stage.upper(),
                   f"Subscription reminder '{stage}' recorded for the period ending {to_utc_iso(anchor)}.", business_id=business.id)
@@ -15759,9 +16031,105 @@ def record_subscription_reminders(db: Session, business: "BusinessProfile", sub:
     return stage
 
 
-def _reminder_email_html(title: str, message: str) -> str:
-    return (f"<p><strong>{_html.escape(title)}</strong></p><p>{_html.escape(message)}</p>"
-            f"<p>Open Cauldra and go to Subscription &amp; Billing to see your plan and renew.</p>")
+def _lifecycle_message_safely(db: Session, fn) -> None:
+    """A message problem must never undo a payment outcome."""
+    try:
+        if db.get_bind().dialect.name == "postgresql":
+            with db.begin_nested():
+                fn()
+        else:
+            fn()
+    except Exception:
+        pass
+
+
+def record_renewal_attempt_failure(db: Session, record: "PaymentRecord", now: datetime) -> None:
+    """The first failed automatic charge for a period: one in-app notice and
+    one email to the billing Admins. Later 12-hour retry failures: in-app only
+    (the last attempt is followed by the end-of-window email instead)."""
+    if record.attempt_source != "auto" or record.renewal_period_end is None:
+        return
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == record.business_id).first()
+    sub = db.query(BusinessSubscription).filter_by(business_id=record.business_id).first()
+    if business is None or sub is None:
+        return
+    anchor = record.renewal_period_end.replace(microsecond=0)
+
+    def write():
+        first = db.query(SubscriptionReminderDelivery.id).filter_by(business_id=business.id, period_anchor=anchor,
+                                                                    stage="renewal_failed").first() is None
+        slot = record.renewal_attempt_slot or 0
+        if first:
+            record_subscription_event(db, business, sub, anchor, "renewal_failed", now)
+        elif slot + 1 < RENEWAL_RETRY_SLOTS:
+            record_subscription_event(db, business, sub, anchor, f"retry_{slot}", now, severity="important")
+        db.flush()
+    _lifecycle_message_safely(db, write)
+
+
+def queue_renewal_confirmation(db: Session, sub: "BusinessSubscription", record: "PaymentRecord", now: datetime) -> None:
+    """One confirmation email per confirmed renewal (the in-app "Subscription
+    renewed" notice is written by the success transition itself)."""
+    if record.renewal_period_end is None:
+        return
+    business = db.query(BusinessProfile).filter(BusinessProfile.id == sub.business_id).first()
+    if business is None:
+        return
+
+    def write():
+        record_subscription_event(db, business, sub, record.renewal_period_end, "renewed", now, in_app=False)
+        db.flush()
+    _lifecycle_message_safely(db, write)
+
+
+def early_renewal_refusal(sub: Optional["BusinessSubscription"], business: "BusinessProfile", now: datetime) -> Optional[str]:
+    """Owner policy (pre-freeze): no manual payment for the next period while
+    the current paid period is still active. Pay Now opens at the paid-through
+    time — the moment the first automatic attempt starts — and stays open while
+    paused, after a failed attempt and after the automatic window."""
+    if sub is None or not sub.paid_at or sub.status != "active" or sub.current_period_end is None:
+        return None
+    if now >= sub.current_period_end:
+        return None
+    return (f"Your subscription is already paid through {_format_reminder_time(business, sub.current_period_end)}. "
+            "Pay Now becomes available at that time if the renewal has not gone through.")
+
+
+def provider_confirmed_at(transaction: dict, now: datetime) -> datetime:
+    """When Paystack confirmed the payment (its paid_at), never later than the
+    moment Cauldra learned of it; `now` only when Paystack gives no time.
+    Whole seconds, so audit text and Billing never show microseconds."""
+    confirmed = parse_provider_time(transaction.get("paid_at") or transaction.get("paidAt"))
+    latest = max(now, datetime.utcnow())
+    return min(confirmed or now, latest).replace(microsecond=0)
+
+
+def build_subscription_email(db: Session, sub: "BusinessSubscription", business: "BusinessProfile", stage: str,
+                             anchor: datetime, lang: str) -> tuple:
+    """(subject, html, text) for one subscription notice, written as a plain
+    transactional account notice: the business named, the facts, what to do —
+    no links, buttons, images, tracking or marketing footer."""
+    title, sentences = render_subscription_parts(subscription_reminder_parts(sub, business, stage, anchor, db), business, lang)
+    company = (business.company_name or "").strip() or APP_NAME
+    greeting = catalog_text("Hello,", lang)
+    intro = _render_sentence("This is an automatic account notice for {business} on Cauldra.", {"business": company}, business, lang)
+    outro = catalog_text("You are receiving it because you are an Admin of this business. No reply is needed.", lang)
+    subject = f"{title} – {company}"
+    direction = "rtl" if lang == "ar" else "ltr"
+    align = "right" if lang == "ar" else "left"
+    esc = _html.escape
+    html = (f'<!doctype html><html lang="{lang}" dir="{direction}"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>{esc(subject)}</title></head>'
+            f'<body dir="{direction}" style="margin:0;padding:24px 16px;background:#ffffff;color:#1f2937;'
+            f'font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.55;text-align:{align}">'
+            f'<p style="margin:0 0 12px">{esc(greeting)}</p>'
+            f'<p style="margin:0 0 12px">{esc(intro)}</p>'
+            f'<p style="margin:0 0 8px"><strong>{esc(title)}</strong></p>'
+            f'<p style="margin:0 0 16px">{esc(" ".join(sentences))}</p>'
+            f'<p style="margin:0;color:#6b7280;font-size:13px">{esc(outro)}</p>'
+            f'</body></html>')
+    text = f"{greeting}\n\n{intro}\n\n{title}\n{' '.join(sentences)}\n\n{outro}\n"
+    return subject, html, text
 
 
 def send_pending_subscription_reminder_emails(db: Session, business: "BusinessProfile", now: datetime) -> int:
@@ -15777,12 +16145,16 @@ def send_pending_subscription_reminder_emails(db: Session, business: "BusinessPr
         if now - row.created_at > REMINDER_EMAIL_RETRY_FOR or row.attempts >= REMINDER_EMAIL_MAX_ATTEMPTS:
             row.status = "abandoned"
             continue
-        title, message = subscription_reminder_text(sub, business, row.stage, row.period_anchor)
+        lang = subscription_email_language(db, business, row.recipient)
+        subject, html, text = build_subscription_email(db, sub, business, row.stage, row.period_anchor, lang)
         key = "sub-reminder-" + hashlib.sha256(f"{business.id}|{row.period_anchor.isoformat()}|{row.stage}|{row.recipient}".encode()).hexdigest()[:40]
         row.attempts = (row.attempts or 0) + 1
         try:
-            send_resend_email(purpose="subscription_reminder", to_email=row.recipient, subject=f"Cauldra: {title}",
-                              html=_reminder_email_html(title, message), idempotency_key=key)
+            # X-Entity-Ref-ID keeps each notice its own message (no Gmail
+            # threading of different periods); Auto-Submitted marks it as an
+            # automatic notice (RFC 3834), which also stops auto-replies.
+            send_resend_email(purpose="subscription_reminder", to_email=row.recipient, subject=subject, html=html, text=text,
+                              idempotency_key=key, headers={"X-Entity-Ref-ID": key, "Auto-Submitted": "auto-generated"})
         except EmailDeliveryError as exc:
             row.status = "failed"
             row.last_error_category = exc.category
@@ -16948,6 +17320,15 @@ def start_checkout(data: CheckoutRequest, request: Request, user: User = Depends
     # charge) resumes the open checkout or waits for it to be confirmed.
     sub = lock_subscription(db, business.id)
     now = datetime.utcnow()
+    refusal = early_renewal_refusal(sub, business, now)
+    if refusal:
+        add_audit(db, user, "SUBSCRIPTION_EARLY_RENEWAL_REFUSED",
+                  f"Pay Now refused: the current period is paid through {to_utc_iso(sub.current_period_end)}.", business_id=business.id)
+        db.commit()
+        if claim is not None:
+            db.delete(claim); db.commit()
+        raise HTTPException(status_code=409, detail={"code": "RENEWAL_NOT_DUE", "message": refusal,
+                            "paid_through_at": to_utc_iso(sub.current_period_end)})
     try:
         resume = enforce_one_open_renewal_attempt(db, business.id, plan, interval, now)
     except RenewalAttemptInProgress as busy:

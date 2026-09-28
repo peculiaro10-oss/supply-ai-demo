@@ -2136,6 +2136,8 @@
                     pausedUnlocks: "Cauldra unlocks as soon as a renewal payment is confirmed.",
                     endingSoonTrial: "Your trial ends on {time}. If a plan isn't confirmed by then, Cauldra pauses until it is. Your data stays safe.",
                     endingSoonPaid: "Your subscription is paid through {time}. If renewal isn't confirmed by then, Cauldra pauses until it is. Your data stays safe.",
+                    endingSoonAuto: "Your subscription is paid through {time}. Cauldra will charge your saved card automatically at that time; please make sure it can be charged. Your data stays safe.",
+                    availableAfterPeriod: "Available after this period ends",
                     paidThrough: "Paid through {time}",
                     pausedPaidThroughLabel: "Paid through", pausedTrialEndedLabel: "Trial ended", statusPaused: "Paused",
                     savedTitle: "Saved subscription status",
@@ -21351,7 +21353,11 @@
                 box.classList.remove('hidden');
             } else if (['trialing', 'active'].includes(usage.status) && msLeft !== null && msLeft > 0 && msLeft <= 3 * 86400000) {
                 box.className = 'mb-2.5 rounded-xl border border-warning/40 bg-warning/10 p-3 text-[11px] text-textMain';
-                box.innerHTML = `<p class="break-words">${escapeHtml(t(usage.status === 'trialing' ? 'subscription.endingSoonTrial' : 'subscription.endingSoonPaid', { time: formatBusinessDateTime(endAt) }))}</p>`;
+                // Owner policy (pre-freeze): no early Pay Now while paid; with a
+                // saved card the renewal is charged automatically at that time.
+                const endingKey = usage.status === 'trialing' ? 'subscription.endingSoonTrial'
+                    : usage.auto_renewal ? 'subscription.endingSoonAuto' : 'subscription.endingSoonPaid';
+                box.innerHTML = `<p class="break-words">${escapeHtml(t(endingKey, { time: formatBusinessDateTime(endAt) }))}</p>`;
                 box.classList.remove('hidden');
             } else {
                 box.classList.add('hidden');
@@ -21514,11 +21520,16 @@
                     if (usage.can_start_trial) { actionLabel = "Start your 14-day free trial"; buttonText = t('subscription.actionStartTrial', {plan: label}); onclickFn = `openTrialConfirm('${id}','${billingIntervalChoice}')`; }
                     else if (usage.status === 'trialing') { actionLabel = "No charge during your trial"; buttonText = t('subscription.actionSwitchTo', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','trial_switch')`; }
                     else if (isDowngradeTarget) { actionLabel = "Takes effect at your next renewal"; buttonText = t('subscription.actionDowngradeTo', {plan: label}); onclickFn = `openDowngradeConfirm('${id}','${billingIntervalChoice}')`; }
+                    else if (usage.status === 'active' && !isUpgrade && usage.pay_now_available === false) { buttonText = null; actionLabel = t('subscription.availableAfterPeriod'); }
                     else if (usage.status === 'active') { buttonText = isUpgrade ? t('subscription.actionUpgradeTo', {plan: label}) : t('subscription.actionSwitchTo', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','${isUpgrade ? 'upgrade' : 'checkout'}')`; }
                     else if (id === currentPlan && usage.access_paused) { buttonText = t('subscription.actionRenew', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','checkout')`; }
                     else { buttonText = t('subscription.actionSubscribeTo', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','checkout')`; }
                     const btnColor = isDowngradeTarget ? "bg-textSec/80 hover:bg-textSec text-white shadow-md" : "bg-primary hover:bg-primaryHover text-white shadow-md shadow-primary/20";
-                    priceButtonHtml = priceLine + `<button type="button" onclick="${onclickFn}" class="w-full ${btnColor} py-2.5 rounded-xl font-bold text-sm transition cursor-pointer">${buttonText}</button>`;
+                    // A same-tier switch while the paid period is active would be a
+                    // payment for the next period: shown, but not offered, until it ends.
+                    priceButtonHtml = buttonText === null
+                        ? priceLine + `<button type="button" disabled data-early-renewal="blocked" class="w-full bg-bgMain text-textSec border border-borderCol py-2.5 rounded-xl font-bold text-sm cursor-not-allowed">${escapeHtml(t('subscription.availableAfterPeriod'))}</button>`
+                        : priceLine + `<button type="button" onclick="${onclickFn}" class="w-full ${btnColor} py-2.5 rounded-xl font-bold text-sm transition cursor-pointer">${buttonText}</button>`;
                 }
                 return `
                     <div class="flex flex-col rounded-xl border-2 ${isCurrent ? 'border-primary bg-primary/10' : 'border-borderCol bg-bgMain'} p-3">
@@ -31028,7 +31039,12 @@
         function notificationMessageText(n) {
             const text = String(n?.message || '');
             if (currentLanguage === DEFAULT_LANGUAGE || !/^SUBSCRIPTION_REMINDER_/.test(String(n?.type || ''))) return text;
-            const translated = catalogText(text);
+            // Messages are built from catalogued sentences: translate each one
+            // (a whole-text pattern such as "... at {when}." would otherwise
+            // swallow the sentences after it); a single sentence as a whole.
+            const sentences = text.split(/(?<=\.)\s+/);
+            let translated = sentences.length > 1 ? sentences.map(sentence => catalogText(sentence)).join(' ') : catalogText(text);
+            if (translated === text) translated = catalogText(text);
             if (translated === text) return text; // not catalogued: shown exactly as stored
             return translated.replace(REMINDER_TIME_RE, (whole, d, mon, y, h, mi, zone) => {
                 try {

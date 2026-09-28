@@ -38,10 +38,13 @@ check('banner: the paused reason and "data is kept" are separate text nodes', ()
 });
 check('every reminder sentence the server writes is catalogued for fr/es/ar/pt', () => {
     // The server's own templates, with its placeholders, must be catalogue keys.
-    const i = backend.indexOf('def subscription_reminder_text(');
+    // Messages are built from sentence templates (subscription_reminder_parts);
+    // every title and sentence template is one.
+    const i = backend.indexOf('def subscription_reminder_parts(');
     const body = backend.slice(i, backend.indexOf('\ndef ', i + 10));
-    const titles = [...body.matchAll(/return \("([^"]+)",/g)].map(m => m[1]);
-    for (const title of titles) assert.equal((catalog[title] || []).filter(Boolean).length, 4, title);
+    const templates = [...body.matchAll(/\("([^"]*\s[^"]*)"/g)].map(m => m[1]);
+    assert.ok(templates.length > 30, 'templates found');
+    for (const t of templates) assert.equal((catalog[t] || []).filter(Boolean).length, 4, t);
     for (const key of [PAUSED, KEPT, REMINDER.replace('28 Sep 2026, 15:33 (Africa/Lagos)', '{when}')]) assert.equal((catalog[key] || []).filter(Boolean).length, 4, key);
 });
 check('notification bodies: English shown exactly as stored; the stored time is reformatted, not recomputed', () => {
