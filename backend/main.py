@@ -477,7 +477,10 @@ if ALLOWED_ORIGINS:
         allow_origins=ALLOWED_ORIGINS,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Accept"],
+        # Idempotency-Key: payments.js sends it on every Paystack initialisation.
+        # The packaged app calls cross-origin (https://localhost), so without it
+        # the preflight was refused and no native payment could start (NATIVE-PAY-002).
+        allow_headers=["Authorization", "Content-Type", "Accept", "Idempotency-Key"],
         expose_headers=["Retry-After"],
     )
 
