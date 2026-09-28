@@ -70,7 +70,7 @@ check('a request that cannot reach Cauldra counts as offline (navigator.onLine i
 check('recovery code / reset are never queued and say so offline', /function recoveryOfflineMessage\(/.test(app) && (app.match(/recoveryOfflineMessage\(err(, true)?\) \|\| friendlyErrorMessage/g) || []).length === 3);
 
 // ---- Cache / translations ---------------------------------------------------
-check('service-worker cache bumped', /cauldra-shell-v17-offline-external/.test(sw));
+check('service-worker cache bumped', !/cauldra-shell-v1[0-6]-/.test(sw) && /const SHELL_CACHE = "cauldra-shell-v(1[7-9]|[2-9][0-9])-/.test(sw));
 for (const text of ['Waiting to send', 'Send when back online?', 'This purchase order is already waiting to send.',
   'Waiting to send: this purchase order will be emailed when you reconnect. It has not been sent yet.',
   "This needs the internet. Cauldra's AI has not run, and nothing was sent.",

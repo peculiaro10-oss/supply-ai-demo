@@ -12304,5 +12304,59 @@
   "Enviar por correo la orden de compra n.º {#id} a {name}",
   "إرسال أمر الشراء رقم {#id} بالبريد الإلكتروني إلى {name}",
   "Enviar por e-mail o pedido de compra nº {#id} para {name}"
+ ],
+ "Renew {plan}": [
+  "Renouveler {plan}",
+  "Renovar {plan}",
+  "تجديد {plan}",
+  "Renovar {plan}"
+ ],
+ "Subscription paused": [
+  "Abonnement suspendu",
+  "Suscripción en pausa",
+  "الاشتراك متوقف مؤقتًا",
+  "Assinatura pausada"
+ ],
+ "Your business data is safe. Nothing has been deleted.": [
+  "Les données de votre entreprise sont en sécurité. Rien n’a été supprimé.",
+  "Los datos de tu empresa están seguros. No se ha eliminado nada.",
+  "بيانات نشاطك التجاري آمنة. لم يُحذف أي شيء.",
+  "Os dados da sua empresa estão seguros. Nada foi excluído."
+ ],
+ "Cauldra unlocks as soon as a renewal payment is confirmed.": [
+  "Cauldra se débloque dès qu’un paiement de renouvellement est confirmé.",
+  "Cauldra se desbloquea en cuanto se confirma un pago de renovación.",
+  "يُفتح Cauldra فور تأكيد دفعة التجديد.",
+  "O Cauldra é desbloqueado assim que um pagamento de renovação for confirmado."
+ ],
+ "Your trial ends on {time}. If a plan isn't confirmed by then, Cauldra pauses until it is. Your data stays safe.": [
+  "Votre essai se termine le {time}. Si aucun forfait n’est confirmé d’ici là, Cauldra est suspendu jusqu’à confirmation. Vos données restent en sécurité.",
+  "Tu prueba termina el {time}. Si no se confirma un plan para entonces, Cauldra se pausa hasta que se confirme. Tus datos siguen seguros.",
+  "تنتهي فترتك التجريبية في {time}. إذا لم تُؤكَّد خطة بحلول ذلك الوقت، يتوقف Cauldra مؤقتًا حتى تأكيدها. تبقى بياناتك آمنة.",
+  "Seu teste termina em {time}. Se um plano não for confirmado até lá, o Cauldra fica pausado até a confirmação. Seus dados continuam seguros."
+ ],
+ "Your subscription is paid through {time}. If renewal isn't confirmed by then, Cauldra pauses until it is. Your data stays safe.": [
+  "Votre abonnement est payé jusqu’au {time}. Si le renouvellement n’est pas confirmé d’ici là, Cauldra est suspendu jusqu’à confirmation. Vos données restent en sécurité.",
+  "Tu suscripción está pagada hasta el {time}. Si la renovación no se confirma para entonces, Cauldra se pausa hasta que se confirme. Tus datos siguen seguros.",
+  "اشتراكك مدفوع حتى {time}. إذا لم يُؤكَّد التجديد بحلول ذلك الوقت، يتوقف Cauldra مؤقتًا حتى تأكيده. تبقى بياناتك آمنة.",
+  "Sua assinatura está paga até {time}. Se a renovação não for confirmada até lá, o Cauldra fica pausado até a confirmação. Seus dados continuam seguros."
+ ],
+ "Paid through {time}": [
+  "Payé jusqu’au {time}",
+  "Pagado hasta el {time}",
+  "مدفوع حتى {time}",
+  "Pago até {time}"
+ ],
+ "Your Cauldra subscription is paused because the renewal payment has not been confirmed. Your business data is safe. Renew from Subscription & Billing to continue.": [
+  "Votre abonnement Cauldra est suspendu car le paiement du renouvellement n’a pas été confirmé. Les données de votre entreprise sont en sécurité. Renouvelez depuis Abonnement et facturation pour continuer.",
+  "Tu suscripción de Cauldra está en pausa porque no se ha confirmado el pago de la renovación. Los datos de tu empresa están seguros. Renueva desde Suscripción y facturación para continuar.",
+  "اشتراكك في Cauldra متوقف مؤقتًا لأن دفعة التجديد لم تُؤكَّد. بيانات نشاطك التجاري آمنة. جدّد من الاشتراك والفوترة للمتابعة.",
+  "Sua assinatura do Cauldra está pausada porque o pagamento da renovação não foi confirmado. Os dados da sua empresa estão seguros. Renove em Assinatura e cobrança para continuar."
+ ],
+ "Your paid period has ended, so there is no current period to upgrade. Renew on the plan you want from Subscription & Billing.": [
+  "Votre période payée est terminée ; il n’y a donc pas de période en cours à mettre à niveau. Renouvelez avec le forfait souhaité depuis Abonnement et facturation.",
+  "Tu período pagado ha terminado, así que no hay un período actual que mejorar. Renueva con el plan que quieras desde Suscripción y facturación.",
+  "انتهت فترتك المدفوعة، لذا لا توجد فترة حالية للترقية. جدّد على الخطة التي تريدها من الاشتراك والفوترة.",
+  "Seu período pago terminou, então não há período atual para fazer upgrade. Renove no plano que desejar em Assinatura e cobrança."
  ]
 }

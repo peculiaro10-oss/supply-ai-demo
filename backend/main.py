@@ -402,6 +402,11 @@ def paystack_callback_url(request: Request) -> str:
 # via 2FA, which is then refunded. We follow that officially-supported pattern
 # rather than inventing a fake "free" verification. See /subscription/trial/init.
 PAYSTACK_TRIAL_VERIFICATION_AMOUNT_KOBO = int(os.getenv("PAYSTACK_TRIAL_VERIFICATION_AMOUNT_KOBO", "5000"))
+# SUB-LIFECYCLE-001: this is no longer an access grace period. A paid
+# subscription pauses at its exact paid-through timestamp; these days, counted
+# from that timestamp (never from when the lapse was noticed), are only how
+# long a missed renewal stays "past_due" (renewal still expected) before it is
+# "expired". Access is paused throughout. Variable name kept for compatibility.
 PAYSTACK_GRACE_PERIOD_DAYS = int(os.getenv("PAYSTACK_GRACE_PERIOD_DAYS", "3"))
 APP_NAME = "Cauldra"
 
@@ -2331,12 +2336,35 @@ SUBSCRIPTION_BLOCKED_MESSAGES = {
     "cancelled": "Your subscription has been cancelled. Subscribe to continue using Cauldra.",
 }
 SUBSCRIPTION_BLOCKED_FALLBACK = "Your subscription is not currently active. Choose a plan or subscribe to continue."
+# SUB-LIFECYCLE-001: a paid subscription whose renewal was not confirmed by its
+# paid-through time. The trial wording ("Your 14-day trial has ended") was
+# shown for this too.
+SUBSCRIPTION_PAUSED_MESSAGE = ("Your Cauldra subscription is paused because the renewal payment has not been confirmed. "
+                               "Your business data is safe. Renew from Subscription & Billing to continue.")
+
+def renewal_retry_window_end(sub: Optional["BusinessSubscription"]) -> Optional[datetime]:
+    """SUB-LIFECYCLE-001: end of the past-due window, counted from the exact
+    paid-through time so it is the same whenever the lapse is noticed."""
+    if sub is None:
+        return None
+    if sub.current_period_end:
+        return sub.current_period_end + timedelta(days=PAYSTACK_GRACE_PERIOD_DAYS)
+    return sub.grace_period_ends_at
+
+def subscription_blocked_message(sub: Optional["BusinessSubscription"], status: Optional[str]) -> str:
+    if sub is not None and sub.paid_at and status in ("past_due", "expired"):
+        return SUBSCRIPTION_PAUSED_MESSAGE
+    return SUBSCRIPTION_BLOCKED_MESSAGES.get(status, SUBSCRIPTION_BLOCKED_FALLBACK)
 
 def subscription_access_state(sub: Optional["BusinessSubscription"], now: Optional[datetime] = None) -> tuple:
     """Read-only mirror of require_subscription_access(): (effective status,
     blocking message or None). Never writes — it runs on the auth/snapshot
     serializer path — so it applies the same date rules as
-    refresh_subscription_status() without committing them."""
+    refresh_subscription_status() without committing them.
+
+    SUB-LIFECYCLE-001: access follows the exact paid-through timestamp, not the
+    stored status. A paid subscription is usable until current_period_end and
+    paused from that instant if no renewal was confirmed (no access grace)."""
     if sub is None:
         return None, None
     now = now or datetime.utcnow()
@@ -2345,11 +2373,17 @@ def subscription_access_state(sub: Optional["BusinessSubscription"], now: Option
         status = "expired"
     elif status == "active" and sub.current_period_end and now >= sub.current_period_end:
         status = "cancelled" if sub.cancel_at_period_end else "past_due"
-    elif status == "past_due" and sub.grace_period_ends_at and now >= sub.grace_period_ends_at:
-        status = "expired"
-    if status in {"trialing", "active", "past_due"}:
+    if status == "past_due":
+        window_end = renewal_retry_window_end(sub)
+        if window_end and now >= window_end:
+            status = "expired"
+        elif sub.current_period_end and now < sub.current_period_end:
+            # A failed charge reported before the paid-through time does not
+            # take away time the business has already paid for.
+            return status, None
+    if status in {"trialing", "active"}:
         return status, None
-    return status, SUBSCRIPTION_BLOCKED_MESSAGES.get(status, SUBSCRIPTION_BLOCKED_FALLBACK)
+    return status, subscription_blocked_message(sub, status)
 
 def effective_subscription_status(sub: Optional["BusinessSubscription"], now: Optional[datetime] = None) -> Optional[str]:
     """TRIAL-EXPIRY-001: the status enforcement would apply right now. The stored
@@ -2368,6 +2402,11 @@ def effective_subscription_status(sub: Optional["BusinessSubscription"], now: Op
 # change-plan lateral-move path, unchanged by this feature.
 PLAN_RANK = {"core": 0, "starter": 1, "business": 2, "enterprise": 3}
 UPGRADE_QUOTE_VALIDITY_MINUTES = 15
+# SUB-LIFECYCLE-001: an upgrade keeps the current period, so once the paid
+# period has ended it would charge the full new price and leave the business
+# paused. A paused business renews on the plan it wants through checkout.
+UPGRADE_AFTER_PAID_THROUGH_MESSAGE = ("Your paid period has ended, so there is no current period to upgrade. "
+                                      "Renew on the plan you want from Subscription & Billing.")
 UPGRADE_MINIMUM_CHARGE_KOBO = 100  # Paystack requires a positive amount; this is a floor, never the norm
 
 @app.get("/plans")
@@ -2530,28 +2569,40 @@ def refresh_subscription_status(db: Session, subscription: Optional[BusinessSubs
         )
         db.commit()
     elif subscription.status == "active" and subscription.current_period_end and now >= subscription.current_period_end:
-        # A renewal charge should have arrived via webhook before this point. If it
-        # hasn't, treat it as a failed/missed payment and start the grace period
-        # rather than either granting free access or cutting them off instantly.
-        subscription.status = "past_due"
-        subscription.payment_status = "failed"
-        subscription.grace_period_ends_at = subscription.grace_period_ends_at or (now + timedelta(days=PAYSTACK_GRACE_PERIOD_DAYS))
+        # SUB-LIFECYCLE-001: no renewal was confirmed by the paid-through time.
+        # Access pauses now (no access grace); the business data is untouched.
+        # The past-due window is counted from the paid-through time, so a
+        # business that returns days later is not given days it never had.
+        window_end = renewal_retry_window_end(subscription)
+        subscription.grace_period_ends_at = window_end
+        subscription.status = "past_due" if now < window_end else "expired"
+        # "failed" is reserved for a charge Paystack reported as failed; here
+        # the renewal is simply not confirmed (it may still arrive).
+        subscription.payment_status = subscription.payment_status if subscription.payment_status == "failed" else "unconfirmed"
+        add_audit(db, None, "SUBSCRIPTION_PAUSED",
+                  f"Renewal not confirmed by the paid-through time ({to_utc_iso(subscription.current_period_end)}); access paused, data kept.",
+                  business_id=subscription.business_id)
         # Same dedup_key the explicit Paystack invoice.payment_failed webhook
         # branch uses — whichever of the two detects the failure first wins;
         # the other is automatically a no-op via create_notification's own
         # dedup check, so this can never double-push for one failure episode.
         create_notification(
             db, business_id=subscription.business_id, category="subscription", severity="critical", type="SUBSCRIPTION_PAYMENT_FAILED",
-            title="Subscription payment failed",
-            message="We couldn't process your Cauldra subscription payment. Update your billing information to prevent service interruption.",
+            title="Subscription paused",
+            message="Your Cauldra subscription is paused because the renewal payment has not been confirmed. Your business data is safe. Renew from Subscription & Billing to continue.",
             deep_link="subscription", dedup_key=f"payment_failed:{subscription.business_id}",
         )
         db.commit()
-    elif subscription.status == "past_due" and subscription.grace_period_ends_at and now >= subscription.grace_period_ends_at:
+    window_end = renewal_retry_window_end(subscription) if subscription.status == "past_due" else None
+    if window_end and now >= window_end:
         subscription.status = "expired"
+        add_audit(db, None, "SUBSCRIPTION_RENEWAL_WINDOW_ENDED",
+                  "The past-due window after the paid-through time ended; access stays paused and data kept.",
+                  business_id=subscription.business_id)
         create_notification(
             db, business_id=subscription.business_id, category="subscription", severity="critical", type="SUBSCRIPTION_EXPIRED",
-            title="Subscription expired", message="Your Cauldra subscription has expired. Subscribe to a plan to continue using Cauldra.",
+            title="Subscription still paused",
+            message="Your Cauldra subscription is still paused. Your business data is safe. Renew from Subscription & Billing at any time to continue.",
             deep_link="subscription", dedup_key=f"sub_expired:{subscription.business_id}",
         )
         db.commit()
@@ -2560,11 +2611,11 @@ def refresh_subscription_status(db: Session, subscription: Optional[BusinessSubs
 def require_subscription_access(db: Session, user: User):
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     subscription = refresh_subscription_status(db, get_or_create_subscription(db, business))
-    if subscription.status == "past_due":
-        # Grace period: access continues while we wait for the retried/resolved charge.
-        return subscription
-    if subscription.status not in {"trialing", "active"}:
-        raise HTTPException(status_code=402, detail=SUBSCRIPTION_BLOCKED_MESSAGES.get(subscription.status, SUBSCRIPTION_BLOCKED_FALLBACK))
+    # SUB-LIFECYCLE-001: one rule for enforcement and for what the sign-in
+    # payload reports — past due is paused, not a grace period.
+    _status, message = subscription_access_state(subscription)
+    if message:
+        raise HTTPException(status_code=402, detail=message)
     return subscription
 
 def billing_period_for(db: Session, business: BusinessProfile, now: Optional[datetime] = None) -> tuple[datetime, datetime, str]:
@@ -2846,6 +2897,7 @@ def usage_summary(db: Session, business: BusinessProfile) -> dict:
     else:
         ai_warning = None
     trial_end = sub.trial_end_at or (datetime.utcnow() + timedelta(days=plan["trial_days"]))
+    effective_status, blocked_message = subscription_access_state(sub)
     current_price = plan["annual_price" if (sub.billing_interval or "monthly") == "annual" else "monthly_price"]
     return {"plan": (sub.plan or "starter").lower(), "plan_label": plan["label"], "billing_interval": sub.billing_interval or "monthly",
             "status": sub.status, "billing_period_start": to_utc_iso(period_start), "billing_period_end": to_utc_iso(period_end),
@@ -2868,6 +2920,16 @@ def usage_summary(db: Session, business: BusinessProfile) -> dict:
             "payment_status": sub.payment_status, "cancel_at_period_end": bool(sub.cancel_at_period_end),
             "cancelled_at": to_utc_iso(sub.cancelled_at),
             "grace_period_ends_at": to_utc_iso(sub.grace_period_ends_at),
+            # SUB-LIFECYCLE-001: exact, server-authoritative lifecycle facts.
+            # effective_status follows the paid-through timestamp even while the
+            # stored status has not been moved yet; the UI renders these times in
+            # the business's timezone.
+            "effective_status": effective_status,
+            "access_paused": bool(blocked_message),
+            "blocked_message": blocked_message,
+            "paid_through_at": to_utc_iso(sub.current_period_end) if sub.paid_at else None,
+            "renewal_window_ends_at": to_utc_iso(renewal_retry_window_end(sub)) if effective_status == "past_due" else None,
+            "server_time": to_utc_iso(datetime.utcnow()),
             # A scheduled downgrade never changes `plan`/`billing_interval` above —
             # those still reflect the currently-active, already-paid plan. This is
             # purely informational for the UI; the server alone decides if/when it
@@ -6028,35 +6090,49 @@ def check_ai_credit_notifications(db: Session, business: "BusinessProfile") -> N
 # fires" rule as AI credits: a subscription that somehow jumps straight from
 # 10 days to 2 days remaining (server downtime, clock skew) only ever gets
 # the 1-day warning, not a backlog of 7-day/3-day ones for a moment already past.
-SUBSCRIPTION_COUNTDOWN_STAGES = (1, 3, 7)
+# SUB-LIFECYCLE-001: reminder stages before the exact expiry timestamp, most
+# urgent first: (stage key, time before expiry, wording). A stage fires once the
+# remaining time is at or below it; only the most urgent due stage fires, so a
+# missed earlier stage is never sent late on top of a later one.
+SUBSCRIPTION_COUNTDOWN_STAGES = (
+    ("1h", timedelta(hours=1), "in about 1 hour"),
+    ("6h", timedelta(hours=6), "in about 6 hours"),
+    ("24h", timedelta(hours=24), "within 24 hours"),
+    ("3", timedelta(days=3), "in 3 days"),
+    ("7", timedelta(days=7), "in 7 days"),
+)
 
-def check_subscription_countdown_notifications(db: Session, business: "BusinessProfile") -> None:
-    """Section 2 — pre-expiration countdown warnings (7/3/1 days remaining).
-    Actual expiration itself is handled at the authoritative point
-    refresh_subscription_status() transitions status to expired/past_due,
-    not here — this only ever fires for a subscription that is STILL
-    trialing/active but approaching its boundary, which is why it needs a
-    periodic background check (see notification_sweep_loop()) rather than a
-    request-time hook: nothing else in the app naturally "happens" 3 days
-    before a renewal date, so without this loop a business that doesn't
-    open Cauldra in that window would never be warned before losing access."""
+def check_subscription_countdown_notifications(db: Session, business: "BusinessProfile", now: Optional[datetime] = None) -> None:
+    """Pre-expiry reminders at 7 days, 3 days, 24 hours, 6 hours and 1 hour
+    before the exact trial end / paid-through timestamp (SUB-LIFECYCLE-001;
+    previously 7/3/1 calendar days). The pause itself is announced where
+    refresh_subscription_status() moves the status, which the background sweep
+    now also runs, so a business that nobody opens is still told on time.
+
+    The dedup key carries the business, the exact expiry timestamp and the
+    stage, so a sweep that runs twice never sends a stage twice for the same
+    period, and a renewed period is a fresh key space."""
     sub = get_or_create_subscription(db, business, commit=False)
-    if sub.status not in ("trialing", "active"):
+    now = now or datetime.utcnow()
+    if subscription_access_state(sub, now)[0] not in ("trialing", "active"):
         return
     period_end = sub.trial_end_at if sub.status == "trialing" else sub.current_period_end
-    if not period_end:
-        return
-    days_remaining = (period_end.date() - datetime.utcnow().date()).days
-    if days_remaining < 0:
+    if not period_end or now >= period_end:
         return  # refresh_subscription_status() owns the transition past this point
-    period_anchor = period_end.date().isoformat()
-    for stage in SUBSCRIPTION_COUNTDOWN_STAGES:
-        if days_remaining <= stage:
+    remaining = period_end - now
+    period_anchor = period_end.replace(microsecond=0).isoformat()
+    # Only claim an automatic renewal when Paystack holds a recurring subscription.
+    renewing = sub.status == "active" and not sub.cancel_at_period_end and bool(sub.paystack_subscription_code)
+    for stage, before, when in SUBSCRIPTION_COUNTDOWN_STAGES:
+        if remaining <= before:
+            action = ("It renews automatically if the payment succeeds; if it cannot be confirmed, Cauldra pauses at that time."
+                      if renewing else "Renew or choose a plan in Subscription & Billing to keep using Cauldra without a pause.")
             create_notification(
-                db, business_id=business.id, category="subscription", severity=("important" if stage == 7 else "critical"),
-                type=f"SUBSCRIPTION_EXPIRY_{stage}D", title="Subscription ending soon",
-                message=f"Your Cauldra subscription expires in {stage} day{'s' if stage != 1 else ''}. Renew your plan to avoid interruption.",
-                deep_link="subscription", dedup_key=f"sub_expiry_warning:{business.id}:{period_anchor}:{stage}", stage=str(stage),
+                db, business_id=business.id, category="subscription", severity=("important" if stage == "7" else "critical"),
+                type=f"SUBSCRIPTION_EXPIRY_{stage.upper()}" if not stage.isdigit() else f"SUBSCRIPTION_EXPIRY_{stage}D",
+                title="Subscription ending soon",
+                message=f"Your Cauldra {'trial' if sub.status == 'trialing' else 'subscription'} ends {when}. {action} Your business data is always kept.",
+                deep_link="subscription", dedup_key=f"sub_expiry_warning:{business.id}:{period_anchor}:{stage}", stage=stage,
             )
             break
 
@@ -6081,6 +6157,10 @@ async def notification_sweep_loop():
             try:
                 for business in db.query(BusinessProfile).all():
                     try:
+                        # SUB-LIFECYCLE-001: apply the pause at the exact time
+                        # (and its notice) even if nobody from the business
+                        # signs in, then send any due pre-expiry reminder.
+                        refresh_subscription_status(db, get_or_create_subscription(db, business, commit=False))
                         check_subscription_countdown_notifications(db, business)
                         db.commit()
                     except Exception:
@@ -14299,6 +14379,10 @@ def subscription_usage(user: User = Depends(get_authenticated_user), db: Session
     # Start Trial / Subscribe. Entitlement is still enforced independently on
     # every actual resource-mutating endpoint via get_current_user.
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
+    # SUB-LIFECYCLE-001: move a stale stored status (e.g. "active" after the
+    # paid-through time) exactly as enforcement would, so Billing never shows
+    # Active for a paused business.
+    refresh_subscription_status(db, get_or_create_subscription(db, business))
     summary = usage_summary(db, business)
     plan = subscription_for(db, business)
     period_start, period_end, current_period = billing_period_for(db, business)
@@ -15993,7 +16077,9 @@ def trial_cancel(request: Request, user: User = Depends(get_current_user), db: S
 
 
 @app.post("/subscription/cancel")
-def subscription_cancel(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def subscription_cancel(request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+    # SUB-LIFECYCLE-001: a billing control, so it stays reachable while the
+    # business is paused (an Admin can stop a renewal that is still pending).
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Only an Admin can cancel the subscription.")
     check_rate_limit(db, "subscription-cancel", f"business:{user.business_id}")
@@ -16375,6 +16461,8 @@ def create_upgrade_quote(data: UpgradeQuoteRequest, request: Request, user: User
         raise HTTPException(status_code=400, detail="Your business is still on its free trial. Switch plans directly — no payment or proration is needed until the trial ends.")
     if sub.status not in ("active", "past_due"):
         raise HTTPException(status_code=409, detail="Your subscription must be active to upgrade. Please subscribe first.")
+    if sub.current_period_end and datetime.utcnow() >= sub.current_period_end:
+        raise HTTPException(status_code=409, detail=UPGRADE_AFTER_PAID_THROUGH_MESSAGE)
     if not sub.current_period_start or not sub.current_period_end:
         raise HTTPException(status_code=409, detail="Your current billing period isn't available yet. Please try again shortly or contact support.")
 
@@ -16466,6 +16554,8 @@ def start_upgrade_checkout(data: UpgradeCheckoutRequest, request: Request, user:
 
     business = db.query(BusinessProfile).filter(BusinessProfile.id == user.business_id).first()
     sub = get_or_create_subscription(db, business)
+    if sub.current_period_end and now >= sub.current_period_end:
+        raise HTTPException(status_code=409, detail=UPGRADE_AFTER_PAID_THROUGH_MESSAGE)
     # Revalidate against the LIVE subscription — if anything about it moved
     # since the quote was issued (another upgrade, a cancellation, a renewal),
     # the quote's numbers are potentially stale and must not be trusted.
@@ -16768,10 +16858,16 @@ async def paystack_webhook(request: Request, db: Session = Depends(get_db)):
     elif event_type == "invoice.payment_failed":
         sub = find_subscription_by_customer_code(db, (data.get("customer") or {}).get("customer_code", ""))
         if sub:
-            sub.status = "past_due"
+            # SUB-LIFECYCLE-001: a failed charge never shortens time already
+            # paid for. Before the paid-through time only the payment state
+            # changes; from it, access pauses (no grace) and the past-due
+            # window is counted from the paid-through time.
+            paid_through = sub.current_period_end
+            if sub.status in ("active", "past_due") and not (paid_through and now < paid_through):
+                sub.status = "past_due"
             sub.payment_status = "failed"
-            sub.grace_period_ends_at = sub.grace_period_ends_at or (now + timedelta(days=PAYSTACK_GRACE_PERIOD_DAYS))
-            add_audit(db, None, "SUBSCRIPTION_PAYMENT_FAILED", f"Automatic recurring charge failed. Grace period until {to_utc_iso(sub.grace_period_ends_at)}.", business_id=sub.business_id)
+            sub.grace_period_ends_at = renewal_retry_window_end(sub) or (now + timedelta(days=PAYSTACK_GRACE_PERIOD_DAYS))
+            add_audit(db, None, "SUBSCRIPTION_PAYMENT_FAILED", f"Automatic recurring charge failed. Paid through {to_utc_iso(paid_through) if paid_through else 'unknown'}; past-due window until {to_utc_iso(sub.grace_period_ends_at)}.", business_id=sub.business_id)
             # dedup_key is business-scoped, not time-scoped, and stays
             # unresolved for the whole failure episode — a retried/duplicate
             # failure webhook for the SAME episode is deliberately a no-op

@@ -2123,7 +2123,12 @@
                     confirmTrialSwitchBody: "Your free trial continues on {plan}. You won't be charged now. When the trial ends, your subscription continues at {price}.",
                     confirmCheckoutBody: "You'll go to Paystack's secure checkout to pay {price}. Your plan changes only after Paystack confirms the payment.",
                     confirmUpgradeBody: "You'll go to Paystack's secure checkout to pay for the upgrade. Paystack shows the exact amount before you pay; your plan changes only after the payment is confirmed. From your next renewal you pay {price}.",
-                    actionSwitchTo: "Switch to {plan}", actionUpgradeTo: "Upgrade to {plan}", actionSubscribeTo: "Subscribe to {plan}",
+                    actionSwitchTo: "Switch to {plan}", actionUpgradeTo: "Upgrade to {plan}", actionSubscribeTo: "Subscribe to {plan}", actionRenew: "Renew {plan}",
+                    pausedTitle: "Subscription paused", pausedDataSafe: "Your business data is safe. Nothing has been deleted.",
+                    pausedUnlocks: "Cauldra unlocks as soon as a renewal payment is confirmed.",
+                    endingSoonTrial: "Your trial ends on {time}. If a plan isn't confirmed by then, Cauldra pauses until it is. Your data stays safe.",
+                    endingSoonPaid: "Your subscription is paid through {time}. If renewal isn't confirmed by then, Cauldra pauses until it is. Your data stays safe.",
+                    paidThrough: "Paid through {time}",
                     actionDowngradeTo: "Downgrade to {plan}", actionStartTrial: "Start free trial on {plan}",
                     resourceProducts: "Products", resourceSuppliers: "Suppliers", resourceWarehouses: "Warehouses", resourceUsers: "Users",
                     resourcePriceSources: "Price sources", resourcePurchaseOrders: "Purchase orders", resourceStorage: "Storage",
@@ -21169,18 +21174,23 @@
             const trialBox = document.getElementById("billing-trial-dates-box");
             if (usage.status === 'trialing' && usage.trial_start_at) {
                 trialBox.classList.remove("hidden");
-                document.getElementById("billing-trial-dates-value").textContent = `${formatDateShort(usage.trial_start_at)} → ${formatDateShort(usage.trial_ends_at)} (${usage.trial_days_remaining} day${usage.trial_days_remaining === 1 ? '' : 's'} left)`
+                document.getElementById("billing-trial-dates-value").textContent = `${formatDateShort(usage.trial_start_at)} → ${formatBusinessDateTime(usage.trial_ends_at)} (${usage.trial_days_remaining} day${usage.trial_days_remaining === 1 ? '' : 's'} left)`
                     + (usage.cancel_at_period_end ? ' · cancelled — will not convert to a paid plan' : '');
             } else {
                 trialBox.classList.add("hidden");
             }
 
             const nextBillingBox = document.getElementById("billing-next-billing-box");
-            if (usage.next_billing_at && ['trialing', 'active', 'past_due'].includes(usage.status)) {
+            // SUB-LIFECYCLE-001: exact date and time in the business timezone;
+            // access pauses at that instant if renewal is not confirmed.
+            if (usage.next_billing_at && ['trialing', 'active'].includes(usage.status)) {
                 nextBillingBox.classList.remove("hidden");
                 document.getElementById("billing-next-billing-value").textContent = usage.cancel_at_period_end
-                    ? `Access ends ${formatDateShort(usage.current_period_end || usage.next_billing_at)} (cancelled)`
-                    : formatDateShort(usage.next_billing_at);
+                    ? `Access ends ${formatBusinessDateTime(usage.current_period_end || usage.next_billing_at)} (cancelled)`
+                    : (usage.paid_through_at && usage.paid_through_at !== usage.next_billing_at
+                        ? `${formatBusinessDateTime(usage.next_billing_at)} · ${t('subscription.paidThrough', { time: formatBusinessDateTime(usage.paid_through_at) })}`
+                        : usage.paid_through_at ? t('subscription.paidThrough', { time: formatBusinessDateTime(usage.paid_through_at) })
+                        : formatBusinessDateTime(usage.next_billing_at));
             } else {
                 nextBillingBox.classList.add("hidden");
             }
@@ -21220,6 +21230,8 @@
                 cancelRow.classList.add("hidden");
             }
 
+            renderBillingLifecycleNotice(usage, isAdmin);
+
             // UX-001: say why a Manager has no plan buttons.
             document.getElementById('billing-admin-only-note')?.classList.toggle('hidden', isAdmin);
             // PLAN-005: after a downgrade below current usage, say so plainly
@@ -21237,6 +21249,43 @@
                     `Your plan will change from ${usage.plan_label || usage.plan} to ${pd.plan_label} (${pd.billing_interval === 'annual' ? 'Annual' : 'Monthly'}) at the end of your current billing period${effectiveText}.`;
             } else {
                 pendingBox.classList.add("hidden");
+            }
+        }
+
+        // SUB-LIFECYCLE-001: paused / ending-soon notice. Paused: the server's
+        // own reason, that the data is safe, and Renew for the Admin (other
+        // roles are told to ask the Admin). Ending soon (within 3 days): the
+        // exact end time in the business timezone.
+        function renderBillingLifecycleNotice(usage, isAdmin) {
+            let box = document.getElementById('billing-lifecycle-box');
+            const grid = document.getElementById('billing-next-billing-box')?.parentElement;
+            if (!box && grid) {
+                box = document.createElement('div');
+                box.id = 'billing-lifecycle-box';
+                box.setAttribute('role', 'status');
+                grid.parentElement.insertBefore(box, grid);
+            }
+            if (!box) return;
+            const endAt = usage.status === 'trialing' ? usage.trial_ends_at : usage.current_period_end;
+            const msLeft = endAt ? new Date(endAt).getTime() - Date.now() : null;
+            if (usage.access_paused) {
+                const renew = isAdmin && usage.plans?.[usage.plan]
+                    ? `<button type="button" id="billing-renew-now" class="mt-2 min-h-[44px] w-full sm:w-auto bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-bold text-sm cursor-pointer">${escapeHtml(t('subscription.actionRenew', { plan: usage.plan_label || usage.plan }))}</button>`
+                    : `<p class="mt-1 text-textSec">${escapeHtml(t('subscription.askAdmin'))}</p>`;
+                box.className = 'mb-2.5 rounded-xl border border-danger/30 bg-danger/10 p-3 text-[11px] text-textMain';
+                box.innerHTML = `<p class="font-bold text-danger">${escapeHtml(t('subscription.pausedTitle'))}</p>`
+                    + `<p class="mt-1 break-words">${escapeHtml(usage.blocked_message || t('subscription.inactiveDefault'))}</p>`
+                    + `<p class="mt-1">${/data is safe/i.test(usage.blocked_message || '') ? '' : `${escapeHtml(t('subscription.pausedDataSafe'))} `}${escapeHtml(t('subscription.pausedUnlocks'))}</p>` + renew;
+                const button = document.getElementById('billing-renew-now');
+                if (button) button.onclick = () => openPlanChangeConfirm(usage.plan, usage.billing_interval === 'annual' ? 'annual' : 'monthly', 'checkout');
+                box.classList.remove('hidden');
+            } else if (['trialing', 'active'].includes(usage.status) && msLeft !== null && msLeft > 0 && msLeft <= 3 * 86400000) {
+                box.className = 'mb-2.5 rounded-xl border border-warning/40 bg-warning/10 p-3 text-[11px] text-textMain';
+                box.innerHTML = `<p class="break-words">${escapeHtml(t(usage.status === 'trialing' ? 'subscription.endingSoonTrial' : 'subscription.endingSoonPaid', { time: formatBusinessDateTime(endAt) }))}</p>`;
+                box.classList.remove('hidden');
+            } else {
+                box.classList.add('hidden');
+                box.innerHTML = '';
             }
         }
 
@@ -21314,14 +21363,14 @@
             document.getElementById("billing-plan-cards").innerHTML = ids.map(id => {
                 const p = plans[id];
                 const price = billingIntervalChoice === 'annual' ? p.annual_price : p.monthly_price;
-                const isCurrent = id === currentPlan && billingIntervalChoice === usage.billing_interval && ['trialing', 'active', 'past_due'].includes(usage.status);
+                const isCurrent = id === currentPlan && billingIntervalChoice === usage.billing_interval && ['trialing', 'active'].includes(usage.status);
                 const isPendingTarget = !!pendingDowngrade && pendingDowngrade.plan === id && pendingDowngrade.billing_interval === billingIntervalChoice;
                 // A genuine plan-TIER downgrade (not a same-tier interval switch) is
                 // only reachable through the scheduled-downgrade flow — the server
                 // rejects an immediate one anyway, this just avoids showing an
                 // action that would fail. Rank is proxied by the display order,
                 // which already mirrors the server's PLAN_RANK exactly.
-                const isDowngradeTarget = ['active', 'past_due'].includes(usage.status) && order.indexOf(id) < order.indexOf(currentPlan);
+                const isDowngradeTarget = usage.status === 'active' && order.indexOf(id) < order.indexOf(currentPlan);
                 const features = buildPlanFeatureLines(p.limits);
                 let actionLabel = "";
                 let priceButtonHtml;
@@ -21343,7 +21392,8 @@
                     if (usage.can_start_trial) { actionLabel = "Start your 14-day free trial"; buttonText = t('subscription.actionStartTrial', {plan: label}); onclickFn = `openTrialConfirm('${id}','${billingIntervalChoice}')`; }
                     else if (usage.status === 'trialing') { actionLabel = "No charge during your trial"; buttonText = t('subscription.actionSwitchTo', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','trial_switch')`; }
                     else if (isDowngradeTarget) { actionLabel = "Takes effect at your next renewal"; buttonText = t('subscription.actionDowngradeTo', {plan: label}); onclickFn = `openDowngradeConfirm('${id}','${billingIntervalChoice}')`; }
-                    else if (['active', 'past_due'].includes(usage.status)) { buttonText = isUpgrade ? t('subscription.actionUpgradeTo', {plan: label}) : t('subscription.actionSwitchTo', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','${isUpgrade ? 'upgrade' : 'checkout'}')`; }
+                    else if (usage.status === 'active') { buttonText = isUpgrade ? t('subscription.actionUpgradeTo', {plan: label}) : t('subscription.actionSwitchTo', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','${isUpgrade ? 'upgrade' : 'checkout'}')`; }
+                    else if (id === currentPlan && usage.access_paused) { buttonText = t('subscription.actionRenew', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','checkout')`; }
                     else { buttonText = t('subscription.actionSubscribeTo', {plan: label}); onclickFn = `openPlanChangeConfirm('${id}','${billingIntervalChoice}','checkout')`; }
                     const btnColor = isDowngradeTarget ? "bg-textSec/80 hover:bg-textSec text-white shadow-md" : "bg-primary hover:bg-primaryHover text-white shadow-md shadow-primary/20";
                     priceButtonHtml = priceLine + `<button type="button" onclick="${onclickFn}" class="w-full ${btnColor} py-2.5 rounded-xl font-bold text-sm transition cursor-pointer">${buttonText}</button>`;
@@ -21461,7 +21511,7 @@
         async function subscribeNow(plan, interval) {
             const rank = {core:0, starter:1, business:2, enterprise:3};
             const current = String(billingUsageCache?.plan || '').toLowerCase();
-            if (['active', 'past_due'].includes(billingUsageCache?.status)
+            if (billingUsageCache?.status === 'active' && !billingUsageCache?.access_paused
                     && rank[plan] > rank[current]) {
                 try {
                     const response = await fetch(`${API_URL}/subscription/upgrade-quote`, {
