@@ -158,6 +158,15 @@ window.CauldraPayments = (() => {
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
                 if (data.detail?.reference) {active.reference = data.detail.reference; remember();}
+                // SUB-LIFECYCLE-001: one renewal attempt at a time. Another
+                // attempt is being confirmed (or is already paid): say so and
+                // offer Check status, never a second payment.
+                if (['RENEWAL_IN_PROGRESS', 'ALREADY_PAID'].includes(data.detail?.code) && data.detail?.reference) {
+                    status('pending', data.detail.code === 'ALREADY_PAID'
+                        ? 'This renewal was already paid. Check its status to refresh your subscription.'
+                        : 'A renewal payment is already being confirmed. Check its status before paying again.');
+                    return;
+                }
                 if (data.detail?.can_restart === true) {
                     active.reference = null;
                     active.key = crypto.randomUUID();

@@ -491,8 +491,24 @@
         return openWithKey(active.dataKey, row.sealed, `cauldra-cache:${active.scope}:${kind}`);
     }
 
+    // SUB-LIFECYCLE-001: once this device knows the paid-through (or trial-end)
+    // time has passed, no new business work is captured offline. Work saved
+    // before that moment stays queued and syncs normally.
+    const SUBSCRIPTION_PAUSED_OFFLINE = "Your Cauldra subscription is paused, so new work can't be saved on this device. Your business data is safe. Connect to the internet to renew.";
+    function subscriptionPausedReason(snapshot, nowMs = Date.now()) {
+        const usage = snapshot?.cache?.["/subscription/usage"]?.value;
+        if (!usage) return null;
+        if (usage.access_paused) return SUBSCRIPTION_PAUSED_OFFLINE;
+        const end = usage.status === "trialing" ? usage.trial_ends_at : usage.current_period_end;
+        const endMs = end ? Date.parse(end) : NaN;
+        if (["trialing", "active"].includes(usage.status) && Number.isFinite(endMs) && nowMs >= endMs) return SUBSCRIPTION_PAUSED_OFFLINE;
+        return null;
+    }
+
     async function enqueue(op, cacheUpdates = []) {
         if (!active) throw new Error("Enable and unlock Offline Access before saving changes without internet.");
+        const pausedReason = subscriptionPausedReason(active.snapshot);
+        if (pausedReason) throw Object.assign(new Error(pausedReason), { code: "SUBSCRIPTION_PAUSED" });
         const normalized = {
             ...op, schema_version: CLIENT_SCHEMA_VERSION, device_id: active.record.device_id,
             business_id: active.record.business_id, user_id: active.record.user_id,
@@ -1275,5 +1291,6 @@
         isUnlocked() { return !!active; }, isOffline() { return !!(active && active.offline); },
         currentScope() { return active && active.scope; }, currentDeviceId() { return active && active.record.device_id; },
         currentSnapshot() { return active && active.snapshot; }, currentGrant() { return active && active.grant; },
+        subscriptionPausedReason(snapshot, nowMs) { return subscriptionPausedReason(snapshot === undefined ? active && active.snapshot : snapshot, nowMs); },
     });
 })();

@@ -12358,5 +12358,65 @@
   "Tu período pagado ha terminado, así que no hay un período actual que mejorar. Renueva con el plan que quieras desde Suscripción y facturación.",
   "انتهت فترتك المدفوعة، لذا لا توجد فترة حالية للترقية. جدّد على الخطة التي تريدها من الاشتراك والفوترة.",
   "Seu período pago terminou, então não há período atual para fazer upgrade. Renove no plano que desejar em Assinatura e cobrança."
+ ],
+ "Renewal being confirmed": [
+  "Renouvellement en cours de confirmation",
+  "Renovación en confirmación",
+  "جارٍ تأكيد التجديد",
+  "Renovação em confirmação"
+ ],
+ "A renewal payment is being confirmed with Paystack. Cauldra unlocks as soon as it is confirmed — there is no need to pay again.": [
+  "Un paiement de renouvellement est en cours de confirmation auprès de Paystack. Cauldra se débloque dès sa confirmation — inutile de payer à nouveau.",
+  "Se está confirmando un pago de renovación con Paystack. Cauldra se desbloquea en cuanto se confirme; no es necesario volver a pagar.",
+  "يجري تأكيد دفعة تجديد مع Paystack. يُفتح Cauldra فور تأكيدها — لا حاجة إلى الدفع مرة أخرى.",
+  "Um pagamento de renovação está sendo confirmado com o Paystack. O Cauldra é desbloqueado assim que for confirmado — não é preciso pagar novamente."
+ ],
+ "Cauldra will try your saved card again at {time}. Automatic attempts stop at {end}; you can renew now instead.": [
+  "Cauldra réessaiera votre carte enregistrée le {time}. Les tentatives automatiques s’arrêtent le {end} ; vous pouvez renouveler maintenant.",
+  "Cauldra volverá a intentar con tu tarjeta guardada el {time}. Los intentos automáticos terminan el {end}; puedes renovar ahora.",
+  "سيحاول Cauldra مجددًا باستخدام بطاقتك المحفوظة في {time}. تتوقف المحاولات التلقائية في {end}؛ ويمكنك التجديد الآن.",
+  "O Cauldra tentará novamente o seu cartão salvo em {time}. As tentativas automáticas terminam em {end}; você pode renovar agora."
+ ],
+ "Automatic attempts on your saved card have ended. You can renew at any time.": [
+  "Les tentatives automatiques sur votre carte enregistrée sont terminées. Vous pouvez renouveler à tout moment.",
+  "Los intentos automáticos con tu tarjeta guardada han terminado. Puedes renovar en cualquier momento.",
+  "انتهت المحاولات التلقائية على بطاقتك المحفوظة. يمكنك التجديد في أي وقت.",
+  "As tentativas automáticas no seu cartão salvo terminaram. Você pode renovar a qualquer momento."
+ ],
+ "Your Cauldra subscription is paused, so new work can't be saved on this device. Your business data is safe. Connect to the internet to renew.": [
+  "Votre abonnement Cauldra est suspendu : aucun nouveau travail ne peut être enregistré sur cet appareil. Les données de votre entreprise sont en sécurité. Connectez-vous à Internet pour renouveler.",
+  "Tu suscripción de Cauldra está en pausa, así que no se puede guardar trabajo nuevo en este dispositivo. Los datos de tu empresa están seguros. Conéctate a internet para renovar.",
+  "اشتراكك في Cauldra متوقف مؤقتًا، لذا لا يمكن حفظ عمل جديد على هذا الجهاز. بيانات نشاطك التجاري آمنة. اتصل بالإنترنت للتجديد.",
+  "Sua assinatura do Cauldra está pausada, então nenhum trabalho novo pode ser salvo neste dispositivo. Os dados da sua empresa estão seguros. Conecte-se à internet para renovar."
+ ],
+ "A renewal payment is already being confirmed. Check its status before paying again.": [
+  "Un paiement de renouvellement est déjà en cours de confirmation. Vérifiez son statut avant de payer à nouveau.",
+  "Ya se está confirmando un pago de renovación. Comprueba su estado antes de volver a pagar.",
+  "يجري بالفعل تأكيد دفعة تجديد. تحقّق من حالتها قبل الدفع مرة أخرى.",
+  "Um pagamento de renovação já está sendo confirmado. Verifique o status antes de pagar novamente."
+ ],
+ "This renewal was already paid. Check its status to refresh your subscription.": [
+  "Ce renouvellement a déjà été payé. Vérifiez son statut pour actualiser votre abonnement.",
+  "Esta renovación ya se pagó. Comprueba su estado para actualizar tu suscripción.",
+  "تم دفع هذا التجديد بالفعل. تحقّق من حالته لتحديث اشتراكك.",
+  "Esta renovação já foi paga. Verifique o status para atualizar sua assinatura."
+ ],
+ "This change was saved while the Cauldra subscription was paused, so it was not applied. It is kept on this device for review.": [
+  "Cette modification a été enregistrée pendant la suspension de l’abonnement Cauldra ; elle n’a donc pas été appliquée. Elle est conservée sur cet appareil pour vérification.",
+  "Este cambio se guardó mientras la suscripción de Cauldra estaba en pausa, así que no se aplicó. Se conserva en este dispositivo para revisarlo.",
+  "حُفظ هذا التغيير أثناء توقف اشتراك Cauldra مؤقتًا، لذا لم يُطبَّق. وهو محفوظ على هذا الجهاز للمراجعة.",
+  "Esta alteração foi salva enquanto a assinatura do Cauldra estava pausada, por isso não foi aplicada. Ela fica guardada neste dispositivo para revisão."
+ ],
+ "Refresh status": [
+  "Actualiser le statut",
+  "Actualizar estado",
+  "تحديث الحالة",
+  "Atualizar status"
+ ],
+ "Cauldra will try the saved card again at {time}. Automatic attempts stop at {end}.": [
+  "Cauldra réessaiera la carte enregistrée le {time}. Les tentatives automatiques s’arrêtent le {end}.",
+  "Cauldra volverá a intentar con la tarjeta guardada el {time}. Los intentos automáticos terminan el {end}.",
+  "سيحاول Cauldra مجددًا باستخدام البطاقة المحفوظة في {time}. تتوقف المحاولات التلقائية في {end}.",
+  "O Cauldra tentará novamente o cartão salvo em {time}. As tentativas automáticas terminam em {end}."
  ]
 }

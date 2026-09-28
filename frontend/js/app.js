@@ -935,6 +935,14 @@
                             setSyncStatus("auth_required");
                             refreshAccessToken(); // best-effort silent recovery via the refresh cookie; the next trigger resumes if it succeeds
                             break;
+                        } else if (res.status === 402) {
+                            // SUB-LIFECYCLE-001: the subscription is paused. The
+                            // work is kept exactly as it is and syncs after renewal;
+                            // the reason is the server's, never "Server error".
+                            noteSubscriptionResponse(res, data);
+                            await scheduleOutboxRetry(op, friendlyErrorMessage(data, t("subscription.inactiveDefault")));
+                            setSyncStatus("pending");
+                            break;
                         } else if ([400, 403, 404, 409, 422].includes(res.status)) {
                             // A genuine business-logic rejection (or a request the
                             // server will never accept) — retrying forever would
@@ -2129,6 +2137,10 @@
                     endingSoonTrial: "Your trial ends on {time}. If a plan isn't confirmed by then, Cauldra pauses until it is. Your data stays safe.",
                     endingSoonPaid: "Your subscription is paid through {time}. If renewal isn't confirmed by then, Cauldra pauses until it is. Your data stays safe.",
                     paidThrough: "Paid through {time}",
+                    refreshStatus: "Refresh status", renewalConfirmingTitle: "Renewal being confirmed", renewalConfirming: "A renewal payment is being confirmed with Paystack. Cauldra unlocks as soon as it is confirmed — there is no need to pay again.",
+                    autoRetryNext: "Cauldra will try your saved card again at {time}. Automatic attempts stop at {end}; you can renew now instead.",
+                    autoRetryNextOther: "Cauldra will try the saved card again at {time}. Automatic attempts stop at {end}.",
+                    autoRetryEnded: "Automatic attempts on your saved card have ended. You can renew at any time.",
                     actionDowngradeTo: "Downgrade to {plan}", actionStartTrial: "Start free trial on {plan}",
                     resourceProducts: "Products", resourceSuppliers: "Suppliers", resourceWarehouses: "Warehouses", resourceUsers: "Users",
                     resourcePriceSources: "Price sources", resourcePurchaseOrders: "Purchase orders", resourceStorage: "Storage",
@@ -21269,13 +21281,25 @@
             const endAt = usage.status === 'trialing' ? usage.trial_ends_at : usage.current_period_end;
             const msLeft = endAt ? new Date(endAt).getTime() - Date.now() : null;
             if (usage.access_paused) {
-                const renew = isAdmin && usage.plans?.[usage.plan]
+                // While a renewal is being confirmed a second payment is refused
+                // by the server, so the Admin gets Refresh status instead of Renew.
+                const renew = usage.renewal_in_progress
+                    ? `<button type="button" id="billing-refresh-status" class="mt-2 min-h-[44px] w-full sm:w-auto border border-borderCol text-textMain px-4 py-2 rounded-xl font-bold text-sm cursor-pointer">${escapeHtml(t('subscription.refreshStatus'))}</button>`
+                    : isAdmin && usage.plans?.[usage.plan]
                     ? `<button type="button" id="billing-renew-now" class="mt-2 min-h-[44px] w-full sm:w-auto bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-bold text-sm cursor-pointer">${escapeHtml(t('subscription.actionRenew', { plan: usage.plan_label || usage.plan }))}</button>`
                     : `<p class="mt-1 text-textSec">${escapeHtml(t('subscription.askAdmin'))}</p>`;
                 box.className = 'mb-2.5 rounded-xl border border-danger/30 bg-danger/10 p-3 text-[11px] text-textMain';
-                box.innerHTML = `<p class="font-bold text-danger">${escapeHtml(t('subscription.pausedTitle'))}</p>`
-                    + `<p class="mt-1 break-words">${escapeHtml(usage.blocked_message || t('subscription.inactiveDefault'))}</p>`
-                    + `<p class="mt-1">${/data is safe/i.test(usage.blocked_message || '') ? '' : `${escapeHtml(t('subscription.pausedDataSafe'))} `}${escapeHtml(t('subscription.pausedUnlocks'))}</p>` + renew;
+                const auto = usage.auto_renewal;
+                const progress = usage.renewal_in_progress
+                    ? `<p class="mt-1 font-semibold text-textMain">${escapeHtml(t('subscription.renewalConfirming'))}</p>`
+                    : auto && !auto.exhausted && auto.next_attempt_at
+                        ? `<p class="mt-1">${escapeHtml(t(isAdmin ? 'subscription.autoRetryNext' : 'subscription.autoRetryNextOther', { time: formatBusinessDateTime(auto.next_attempt_at), end: formatBusinessDateTime(auto.ends_at) }))}</p>`
+                        : auto && auto.exhausted ? `<p class="mt-1">${escapeHtml(t('subscription.autoRetryEnded'))}</p>` : '';
+                box.innerHTML = `<p class="font-bold text-danger">${escapeHtml(t(usage.renewal_in_progress ? 'subscription.renewalConfirmingTitle' : 'subscription.pausedTitle'))}</p>`
+                    + `<p class="mt-1 break-words">${escapeHtml(usage.blocked_message || t('subscription.inactiveDefault'))}</p>` + progress
+                    + (usage.renewal_in_progress ? '' : `<p class="mt-1">${/data is safe/i.test(usage.blocked_message || '') ? '' : `${escapeHtml(t('subscription.pausedDataSafe'))} `}${escapeHtml(t('subscription.pausedUnlocks'))}</p>`) + renew;
+                const refresh = document.getElementById('billing-refresh-status');
+                if (refresh) refresh.onclick = () => loadBillingPanel();
                 const button = document.getElementById('billing-renew-now');
                 if (button) button.onclick = () => openPlanChangeConfirm(usage.plan, usage.billing_interval === 'annual' ? 'annual' : 'monthly', 'checkout');
                 box.classList.remove('hidden');
@@ -26930,6 +26954,24 @@
             applyOfflineActionPolicy();
             refreshPendingExternalActions().catch(() => {});
             setSyncStatus("offline");
+            applyOfflineSubscriptionPause(snapshot);
+        }
+
+        // SUB-LIFECYCLE-001: an offline workspace whose cached paid-through (or
+        // trial-end) time has passed is paused like the online one: Billing
+        // shows the cached plan and dates, new work is refused (offline.js
+        // enqueue), and renewing needs the internet. Re-checked every minute
+        // so a pause that falls while offline takes effect on time.
+        let offlineSubscriptionPauseTimer = null;
+        function applyOfflineSubscriptionPause(snapshot) {
+            const check = () => {
+                if (!window.CauldraOffline?.isOffline?.()) return;
+                const reason = window.CauldraOffline.subscriptionPausedReason(snapshot || window.CauldraOffline.currentSnapshot());
+                if (reason) setSubscriptionBlocked(reason);
+            };
+            check();
+            clearInterval(offlineSubscriptionPauseTimer);
+            offlineSubscriptionPauseTimer = setInterval(check, 60000);
         }
 
         function applyOfflineActionPolicy() {
@@ -30931,6 +30973,9 @@
             if (!deepLink) return;
             const [kind, idPart] = String(deepLink).split(':');
             const id = idPart ? parseInt(idPart, 10) : null;
+            // SUB-LIFECYCLE-001: the notification centre is readable while
+            // paused, but it is never a way into the paused workspace.
+            if (subscriptionBlockedMessage && !['subscription', 'account_security'].includes(kind)) { showSubscriptionBlockedNotice(); return; }
             switch (kind) {
                 case 'inventory':
                     scrollToInventory();

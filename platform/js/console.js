@@ -149,7 +149,8 @@ function billingText(b) {
         case "trial_ends": return `Trial ends ${d}<div class="text-[10px] text-textSec">${b.days_left === 0 ? "ends today" : daysText(b.days_left) + " left"}</div>`;
         case "renews": return `Renews ${d || "—"}${b.pending_downgrade_plan ? `<div class="text-[10px] text-textSec">then ${escapeHtml(b.pending_downgrade_plan)}</div>` : ""}`;
         case "access_until": return `Access until ${d}<div class="text-[10px] text-textSec">cancelled, will not renew</div>`;
-        case "grace_until": return `Payment overdue<div class="text-[10px] text-textSec">${d ? "grace until " + d : "grace period"}</div>`;
+        // SUB-LIFECYCLE-001: past due is paused (no access grace); the date is when automatic renewal attempts stop.
+        case "grace_until": return `Paused, renewal not confirmed<div class="text-[10px] text-textSec">${d ? "automatic attempts until " + d : "automatic attempts window"}</div>`;
         case "expired": return d ? `Expired ${d}` : "Expired";
         case "ended": return d ? `Ended ${d}` : "Ended";
         case "awaiting_card": return `Awaiting card`;
