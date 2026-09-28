@@ -300,7 +300,7 @@ Rows are from the triage (§3 of that file); "Where" says which surfaces are aff
 
 ### 5.5 External or manual items
 
-- **LEGAL-001, row 1:** final founder-approved copy integrated in `7b422c6` (§14.7). Closes once it is deployed to QA and checked there, and the new QA APK is built. Professional legal review may improve it later.
+- **LEGAL-001, row 1:** FIXED + VERIFIED IN QA (Web) — final copy `7b422c6`, list fix `7763a26`, QA web legal smoke 64/64. The Galaxy A23 native legal smoke on the frozen APK is open and non-blocking for the RC freeze (owner decision; §14.8). Professional legal review may improve the copy later.
 - **Paystack B10:** success, declined, 3-D Secure, cancel and duplicate were never exercised. Needs a person, using **TEST** cards, about 45–60 minutes.
 - **QA OpenAI credit:** blocks invoice OCR success. The owner adds credit; do not debug it.
 - **Barcode live lookup:** QA's Railway egress IP has spent the free UPCitemdb quota.
@@ -1287,6 +1287,29 @@ Starting head `99f0128`; QA deployment before this task `2cc30dc2-50b2-4015-81fa
 - **LAUNCH_TRIAGE_2026-09-24.md:** LEGAL-001 moves from "external" to "fixed, awaiting QA verification + APK"; rows 62 and 64 → owner-accepted; add the Resend tracking check as a freeze prerequisite.
 - **REMEDIATION_AND_RETEST_LOG.md:** 2026-09-28 cloud: LEGAL-001 `7b422c6`; test results above; no QA deploy, no APK, no Android, no production.
 - **PRODUCTION_ROLLOUT_MANIFEST.md:** add `7b422c6`; no migrations; no new variables; cache v22; legal copy effective 28 September 2026 (if the production launch date differs, the owner decides whether to change the effective date in a follow-up commit before rollout); Resend open/click tracking OFF on the production sender.
+
+### 14.8 RC FREEZE — release candidate `7763a26` frozen (2026-09-28, cloud session, records only)
+
+The owner's four permanent records were attached to this session and updated directly (MASTER_REMEDIATION_TRACKER, LAUNCH_TRIAGE_2026-09-24, REMEDIATION_AND_RETEST_LOG, PRODUCTION_ROLLOUT_MANIFEST); this section mirrors them.
+
+- **Frozen commit:** `7763a26` (LEGAL-UI-001), the last intended RC commit. Cloud check: branch fetched; HEAD = origin = `7763a26`; working tree clean; no commit or uncommitted change after it. This section is a documentation-only commit on top; it changes no application code, CSS or test, so the frozen code is still `7763a26`.
+- **Frozen QA deployment:** `5e9f973a-cf90-4969-97b4-074849e9101c` — SUCCESS; `/health` 200.
+- **Migration head:** `0044_subscription_renewal_engine`, matching the code.
+- **Frozen QA APK:** `cauldra-qa-rc-7763a26.apk` — SHA-256 `8421310071c4b82e2fb33936340208cabcd1d6f8cec9b8d0e74d121c1027684d` — 16,012,408 bytes; supersedes every earlier QA APK.
+- **Verification (recorded local evidence; not rerun here):** QA web legal smoke 64/64; 34/34 JS test files on a clean export; `test_native_bundle` PASS after the build; 0 legal placeholders, no draft banner; LEGAL-UI-001 PASS; Resend Open Tracking OFF and Click Tracking OFF (owner-verified).
+- **Closures preserved:**
+  - Android/offline closure;
+  - subscription Android closure;
+  - subscription reminder email;
+  - Paystack TEST renewal;
+  - subscription pre-freeze policy;
+  - Resend tracking closed;
+  - legal web verification and LEGAL-UI-001.
+  - Owner decisions: rows 62 and 64 accepted for launch; the ~1 s paused → restored notice accepted as non-blocking polish.
+- **Open, non-blocking (owner decision), not PASS:** the Galaxy A23 native legal smoke on `cauldra-qa-rc-7763a26.apk`. Check: install; Terms and Privacy open and scroll; bullets visible; no draft banner or placeholders; operator, address and contact correct; governing law correct in the Terms; no clipping or horizontal scrolling. It is a pre-production / native-release item.
+- **Freeze rule:** no new features, refactors or unrelated polish. Any code change after `7763a26` breaks the RC and needs explicit re-verification.
+- **Production and `main`:** untouched (`origin/main` `4195d98`). No production preflight yet. No PR, no tag.
+- Superseded by local evidence (do not reopen): the §14.6 / §14.7 "awaiting QA + APK + Android" and "Resend tracking to confirm" items.
 
 ---
 
