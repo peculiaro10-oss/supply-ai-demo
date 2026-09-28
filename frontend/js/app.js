@@ -2137,6 +2137,13 @@
                     endingSoonTrial: "Your trial ends on {time}. If a plan isn't confirmed by then, Cauldra pauses until it is. Your data stays safe.",
                     endingSoonPaid: "Your subscription is paid through {time}. If renewal isn't confirmed by then, Cauldra pauses until it is. Your data stays safe.",
                     paidThrough: "Paid through {time}",
+                    pausedPaidThroughLabel: "Paid through", pausedTrialEndedLabel: "Trial ended", statusPaused: "Paused",
+                    savedTitle: "Saved subscription status",
+                    savedAt: "Saved on this device at {time}. This is not live: payment status can't be checked offline.",
+                    savedAtUnknown: "Saved on this device. This is not live: payment status can't be checked offline.",
+                    savedPausedMessage: "The paid-through time saved on this device has passed, so Cauldra is paused on this device.",
+                    savedBillingMissing: "Subscription details aren't saved on this device yet. Connect to the internet to see them.",
+                    renewNeedsInternet: "Renewing or paying needs an internet connection.",
                     refreshStatus: "Refresh status", renewalConfirmingTitle: "Renewal being confirmed", renewalConfirming: "A renewal payment is being confirmed with Paystack. Cauldra unlocks as soon as it is confirmed — there is no need to pay again.",
                     autoRetryNext: "Cauldra will try your saved card again at {time}. Automatic attempts stop at {end}; you can renew now instead.",
                     autoRetryNextOther: "Cauldra will try the saved card again at {time}. Automatic attempts stop at {end}.",
@@ -21133,6 +21140,11 @@
             if (loadingEl) { loadingEl.innerHTML = BILLING_LOADING_HTML; loadingEl.setAttribute("aria-busy", "true"); }
             loadingEl?.classList.remove("hidden");
             document.getElementById("billing-panel-content")?.classList.add("hidden");
+            // SUB-LIFECYCLE-001: offline there is no live subscription status.
+            // Billing shows what this device saved at its last sync, labelled
+            // as saved, and never contacts the server or the payment provider.
+            if (offlineWorkspaceUnlocked) { renderBillingSaved(savedBillingUsage(), loadingEl); return; }
+            setBillingSavedView(false);
             try {
                 const [usageRes, paymentsRes] = await Promise.all([
                     fetch(`${API_URL}/subscription/usage`, { headers: { "Authorization": `Bearer ${authToken}` } }),
@@ -21167,6 +21179,9 @@
                     loadingEl.innerHTML = `<p class="text-danger mb-2">${escapeHtml(SESSION_EXPIRED_MESSAGE)}</p>`;
                     return;
                 }
+                // The connection dropped: the status saved on this device (if
+                // any) is shown, labelled as saved, rather than nothing.
+                if (!e.status && savedBillingUsage()) { renderBillingSaved(savedBillingUsage(), loadingEl); return; }
                 const message = e.status ? friendlyErrorMessage(e.message, "Couldn't load your subscription right now.") : "Couldn't load your subscription right now. Check your connection and try again.";
                 loadingEl.innerHTML = `
                     <p class="text-danger mb-2" role="alert">${escapeHtml(message)}</p>
@@ -21174,8 +21189,11 @@
             }
         }
 
-        function renderBillingStatus(usage) {
-            const badge = SUBSCRIPTION_STATUS_BADGES[usage.status] || { label: usage.status, cls: 'text-textSec border-borderCol bg-bgMain' };
+        function renderBillingStatus(usage, options = {}) {
+            const saved = !!options.saved;
+            const badge = saved && usage.access_paused
+                ? { label: t('subscription.statusPaused'), cls: SUBSCRIPTION_STATUS_BADGES.expired.cls }
+                : SUBSCRIPTION_STATUS_BADGES[usage.status] || { label: usage.status, cls: 'text-textSec border-borderCol bg-bgMain' };
             document.getElementById("billing-plan-label").textContent = usage.plan_label || usage.plan;
             const statusBadgeEl = document.getElementById("billing-status-badge");
             statusBadgeEl.textContent = badge.label;
@@ -21193,9 +21211,18 @@
             }
 
             const nextBillingBox = document.getElementById("billing-next-billing-box");
+            const nextBillingLabel = document.getElementById("billing-next-billing-label");
+            const pausedAt = usage.access_paused ? subscriptionPauseAt(usage) : null;
             // SUB-LIFECYCLE-001: exact date and time in the business timezone;
             // access pauses at that instant if renewal is not confirmed.
-            if (usage.next_billing_at && ['trialing', 'active'].includes(usage.status)) {
+            if (pausedAt) {
+                // Paused: the exact paid-through (or trial-end) time the server
+                // gates access on stays visible; the pause never hides it.
+                nextBillingBox.classList.remove("hidden");
+                if (nextBillingLabel) nextBillingLabel.textContent = t(usage.paid_through_at ? 'subscription.pausedPaidThroughLabel' : 'subscription.pausedTrialEndedLabel');
+                document.getElementById("billing-next-billing-value").textContent = formatBusinessDateTime(pausedAt);
+            } else if (usage.next_billing_at && ['trialing', 'active'].includes(usage.status)) {
+                if (nextBillingLabel) nextBillingLabel.textContent = t('subscription.nextBillingDate');
                 nextBillingBox.classList.remove("hidden");
                 document.getElementById("billing-next-billing-value").textContent = usage.cancel_at_period_end
                     ? `Access ends ${formatBusinessDateTime(usage.current_period_end || usage.next_billing_at)} (cancelled)`
@@ -21242,7 +21269,7 @@
                 cancelRow.classList.add("hidden");
             }
 
-            renderBillingLifecycleNotice(usage, isAdmin);
+            renderBillingLifecycleNotice(usage, isAdmin, saved);
 
             // UX-001: say why a Manager has no plan buttons.
             document.getElementById('billing-admin-only-note')?.classList.toggle('hidden', isAdmin);
@@ -21268,7 +21295,7 @@
         // own reason, that the data is safe, and Renew for the Admin (other
         // roles are told to ask the Admin). Ending soon (within 3 days): the
         // exact end time in the business timezone.
-        function renderBillingLifecycleNotice(usage, isAdmin) {
+        function renderBillingLifecycleNotice(usage, isAdmin, saved = false) {
             let box = document.getElementById('billing-lifecycle-box');
             const grid = document.getElementById('billing-next-billing-box')?.parentElement;
             if (!box && grid) {
@@ -21283,7 +21310,13 @@
             if (usage.access_paused) {
                 // While a renewal is being confirmed a second payment is refused
                 // by the server, so the Admin gets Refresh status instead of Renew.
-                const renew = usage.renewal_in_progress
+                // Saved (offline) view: paying needs the internet, so Renew only
+                // says so; it never starts a checkout or shows a payment result.
+                const renew = saved
+                    ? (isAdmin
+                        ? `<button type="button" id="billing-renew-offline" aria-disabled="true" class="mt-2 min-h-[44px] w-full sm:w-auto border border-borderCol text-textSec px-4 py-2 rounded-xl font-bold text-sm cursor-pointer">${escapeHtml(t('subscription.actionRenew', { plan: usage.plan_label || usage.plan }))}</button>`
+                        : `<p class="mt-1 text-textSec">${escapeHtml(t('subscription.askAdmin'))}</p>`)
+                    : usage.renewal_in_progress
                     ? `<button type="button" id="billing-refresh-status" class="mt-2 min-h-[44px] w-full sm:w-auto border border-borderCol text-textMain px-4 py-2 rounded-xl font-bold text-sm cursor-pointer">${escapeHtml(t('subscription.refreshStatus'))}</button>`
                     : isAdmin && usage.plans?.[usage.plan]
                     ? `<button type="button" id="billing-renew-now" class="mt-2 min-h-[44px] w-full sm:w-auto bg-primary hover:bg-primaryHover text-white px-4 py-2 rounded-xl font-bold text-sm cursor-pointer">${escapeHtml(t('subscription.actionRenew', { plan: usage.plan_label || usage.plan }))}</button>`
@@ -21297,11 +21330,13 @@
                         : auto && auto.exhausted ? `<p class="mt-1">${escapeHtml(t('subscription.autoRetryEnded'))}</p>` : '';
                 box.innerHTML = `<p class="font-bold text-danger">${escapeHtml(t(usage.renewal_in_progress ? 'subscription.renewalConfirmingTitle' : 'subscription.pausedTitle'))}</p>`
                     + `<p class="mt-1 break-words">${escapeHtml(usage.blocked_message || t('subscription.inactiveDefault'))}</p>` + progress
-                    + (usage.renewal_in_progress ? '' : `<p class="mt-1">${/data is safe/i.test(usage.blocked_message || '') ? '' : `${escapeHtml(t('subscription.pausedDataSafe'))} `}${escapeHtml(t('subscription.pausedUnlocks'))}</p>`) + renew;
+                    + (usage.renewal_in_progress ? '' : `<p class="mt-1">${/data is safe/i.test(usage.blocked_message || '') ? '' : `<span>${escapeHtml(t('subscription.pausedDataSafe'))}</span> `}<span>${escapeHtml(t('subscription.pausedUnlocks'))}</span></p>`) + renew;
                 const refresh = document.getElementById('billing-refresh-status');
                 if (refresh) refresh.onclick = () => loadBillingPanel();
                 const button = document.getElementById('billing-renew-now');
                 if (button) button.onclick = () => openPlanChangeConfirm(usage.plan, usage.billing_interval === 'annual' ? 'annual' : 'monthly', 'checkout');
+                const offlineRenew = document.getElementById('billing-renew-offline');
+                if (offlineRenew) offlineRenew.onclick = () => showToast(t('subscription.renewNeedsInternet'), 'info');
                 box.classList.remove('hidden');
             } else if (['trialing', 'active'].includes(usage.status) && msLeft !== null && msLeft > 0 && msLeft <= 3 * 86400000) {
                 box.className = 'mb-2.5 rounded-xl border border-warning/40 bg-warning/10 p-3 text-[11px] text-textMain';
@@ -21311,6 +21346,58 @@
                 box.classList.add('hidden');
                 box.innerHTML = '';
             }
+        }
+
+        // SUB-LIFECYCLE-001: the instant access pauses — the timestamp the
+        // server gates on: the paid-through time once paid, else the trial end.
+        function subscriptionPauseAt(usage) {
+            if (!usage) return null;
+            return usage.paid_through_at || (usage.trial_start_at ? usage.trial_ends_at : null) || usage.current_period_end || null;
+        }
+
+        // The subscription status saved in this device's encrypted offline
+        // snapshot at its last sync: the same role-redacted /subscription/usage
+        // the server returned then. Nothing else is cached for Billing.
+        function savedBillingUsage() {
+            const entry = window.CauldraOffline?.currentSnapshot?.()?.cache?.['/subscription/usage'];
+            return entry?.value ? { usage: entry.value, savedAt: entry.verified_at || null } : null;
+        }
+
+        function setBillingSavedView(saved) {
+            ['billing-usage-section', 'billing-plans-section'].forEach(id => document.getElementById(id)?.classList.toggle('hidden', saved));
+            if (saved) ['billing-card-box', 'billing-cancel-row', 'billing-pending-downgrade-box', 'billing-payment-history-section'].forEach(id => document.getElementById(id)?.classList.add('hidden'));
+            const notice = document.getElementById('billing-offline-notice');
+            if (notice && !saved) { notice.classList.add('hidden'); notice.innerHTML = ''; }
+        }
+
+        // Saved view: plan, status and the exact paid-through time, labelled as
+        // saved on this device. Whether the pause has started is worked out
+        // from the saved paid-through time exactly as offline capture is
+        // refused (offline.js). Anything only the server knows right now — a
+        // payment being confirmed, automatic retries, payment details, plan
+        // changes — is left out rather than shown as if it were live. The
+        // saved copy never becomes billingUsageCache (the live status).
+        function renderBillingSaved(saved, loadingEl) {
+            loadingEl?.removeAttribute('aria-busy');
+            if (!saved) {
+                if (loadingEl) loadingEl.innerHTML = `<p class="text-textSec mb-2" role="status">${escapeHtml(t('subscription.savedBillingMissing'))}</p>`;
+                return;
+            }
+            const paused = saved.usage.access_paused === true
+                || !!window.CauldraOffline?.subscriptionPausedReason?.({ cache: { '/subscription/usage': { value: saved.usage } } });
+            const usage = { ...saved.usage, access_paused: paused, blocked_message: paused ? t('subscription.savedPausedMessage') : null,
+                renewal_in_progress: false, auto_renewal: null, pending_downgrade: null, payment_details_visible: false };
+            loadingEl?.classList.add('hidden');
+            document.getElementById('billing-panel-content')?.classList.remove('hidden');
+            renderBillingStatus(usage, { saved: true });
+            setBillingSavedView(true);
+            const notice = document.getElementById('billing-offline-notice');
+            if (!notice) return;
+            notice.innerHTML = `<p class="font-bold">${escapeHtml(t('subscription.savedTitle'))}</p>`
+                + `<p class="mt-1">${escapeHtml(saved.savedAt ? t('subscription.savedAt', { time: formatBusinessDateTime(saved.savedAt) }) : t('subscription.savedAtUnknown'))}</p>`
+                + `<p class="mt-1">${escapeHtml(t('subscription.renewNeedsInternet'))}</p>`
+                + (offlineWorkspaceUnlocked ? '' : `<button type="button" onclick="loadBillingPanel()" class="min-h-[44px] px-4 text-primary underline cursor-pointer">Retry</button>`);
+            notice.classList.remove('hidden');
         }
 
         // AI Usage & Resources — moved here from the dashboard (see dashboard
@@ -26981,8 +27068,12 @@
                 "DeleteBusiness", "CreateWarehouse", "DeleteWarehouse", "LocationModal", "PriceMonitor",
                 "sendPurchaseOrderWhatsApp", "Invoice", "WhatsApp"
             ];
+            // SUB-LIFECYCLE-001: Billing opens and closes offline; it shows the
+            // subscription status saved on this device (never a live payment).
+            const offlineAllowed = ["openBillingModal()", "closeBillingModal()"];
             document.querySelectorAll("button[onclick],a[onclick]").forEach((element) => {
                 const handler = element.getAttribute("onclick") || "";
+                if (offlineAllowed.includes(handler.trim())) return;
                 if (onlineOnlyFragments.some((fragment) => handler.includes(fragment))) {
                     element.dataset.onlineOnly = "1";
                     element.title = "Internet connection required for this action.";

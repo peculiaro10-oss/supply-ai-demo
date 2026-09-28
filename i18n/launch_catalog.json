@@ -12418,5 +12418,59 @@
   "Cauldra volverá a intentar con la tarjeta guardada el {time}. Los intentos automáticos terminan el {end}.",
   "سيحاول Cauldra مجددًا باستخدام البطاقة المحفوظة في {time}. تتوقف المحاولات التلقائية في {end}.",
   "O Cauldra tentará novamente o cartão salvo em {time}. As tentativas automáticas terminam em {end}."
+ ],
+ "Paid through": [
+  "Payé jusqu’au",
+  "Pagado hasta",
+  "مدفوع حتى",
+  "Pago até"
+ ],
+ "Trial ended": [
+  "Essai terminé",
+  "Prueba finalizada",
+  "انتهت الفترة التجريبية",
+  "Teste encerrado"
+ ],
+ "Paused": [
+  "Suspendu",
+  "En pausa",
+  "متوقف مؤقتًا",
+  "Pausado"
+ ],
+ "Saved subscription status": [
+  "Statut d’abonnement enregistré",
+  "Estado de suscripción guardado",
+  "حالة الاشتراك المحفوظة",
+  "Status da assinatura salvo"
+ ],
+ "Saved on this device at {time}. This is not live: payment status can't be checked offline.": [
+  "Enregistré sur cet appareil le {time}. Ce n’est pas en direct : l’état du paiement ne peut pas être vérifié hors ligne.",
+  "Guardado en este dispositivo el {time}. No es en tiempo real: el estado del pago no se puede comprobar sin conexión.",
+  "محفوظ على هذا الجهاز في {time}. هذه ليست حالة مباشرة: لا يمكن التحقق من حالة الدفع دون اتصال.",
+  "Salvo neste dispositivo em {time}. Não é em tempo real: o status do pagamento não pode ser verificado offline."
+ ],
+ "Saved on this device. This is not live: payment status can't be checked offline.": [
+  "Enregistré sur cet appareil. Ce n’est pas en direct : l’état du paiement ne peut pas être vérifié hors ligne.",
+  "Guardado en este dispositivo. No es en tiempo real: el estado del pago no se puede comprobar sin conexión.",
+  "محفوظ على هذا الجهاز. هذه ليست حالة مباشرة: لا يمكن التحقق من حالة الدفع دون اتصال.",
+  "Salvo neste dispositivo. Não é em tempo real: o status do pagamento não pode ser verificado offline."
+ ],
+ "The paid-through time saved on this device has passed, so Cauldra is paused on this device.": [
+  "L’échéance payée enregistrée sur cet appareil est passée ; Cauldra est donc suspendu sur cet appareil.",
+  "La fecha de pago guardada en este dispositivo ya pasó, así que Cauldra está en pausa en este dispositivo.",
+  "انقضى موعد نهاية الفترة المدفوعة المحفوظ على هذا الجهاز، لذا توقف Cauldra مؤقتًا على هذا الجهاز.",
+  "O prazo pago salvo neste dispositivo já passou, então o Cauldra está pausado neste dispositivo."
+ ],
+ "Subscription details aren't saved on this device yet. Connect to the internet to see them.": [
+  "Les détails de l’abonnement ne sont pas encore enregistrés sur cet appareil. Connectez-vous à Internet pour les voir.",
+  "Los detalles de la suscripción aún no están guardados en este dispositivo. Conéctate a internet para verlos.",
+  "لم تُحفظ تفاصيل الاشتراك على هذا الجهاز بعد. اتصل بالإنترنت لعرضها.",
+  "Os detalhes da assinatura ainda não estão salvos neste dispositivo. Conecte-se à internet para vê-los."
+ ],
+ "Renewing or paying needs an internet connection.": [
+  "Le renouvellement ou le paiement nécessite une connexion Internet.",
+  "Renovar o pagar requiere conexión a internet.",
+  "يتطلب التجديد أو الدفع اتصالاً بالإنترنت.",
+  "Renovar ou pagar requer conexão com a internet."
  ]
 }

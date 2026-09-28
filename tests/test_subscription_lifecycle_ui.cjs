@@ -20,7 +20,7 @@ check('paid-through and trial end are shown with date AND time in the business t
     assert.match(status, /formatBusinessDateTime\(usage\.trial_ends_at\)/);
     assert.match(status, /formatBusinessDateTime\(usage\.next_billing_at\)/);
     assert.match(status, /subscription\.paidThrough/);
-    assert.match(status, /renderBillingLifecycleNotice\(usage, isAdmin\)/);
+    assert.match(status, /renderBillingLifecycleNotice\(usage, isAdmin, saved\)/);
 });
 check('paused notice: server reason, data safe, Renew for Admin only, ask-the-Admin otherwise', () => {
     const notice = fnBody('renderBillingLifecycleNotice');
@@ -49,7 +49,7 @@ check('new wording is translated for every launch language', () => {
     }
 });
 check('service-worker cache bumped so installed web clients take the new Billing screen', () => {
-    assert.match(sw, /const SHELL_CACHE = "cauldra-shell-v18-subscription-lifecycle";/);
+    assert.match(sw, /const SHELL_CACHE = "cauldra-shell-v19-billing-saved-status";/);
 });
 const offline = fs.readFileSync(path.join(root, 'frontend/js/offline.js'), 'utf8');
 const payments = fs.readFileSync(path.join(root, 'frontend/js/payments.js'), 'utf8');

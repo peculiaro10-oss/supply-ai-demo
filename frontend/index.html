@@ -1406,6 +1406,8 @@
                 <div id="billing-panel-loading" class="text-center text-textSec py-8"><i class="fa-solid fa-spinner fa-spin mr-1.5"></i> Loading subscription…</div>
 
                 <div id="billing-panel-content" class="hidden space-y-4">
+                    <!-- SUB-LIFECYCLE-001: offline, the subscription status saved on this device, labelled as saved -->
+                    <div id="billing-offline-notice" role="status" class="hidden rounded-xl border border-warning/40 bg-warning/10 p-3 text-[11px] text-textMain break-words"></div>
                     <!-- Current status -->
                     <div class="bg-bgMain border border-borderCol rounded-2xl p-3.5 space-y-2.5">
                         <div class="flex items-center justify-between flex-wrap gap-2">
@@ -1429,7 +1431,7 @@
                                 <p id="billing-trial-dates-value" class="text-textMain font-semibold mt-0.5">—</p>
                             </div>
                             <div id="billing-next-billing-box" class="hidden bg-cardBg border border-borderCol rounded-xl p-2.5 col-span-2">
-                                <p class="text-textSec text-[10px]">Next Billing Date</p>
+                                <p id="billing-next-billing-label" class="text-textSec text-[10px]">Next Billing Date</p>
                                 <p id="billing-next-billing-value" class="text-textMain font-semibold mt-0.5">—</p>
                             </div>
                             <div id="billing-card-box" class="hidden bg-cardBg border border-borderCol rounded-xl p-2.5 col-span-2">
@@ -1451,7 +1453,7 @@
                          standalone dashboard card, now lives only here, rendered
                          by renderBillingAiUsage() from the same usage payload
                          already fetched above, never a second fetch). -->
-                    <div class="bg-bgMain border border-borderCol rounded-2xl p-3.5">
+                    <div id="billing-usage-section" class="bg-bgMain border border-borderCol rounded-2xl p-3.5">
                         <h4 class="font-bold text-textMain mb-2"><i class="fa-solid fa-chart-pie text-primary mr-1.5"></i>AI Usage & Resources</h4>
                         <div id="subscription-warning" class="hidden mb-2 rounded-lg px-2.5 py-2 text-[11px]"></div>
                         <div class="usage-meter"><div class="flex justify-between gap-3 text-[11px]"><span class="font-semibold text-textMain">AI Credits</span><span id="subscription-ai-label" class="font-mono text-textSec">0 / 0</span></div><div class="h-2 rounded-full bg-cardBg overflow-hidden mt-1.5"><div id="subscription-ai-bar" class="h-full bg-primary rounded-full" style="width:0%"></div></div><div id="subscription-ai-detail" class="text-[10px] text-textSec mt-1.5"></div></div>
@@ -1474,7 +1476,7 @@
                     </div>
 
                     <!-- Plan picker -->
-                    <div>
+                    <div id="billing-plans-section">
                         <div class="flex items-center justify-between mb-2">
                             <p id="billing-plans-heading" class="text-textMain font-bold">Plans</p>
                             <div role="group" aria-label="Billing interval" class="flex items-center gap-1 bg-bgMain border border-borderCol rounded-xl p-1">
