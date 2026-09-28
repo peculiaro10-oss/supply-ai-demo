@@ -20894,8 +20894,13 @@
         }
         function closeAboutModal() { document.getElementById("about-modal")?.classList.add("hidden"); }
 
+        // A document opened from About returns to About when closed; one opened
+        // from sign-up, a trial or a plan change returns to that screen.
+        let legalDocReturnsToAbout = false;
         function openLegalDocModal(title, bodyHtml) {
-            document.getElementById("about-modal")?.classList.add("hidden");
+            const about = document.getElementById("about-modal");
+            legalDocReturnsToAbout = !!about && !about.classList.contains("hidden");
+            about?.classList.add("hidden");
             const titleEl = document.getElementById("legal-doc-title");
             if (titleEl) titleEl.innerHTML = `<i class="fa-solid fa-scale-balanced text-primary"></i> ${escapeHtml(title)}`;
             const bodyEl = document.getElementById("legal-doc-body");
@@ -20909,70 +20914,241 @@
         }
         function closeLegalDocModal() {
             document.getElementById("legal-doc-modal")?.classList.add("hidden");
-            document.getElementById("about-modal")?.classList.remove("hidden");
+            if (legalDocReturnsToAbout) document.getElementById("about-modal")?.classList.remove("hidden");
+            legalDocReturnsToAbout = false;
         }
 
-        // Shared draft-notice banner every legal document opens with — one
-        // definition, reused by all three, so the wording can never drift
-        // between them.
-        function legalDraftBanner() {
-            return `<div class="rounded-xl border border-warning/40 bg-warning/10 text-warning px-3 py-2 font-bold text-[10px] uppercase tracking-wide">DRAFT — REQUIRES LEGAL REVIEW BEFORE PUBLIC LAUNCH</div>`;
-        }
+        // LEGAL-001 — final launch copy of the Terms of Service and Privacy
+        // Policy, approved by the founder on 2026-09-28. The operator, address,
+        // governing law and contact are defined once here and reused by both
+        // documents. The billing wording describes the behaviour the renewal
+        // engine actually has (main.py: PLAN_CONFIG trial_days,
+        // RENEWAL_RETRY_INTERVAL / RENEWAL_RETRY_WINDOW,
+        // SUBSCRIPTION_EMAIL_PRE_STAGES); tests/test_legal_documents.cjs keeps
+        // the two in step.
+        const LEGAL_OPERATOR = "Cohren Limited";
+        const LEGAL_ADDRESS = "No. 21, Amadi Close, Oyigbo, Rivers State, Nigeria";
+        const LEGAL_GOVERNING_LAW = "the Federal Republic of Nigeria";
+        const LEGAL_CONTACT_EMAIL = "contact@cohren.com";
+        const LEGAL_EFFECTIVE_DATE = "28 September 2026";
+
         function legalSection(heading, bodyHtml) {
-            return `<div><h5 class="font-bold text-textMain text-[11px] mb-1">${escapeHtml(heading)}</h5><div>${bodyHtml}</div></div>`;
+            return `<div><h5 class="font-bold text-textMain text-[11px] mb-1">${escapeHtml(heading)}</h5><div class="space-y-1.5 break-words">${bodyHtml}</div></div>`;
+        }
+        function legalParagraphs(...paragraphs) {
+            return paragraphs.map(text => `<p>${text}</p>`).join("");
+        }
+        function legalList(items) {
+            return `<ul class="list-disc pl-5 space-y-0.5">${items.map(item => `<li>${item}</li>`).join("")}</ul>`;
+        }
+        function legalContactLink() {
+            return `<a class="text-primary hover:underline break-all" href="mailto:${LEGAL_CONTACT_EMAIL}">${LEGAL_CONTACT_EMAIL}</a>`;
+        }
+        function legalDocumentHeading(title) {
+            return `<div><h4 class="font-bold text-textMain text-sm">${escapeHtml(title)}</h4><p class="text-textMain font-semibold">Effective date: ${LEGAL_EFFECTIVE_DATE}</p></div>`;
         }
 
         function openPrivacyPolicyModal() {
-            const s = legalSection;
+            const s = legalSection, p = legalParagraphs, list = legalList, mail = legalContactLink();
             const html = [
-                legalDraftBanner(),
-                s("1. Who operates Cauldra", `Cauldra is operated by [LEGAL ENTITY NAME TO BE CONFIRMED AFTER REGISTRATION]. Registered address: [REGISTERED ADDRESS TO BE CONFIRMED]. Jurisdiction: [JURISDICTION TO BE CONFIRMED]. Contact: <a class="text-primary hover:underline" href="mailto:contact@cohren.com">contact@cohren.com</a>.`),
-                s("2. Personal information we collect", `Name, username, email, phone number, avatar/profile photo, role, position, preferred language, email verification state, login/session/security information, and account activity/audit information.`),
-                s("3. Business information", `Business profile details; locations/branches; warehouses; products; inventory and stock levels; pricing; suppliers and their contact information; sales; expenses; purchase orders; Business Day records; employee/team information; notifications; audit/activity history; reporting and operational metrics; and Business Brain's own operational findings about your business.`),
-                s("4. Why Cauldra processes this data", `To create and secure accounts; verify email addresses; provide Cauldra's business-management functionality (inventory, sales, purchasing, expenses, Business Day); manage employee permissions; generate reports; manage subscriptions and billing; send transactional communications; prevent security incidents, fraud and abuse; maintain audit records; diagnose reliability/errors; and meet applicable legal obligations.`),
-                s("5. Authentication", `Cauldra uses Supabase for authentication and email verification. Passwords are never stored in plain text.`),
-                s("6. Payments", `Payment processing is handled by Paystack. Cauldra does not store full card numbers or CVV codes. Cauldra may retain limited billing metadata such as subscription status and transaction/payment references.`),
-                s("7. Email delivery", `Transactional emails (verification, password recovery, security and billing notices, and Purchase Order emails you choose to send) are delivered through Cauldra's email provider.`),
-                s("8. Error monitoring", `Cauldra uses Sentry for technical error and diagnostic monitoring, with security-sensitive information intended to be filtered before it reaches that system.`),
-                s("9. AI providers", `For the specific AI-powered features you choose to use (such as the margin advisor, AI chat, or invoice scanning), the information that feature needs is sent to the relevant AI provider (such as OpenAI or Google Gemini) to generate a response. Cauldra does not send your business data to an AI provider merely because you use the rest of the application.`),
-                s("10. Business Brain", `Business Brain is Cauldra's own deterministic, internal analysis of your business's data. It is not a third-party AI service and does not send your data to an external AI provider.`),
-                s("11. Local/browser storage", `Cauldra uses necessary session/authentication browser storage, and, where applicable, localStorage/sessionStorage, IndexedDB, and a service-worker cache to support offline use. Not every one of these is a "cookie" in the traditional sense.`),
-                s("12. Data sharing", `Cauldra does not sell personal data. Information may be shared with the service providers necessary to operate Cauldra (such as those named above).`),
-                s("13. Retention", `[RETENTION PERIODS TO BE CONFIRMED AND LEGALLY REVIEWED]. Some limited historical, audit, security, or billing records may be retained for longer where necessary for legal, security, fraud-prevention, or historical business-integrity reasons.`),
-                s("14. Deletion / disabled accounts", `Disabling an account, deleting a user, and deleting a business are different actions. Historical business records may retain identity snapshots (such as a name or role at the time of an action) for attribution even after a user is deleted.`),
-                s("15. International processing", `Cauldra's service providers may process information in countries other than your own, subject to applicable legal safeguards.`),
-                s("16. Your rights", `Subject to applicable law, you may have rights to access, correct, delete, restrict or object to the processing of, or withdraw consent for the use of your personal information, and to make privacy inquiries generally.`),
-                s("17. Age", `[MINIMUM ACCOUNT AGE / CONTRACTUAL CAPACITY RULE TO BE LEGALLY CONFIRMED]`),
-                s("18. Contact", `Privacy questions: <a class="text-primary hover:underline" href="mailto:contact@cohren.com">contact@cohren.com</a>`),
+                legalDocumentHeading("Cauldra Privacy Policy"),
+                s("1. Who operates Cauldra", p(
+                    `Cauldra is operated by ${LEGAL_OPERATOR}, with its business address at ${LEGAL_ADDRESS}.`,
+                    `Privacy questions or requests may be sent to ${mail}.`)),
+                s("2. Personal information we collect", p("Cauldra may process information including:") + list([
+                    "name;", "username;", "email address;", "phone number;", "profile photo/avatar;", "role and position;",
+                    "preferred language;", "email-verification state;", "authentication/session/security information;",
+                    "account activity and audit information."])),
+                s("3. Business information", p("Depending on how a business uses Cauldra, the service may process:") + list([
+                    "business profile details;", "branches or locations;", "warehouses;", "products and inventory;",
+                    "stock levels and pricing;", "suppliers and supplier contact information;", "sales;", "expenses;",
+                    "purchase orders;", "Business Day records;", "employee/team information;", "notifications;",
+                    "audit and activity history;", "reports and operational metrics;", "Business Brain findings."])),
+                s("4. Why we process information", p("Cauldra processes information as reasonably necessary to:") + list([
+                    "create and secure accounts;", "verify users and email addresses;",
+                    "provide inventory, sales, purchasing, expense, team, and Business Day functionality;",
+                    "enforce user permissions;", "provide reporting;", "manage subscriptions and billing;",
+                    "send transactional communications;", "prevent fraud, abuse, and security incidents;",
+                    "maintain audit records;", "diagnose errors and reliability problems;",
+                    "provide AI features requested by users;", "comply with applicable legal obligations."]) + p(
+                    "Depending on the circumstances and applicable law, processing may be based on providing the requested service, legitimate operational or security interests, legal obligations, or consent where consent is required.")),
+                s("5. Authentication", p(
+                    "Cauldra uses Supabase for authentication and related account services.",
+                    `Passwords are not intentionally stored by ${LEGAL_OPERATOR} in readable plain text.`)),
+                s("6. Payments", p(
+                    "Payments are processed by Paystack.",
+                    "Cauldra does not store full payment-card numbers or CVV codes.",
+                    "Cauldra may store limited payment and billing information necessary to operate subscriptions and maintain financial records, such as:") + list([
+                    "payment references;", "payment status;", "billing-period information;",
+                    "card-brand and last-four information where supplied by the provider;", "subscription state;",
+                    "payment and audit records."])),
+                s("7. Email delivery", p("Cauldra uses an email-delivery provider for transactional messages including:") + list([
+                    "account verification;", "password recovery;", "security notices;", "subscription and billing notices;",
+                    "Purchase Order emails that a user chooses to send."])),
+                s("8. Error and reliability monitoring", p(
+                    "Cauldra uses Sentry or similar monitoring services to detect technical errors and reliability problems.",
+                    "Cauldra intends to filter passwords, full payment-card details, authentication secrets, and other security-sensitive information from diagnostic reports.")),
+                s("9. AI providers", p(
+                    "When a user deliberately uses an AI-powered feature, such as AI chat, invoice scanning, margin advice, or another provider-backed feature, information necessary for that request may be sent to the relevant AI provider, including providers such as OpenAI or Google Gemini.",
+                    "Cauldra does not send all business data to an external AI provider merely because a business uses Cauldra.")),
+                s("10. Business Brain", p(
+                    "Business Brain is Cauldra's internal deterministic analysis of business information.",
+                    "It is distinct from third-party AI-provider features and does not require sending the relevant business data to an external AI provider merely to produce those internal findings.")),
+                s("11. Device, browser, and offline storage", p("Cauldra uses authentication/session storage and, where applicable:") + list([
+                    "localStorage;", "sessionStorage;", "IndexedDB;", "service-worker caches;",
+                    "native-device storage used by supported offline functionality."]) + p(
+                    "These technologies support functions including sign-in, application operation, performance, and optional offline use.",
+                    "They are not all traditional browser cookies.",
+                    "Offline information stored on a device may remain available to an authorized user of that device until it is cleared, replaced, expired, removed, or otherwise handled by Cauldra's offline-data controls.")),
+                s("12. Service providers and sharing", p(
+                    `${LEGAL_OPERATOR} does not sell personal information.`,
+                    "Information may be disclosed to service providers where reasonably necessary to operate Cauldra, including providers involved in:") + list([
+                    "hosting and infrastructure;", "authentication;", "payments;", "email delivery;", "monitoring;",
+                    "optional AI processing."]) + p(
+                    "Information may also be disclosed where required by law, to protect rights or security, to investigate fraud or abuse, or in connection with a legitimate business restructuring, subject to applicable legal requirements.")),
+                s("13. Retention", p(`${LEGAL_OPERATOR} keeps personal and business information only for as long as reasonably necessary for the purposes described in this Policy, including:`) + list([
+                    "providing an active account or business workspace;", "maintaining legitimate business and audit records;",
+                    "resolving disputes;", "preventing fraud or abuse;", "maintaining security;",
+                    "meeting legal, tax, accounting, or regulatory obligations."]) + p(
+                    `When information is no longer reasonably required, ${LEGAL_OPERATOR} will delete, de-identify, or otherwise dispose of it as appropriate.`,
+                    "Some audit, security, payment, transaction, and historical business records may need to be kept longer than ordinary account information where reasonably necessary to preserve legitimate business records or comply with legal obligations.",
+                    "Backup copies may remain for a limited period until overwritten through the normal backup cycle.")),
+                s("14. Account deletion and business records", p(
+                    "Disabling an account, deleting a user, and deleting an entire business are different actions.",
+                    "Deleting a user does not necessarily erase historical business transactions or audit events that the user legitimately created while authorized.",
+                    "Historical records may retain limited identity snapshots, such as a name or role at the time of an action, where reasonably necessary for:") + list([
+                    "business integrity;", "security;", "dispute resolution;", "fraud prevention;", "legal or regulatory obligations."])),
+                s("15. International processing", p(
+                    "Some Cauldra service providers may process information in countries other than the country where the customer is located.",
+                    `Where applicable law requires safeguards for such processing or transfers, ${LEGAL_OPERATOR} will use the safeguards reasonably required by that law.`)),
+                s("16. Security", p(
+                    `${LEGAL_OPERATOR} uses technical and organizational measures intended to protect information against unauthorized access, disclosure, alteration, loss, or destruction.`,
+                    "No internet-connected service can guarantee absolute security.",
+                    "Users should protect their credentials, devices, and recovery channels and promptly report suspected unauthorized access.")),
+                s("17. Your privacy rights", p("Subject to applicable law, individuals may have rights concerning their personal information, including rights to:") + list([
+                    "request access;", "request correction;", "request deletion where applicable;",
+                    "restrict or object to certain processing;", "withdraw consent where processing depends on consent;",
+                    "make a privacy complaint."]) + p(
+                    `Requests may be sent to ${mail}.`,
+                    `${LEGAL_OPERATOR} may need to verify the requester's identity and authority before acting on a request.`)),
+                s("18. Children and account eligibility", p(
+                    "Cauldra is a business-management service and is not designed for children to independently enter paid service contracts.",
+                    "A person creating or controlling a paid business account must be at least 18 years old, or otherwise possess the legal capacity and authority required to enter the agreement on behalf of the business.",
+                    "Where a business lawfully provides a younger person with an employee account, responsibility for that user's authorization and use remains with the business and its authorized Admin, subject to applicable law.")),
+                s("19. Changes to this Policy", p(
+                    `${LEGAL_OPERATOR} may update this Privacy Policy when Cauldra's services, providers, legal requirements, or data practices change.`,
+                    "Material changes will be communicated through the service or another reasonable channel where required.")),
+                s("20. Contact", p(`Privacy questions and rights requests: ${mail}`)),
             ].join("");
             openLegalDocModal("Privacy Policy", html);
         }
 
         function openTermsOfServiceModal() {
-            const s = legalSection;
+            const s = legalSection, p = legalParagraphs, list = legalList, mail = legalContactLink();
             const html = [
-                legalDraftBanner(),
-                s("1. Legal entity", `[LEGAL ENTITY NAME TO BE CONFIRMED AFTER REGISTRATION]`),
-                s("2. Service description", `Cauldra is a business-management platform for inventory, sales, suppliers, purchase orders, expenses, teams, Business Day operations, reporting, and related operational workflows.`),
-                s("3. Account responsibilities", `You must provide accurate information, protect your credentials, use only accounts you're authorized to use, keep your contact details up to date, and report any suspected unauthorized access.`),
-                s("4. Business Admin responsibilities", `A Business Admin is responsible for inviting appropriate staff, assigning permissions responsibly, removing access when appropriate, and ensuring they have the authority to submit employee, vendor, and business information to Cauldra.`),
-                s("5. Acceptable use", `You may not: use Cauldra illegally; attempt unauthorized access; introduce malware; interfere with or abuse the service; impersonate another person or business; access another business's information without authority; deliberately bypass security or plan limits; or infringe intellectual property rights.`),
-                s("6. Subscription plans", `Plans differ by features and resource limits, and may bill monthly or annually. The Starter plan has no billable external-AI entitlement; AI-enabled plans may include AI credits as described in the app.`),
-                s("7. Trial", `[TRIAL LENGTH TO BE CONFIRMED]. [AUTO-CHARGE AFTER TRIAL RULE TO BE CONFIRMED]. [TRIAL-END / PAYMENT-FAILURE RULE TO BE CONFIRMED]`),
-                s("8. Card verification", `Where onboarding uses a small, refundable card-verification transaction, that transaction is separate and distinct from your actual subscription charge.`),
-                s("9. Cancellation", `[CANCELLATION POLICY TO BE CONFIRMED]`),
-                s("10. Refunds", `[REFUND POLICY TO BE CONFIRMED AND LEGALLY REVIEWED]`),
-                s("11. Failed payment", `Access may be restricted or suspended according to Cauldra's billing rules. Cauldra does not promise immediate deletion of your data for a failed payment.`),
-                s("12. Plan limits", `Each plan has its own feature and resource limits, shown in the app.`),
-                s("13. AI features", `AI-generated output may be incomplete or inaccurate. You should review important business decisions rather than relying on AI output alone.`),
-                s("14. Your data", `You retain ownership of the business information you submit to Cauldra. Cauldra receives only the rights reasonably necessary to host, process, transmit, back up, and display that information to operate the service.`),
-                s("15. Cauldra's intellectual property", `Cauldra's branding, code, UI/design, documentation, and other proprietary technology remain Cauldra's intellectual property.`),
-                s("16. Third-party services", `Cauldra relies on third-party service providers (see the Privacy Policy) to operate the service.`),
-                s("17. Availability", `Cauldra aims to provide reliable service but does not guarantee uninterrupted or error-free operation.`),
-                s("18. Suspension / termination", `Cauldra may suspend or terminate access for security threats, fraud, illegal use, serious breach of these Terms, nonpayment, or to protect the service or its customers.`),
-                s("19. Liability", `[LIMITATION OF LIABILITY / INDEMNITY TO BE REVIEWED BY LAWYER]`),
-                s("20. Governing law", `[JURISDICTION TO BE CONFIRMED]. [GOVERNING LAW / DISPUTE TERMS TO BE LEGALLY REVIEWED]`),
-                s("21. Contact", `<a class="text-primary hover:underline" href="mailto:contact@cohren.com">contact@cohren.com</a>`),
+                legalDocumentHeading("Cauldra Terms of Service"),
+                s("1. Who provides Cauldra", p(
+                    `Cauldra is operated by ${LEGAL_OPERATOR}, with its business address at ${LEGAL_ADDRESS}.`,
+                    `Questions about these Terms may be sent to ${mail}.`)),
+                s("2. Service description", p(
+                    "Cauldra is a business-management platform for inventory, sales, suppliers, purchase orders, expenses, teams, Business Day operations, reporting, subscriptions, AI-assisted features, and related operational workflows.",
+                    "By creating a Cauldra business account, starting a trial, purchasing a subscription, or continuing to use Cauldra, you agree to these Terms.")),
+                s("3. Business accounts and authority", p(
+                    "You must provide accurate information, keep your account information current, protect your login credentials, and promptly report suspected unauthorized access.",
+                    "A Business Admin represents that they are authorized to create and manage the relevant business account, invite users, assign permissions, submit business and employee information, and make subscription and billing decisions for that business.",
+                    "A person creating or controlling a paid business account must be at least 18 years old, or otherwise have the legal capacity and authority required to enter into a binding agreement on behalf of the relevant business.")),
+                s("4. Acceptable use", p("You may not:") + list([
+                    "use Cauldra unlawfully;", "attempt unauthorized access;", "introduce malware;",
+                    "interfere with or abuse the service;", "impersonate another person or business;",
+                    "access another business's information without authority;",
+                    "deliberately bypass security controls or subscription limits;",
+                    "infringe another person's intellectual-property or privacy rights."])),
+                s("5. Plans and pricing", p(
+                    "Cauldra offers subscription plans with different features, resource limits, and monthly or annual billing intervals.",
+                    "Current plan features and prices are shown in the app before purchase.",
+                    "Cauldra will show the amount to be charged before a payment is submitted. Payment-processing charges or taxes, where applicable, will be disclosed as required.")),
+                s("6. Free trial", p(
+                    "Where Cauldra offers a free trial, the current trial period is 14 calendar days.",
+                    "If you choose a paid plan and authorize recurring billing, the saved payment method may be charged when the trial ends unless the trial is cancelled before then.",
+                    "Cancelling a trial prevents conversion to a paid subscription. Business data already stored in Cauldra is not deleted merely because a trial is cancelled or ends.",
+                    "If a trial ends without a confirmed subscription payment, access to normal business operations may be paused while billing and essential account functions remain available.")),
+                s("7. Subscription renewal", p(
+                    "A paid subscription remains active until its exact paid-through date and time.",
+                    "Customers cannot manually purchase the next same-plan subscription period early while the current paid period is still active.",
+                    "Where recurring billing is authorized, Cauldra attempts renewal at the paid-through time using the saved payment method.",
+                    "A renewal is not treated as successful until the payment provider confirms the payment.",
+                    "While payment confirmation is in progress, Cauldra may display a confirming-payment state. A new subscription period does not begin merely because a payment attempt has started.",
+                    "If payment is confirmed after the previous subscription has expired, the new subscription period begins from the payment provider's confirmed payment time.",
+                    "If payment is not confirmed, the new period does not begin.",
+                    "Cauldra may retry a failed automatic renewal every 12 hours for up to 3 days.",
+                    "Billing-authorized users may use available payment-recovery options once renewal becomes due or a renewal attempt has failed.")),
+                s("8. Subscription communications", p(
+                    "Cauldra may send transactional subscription notices.",
+                    "The normal pre-expiry email schedule is:") + list([
+                    "approximately 24 hours before expiry;", "approximately 5 hours before expiry."]) + p(
+                    "Cauldra may also send:") + list([
+                    "an email after the first failed automatic renewal attempt;",
+                    "a final email if the automatic retry window ends without successful renewal;",
+                    "a successful-renewal confirmation."]) + p(
+                    "Intermediate automatic retry failures may be shown in the application without a separate email.",
+                    "Customers are responsible for maintaining accurate billing contact information and a usable payment method.")),
+                s("9. Card verification and payments", p(
+                    "Payments are processed by Paystack.",
+                    "Cauldra does not store full card numbers or CVV codes.",
+                    "Where onboarding or billing uses a small refundable card-verification transaction, that transaction is separate from the actual subscription charge.")),
+                s("10. Cancellation", p(
+                    "You may cancel a paid subscription through the available Billing controls.",
+                    "Cancellation stops future automatic renewal.",
+                    "Unless Cauldra expressly states otherwise or applicable law requires a different result, access continues through the subscription period that has already been paid for.",
+                    "Cancelling a subscription does not itself delete the business's stored data.",
+                    "Cancelling a free trial prevents conversion into a paid subscription. The trial and business-data behavior shown in the app remains subject to the paid-through/trial-end rules described above.")),
+                s("11. Refunds", p(
+                    "Subscription payments are generally not automatically refundable simply because a customer stops using Cauldra before the end of an already-paid period.",
+                    `However, ${LEGAL_OPERATOR} will provide refunds, reversals, or other remedies where required by applicable law, including where appropriate for duplicate or erroneous charges, payments for a service that was not supplied as agreed, or other circumstances in which the customer is legally entitled to a remedy.`,
+                    `Customers may contact ${mail} about a disputed charge or refund request.`,
+                    "Each request may be reviewed based on the payment record, service provided, and applicable law.",
+                    "Nothing in these Terms removes consumer rights that cannot legally be excluded.")),
+                s("12. Failed payments and paused access", p(
+                    "If a subscription payment becomes due and is not confirmed, Cauldra may pause normal business operations until payment is confirmed.",
+                    "While paused, business data is preserved.",
+                    "Billing, payment recovery, essential account functions, support/help, sign out, and other functions identified in the app remain available as applicable.",
+                    "A failed payment does not by itself cause immediate deletion of business data.")),
+                s("13. Plan limits and plan changes", p(
+                    "Each plan has its own features and resource limits, shown in the app.",
+                    "Upgrades may take effect according to the pricing and upgrade information shown before purchase.",
+                    "Downgrading does not automatically delete existing business data, although creation of new data or use of features beyond the lower plan's limits may be restricted.")),
+                s("14. AI-assisted features", p(
+                    "Some Cauldra features use third-party AI services.",
+                    "AI-generated information may be incomplete, inaccurate, or unsuitable for a particular business decision.",
+                    "Users should review important financial, inventory, purchasing, or operational decisions rather than relying solely on AI-generated output.")),
+                s("15. Your business data", p(
+                    "You retain ownership of the business information you submit to Cauldra.",
+                    `You grant ${LEGAL_OPERATOR} the limited rights reasonably necessary to host, process, transmit, back up, secure, and display that information to provide and maintain Cauldra.`)),
+                s("16. Cauldra intellectual property", p(
+                    `Cauldra's software, branding, user interface, documentation, and proprietary technology remain the property of ${LEGAL_OPERATOR} or its licensors.`,
+                    "These Terms do not transfer ownership of Cauldra's intellectual property to customers.")),
+                s("17. Third-party services", p(
+                    "Cauldra relies on third-party providers for functions including authentication, payments, email delivery, hosting/infrastructure, monitoring, and optional AI services.",
+                    "Third-party services may experience outages or impose their own technical or legal requirements.")),
+                s("18. Service availability", p(
+                    `${LEGAL_OPERATOR} aims to provide a reliable service but cannot guarantee uninterrupted or error-free availability.`,
+                    "Maintenance, internet failures, third-party outages, security events, and circumstances beyond reasonable control may temporarily affect availability.")),
+                s("19. Suspension and termination", p(`${LEGAL_OPERATOR} may suspend or terminate access where reasonably necessary because of:`) + list([
+                    "nonpayment;", "fraud;", "security threats;", "unlawful use;", "serious or repeated breach of these Terms;",
+                    "the need to protect Cauldra, customers, or other users."]) + p(
+                    "Where appropriate and lawful, Cauldra will provide reasonable notice or information about the reason for the action.")),
+                s("20. Liability", p(
+                    "Nothing in these Terms excludes or limits liability that cannot legally be excluded or limited.",
+                    `To the extent permitted by applicable law, ${LEGAL_OPERATOR} is not responsible for indirect or consequential losses arising solely from circumstances outside its reasonable control, third-party service outages, or decisions made solely in reliance on AI-generated information.`,
+                    "Customers remain responsible for reviewing their business records and maintaining appropriate business controls and backups suitable for their needs.")),
+                s("21. Changes to these Terms", p(
+                    `${LEGAL_OPERATOR} may update these Terms when Cauldra, applicable law, or business practices change.`,
+                    "Material changes will be communicated through the service or another reasonable channel before they take effect where required.")),
+                s("22. Governing law and disputes", p(
+                    `These Terms are governed by the laws of ${LEGAL_GOVERNING_LAW}, without removing any mandatory consumer rights that apply under applicable law.`,
+                    `Before starting formal proceedings, you and ${LEGAL_OPERATOR} should first attempt in good faith to resolve the dispute through ${mail}, unless applicable law permits or requires another process.`,
+                    "Any formal dispute that cannot be resolved informally will be handled by a court of competent jurisdiction in Nigeria, subject to applicable law.")),
+                s("23. Contact", p(`Questions about these Terms: ${mail}`)),
             ].join("");
             openLegalDocModal("Terms of Service", html);
         }

@@ -806,6 +806,7 @@
                         <i class="fa-solid fa-lock"></i> Continue to Paystack
                     </button>
                     <p class="text-center text-textSec text-[10px]"><i class="fa-solid fa-shield-halved mr-1"></i> Payments are securely processed by Paystack. We never see or store your full card details.</p>
+                    <p class="legal-agreement text-center text-textSec text-[10px] leading-relaxed"><span>By continuing, you agree to these documents:</span> <button type="button" onclick="openTermsOfServiceModal()" class="text-primary hover:underline cursor-pointer">Terms of Service</button> · <button type="button" onclick="openPrivacyPolicyModal()" class="text-primary hover:underline cursor-pointer">Privacy Policy</button></p>
                     <button type="button" onclick="evBackToState1()" class="w-full text-textSec hover:text-textMain text-[11px] cursor-pointer">Use a different email</button>
                 </div>
 
@@ -945,6 +946,7 @@
 
                 <div class="pt-3">
                     <button type="submit" class="w-full bg-primary hover:bg-primaryHover text-white py-2.5 rounded-xl font-semibold transition shadow-md shadow-primary/20 cursor-pointer">Create Business & Admin Account</button>
+                    <p class="legal-agreement text-center text-textSec text-[10px] leading-relaxed mt-2"><span>By continuing, you agree to these documents:</span> <button type="button" onclick="openTermsOfServiceModal()" class="text-primary hover:underline cursor-pointer">Terms of Service</button> · <button type="button" onclick="openPrivacyPolicyModal()" class="text-primary hover:underline cursor-pointer">Privacy Policy</button></p>
                 </div>
             </form>
 
@@ -1678,6 +1680,7 @@
                 <input type="checkbox" id="trial-consent-checkbox" class="mt-0.5">
                 <span>I agree that my subscription will automatically continue at the price shown above after the 14-day trial, unless I cancel before it ends.</span>
             </label>
+            <p class="legal-agreement text-center text-textSec text-[10px] leading-relaxed"><span>By continuing, you agree to these documents:</span> <button type="button" onclick="openTermsOfServiceModal()" class="text-primary hover:underline cursor-pointer">Terms of Service</button> · <button type="button" onclick="openPrivacyPolicyModal()" class="text-primary hover:underline cursor-pointer">Privacy Policy</button></p>
             <div class="flex gap-2 pt-1">
                 <button type="button" onclick="closeTrialConfirmModal()" class="flex-1 bg-bgMain hover:bg-cardHover text-textSec px-3 py-2 rounded-xl border border-borderCol cursor-pointer">Cancel</button>
                 <button type="button" id="trial-confirm-submit-btn" onclick="confirmStartTrial()" class="flex-1 bg-primary hover:bg-primaryHover text-white px-3 py-2 rounded-xl font-semibold cursor-pointer">Start 14-Day Free Trial</button>
@@ -1719,6 +1722,7 @@
             <p id="plan-change-confirm-summary" class="text-textMain font-semibold bg-primary/10 border border-primary/25 rounded-xl px-3 py-2 break-words">—</p>
             <p id="plan-change-confirm-body" class="text-textSec leading-relaxed break-words">—</p>
             <div id="plan-change-confirm-impact" class="hidden rounded-xl bg-warning/10 border border-warning/30 px-3 py-2.5 break-words"></div>
+            <p class="legal-agreement text-center text-textSec text-[10px] leading-relaxed"><span>By continuing, you agree to these documents:</span> <button type="button" onclick="openTermsOfServiceModal()" class="text-primary hover:underline cursor-pointer">Terms of Service</button> · <button type="button" onclick="openPrivacyPolicyModal()" class="text-primary hover:underline cursor-pointer">Privacy Policy</button></p>
             <div class="flex flex-col sm:flex-row gap-2 pt-1">
                 <button type="button" onclick="closePlanChangeConfirm()" class="flex-1 bg-bgMain hover:bg-cardHover text-textSec px-3 py-2.5 rounded-xl border border-borderCol cursor-pointer">Keep Current Plan</button>
                 <button type="button" id="plan-change-confirm-submit" onclick="confirmPlanChange()" class="flex-1 bg-primary hover:bg-primaryHover text-white px-3 py-2.5 rounded-xl font-semibold cursor-pointer break-words">Confirm</button>

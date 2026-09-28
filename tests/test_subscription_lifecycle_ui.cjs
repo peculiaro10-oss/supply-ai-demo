@@ -49,7 +49,8 @@ check('new wording is translated for every launch language', () => {
     }
 });
 check('service-worker cache bumped so installed web clients take the new Billing screen', () => {
-    assert.match(sw, /const SHELL_CACHE = "cauldra-shell-v21-subscription-policy";/);
+    // v21 was this change's bump; any later version still includes it.
+    assert.match(sw, /const SHELL_CACHE = "cauldra-shell-v(2[1-9]|[3-9][0-9])-/);
 });
 const offline = fs.readFileSync(path.join(root, 'frontend/js/offline.js'), 'utf8');
 const payments = fs.readFileSync(path.join(root, 'frontend/js/payments.js'), 'utf8');
