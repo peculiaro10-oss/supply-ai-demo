@@ -103,6 +103,55 @@ class PreFreezePolicyTests(unittest.TestCase):
         self.assertEqual(len(self.ps.charges), 1)
         self.assertEqual(self.autos(later), [], 'a business not yet due is untouched')
 
+    def test_an_unpaid_upgrade_checkout_never_holds_up_the_first_automatic_attempt(self):
+        # Found in live QA: an Admin opened an upgrade checkout and closed it.
+        # Paystack reports that checkout "abandoned", which the upgrade
+        # reconciliation treats as still open, so every engine pass waited on it
+        # and the automatic renewal never started. Upgrades cannot start at or
+        # after the paid-through time, so at that time the checkout is closed.
+        biz, anchor, admins, _ = self.business(anchor_offset=10 * MIN)
+        ref = f'cauldra_upgrade_{biz.business_code}_abandoned'
+        created = anchor - 3 * MIN
+        quote = main.SubscriptionUpgradeQuote(
+            quote_reference=f'q-{biz.id}', business_id=biz.id, from_plan='starter', from_interval='monthly', to_plan='business',
+            to_interval='annual', current_price_kobo=2000000, new_price_kobo=50000000, unused_credit_kobo=1000, amount_due_kobo=49999000,
+            current_period_end_snapshot=anchor, status='issued', paystack_reference=ref, expires_at=created + 15 * MIN, created_at=created)
+        self.db.add(quote)
+        self.db.add(main.PaymentRecord(business_id=biz.id, subscription_id=self.sub(biz).id, plan='business', billing_interval='annual',
+                                       amount_kobo=49999000, currency='NGN', paystack_reference=ref, status='initialized',
+                                       purpose='subscription_upgrade', created_at=created,
+                                       transaction_metadata=json.dumps({'purpose': 'subscription_upgrade', 'quote_reference': f'q-{biz.id}'})))
+        self.db.commit()
+        self.ps._tx(ref, 'abandoned', 49999000, admins[0].email)
+        self.assertEqual(self.run_engine(biz, anchor - MIN), 'waiting', 'before the paid-through time the checkout stays open')
+        self.lifecycle_pass(biz, anchor + timedelta(seconds=1))
+        self.assertEqual([(a.renewal_attempt_slot, a.status) for a in self.autos(biz)], [(0, 'success')],
+                         'the first automatic attempt ran at the paid-through time')
+        self.db.expire_all()
+        upgrade = self.db.query(main.PaymentRecord).filter_by(paystack_reference=ref).one()
+        self.assertEqual(upgrade.status, 'failed')
+        self.assertEqual(self.db.query(main.SubscriptionUpgradeQuote).filter_by(quote_reference=f'q-{biz.id}').one().status, 'expired',
+                         'a late payment on that checkout can never change the plan')
+        self.assertEqual(self.audits(biz, 'SUBSCRIPTION_UPGRADE_CHECKOUT_CLOSED'), 1)
+        self.assertEqual(self.sub(biz).plan, 'starter')
+        self.assertEqual(self.emails_by_title('Automatic renewal failed'), [], 'a closed upgrade checkout is not a renewal failure')
+        # A checkout still being paid for the current, unchanged period stays open.
+        biz2, anchor2, admins2, _ = self.business(anchor_offset=2 * HOUR)
+        ref2 = f'cauldra_upgrade_{biz2.business_code}_open'
+        self.db.add(main.SubscriptionUpgradeQuote(
+            quote_reference=f'q-{biz2.id}', business_id=biz2.id, from_plan='starter', from_interval='monthly', to_plan='business',
+            to_interval='annual', current_price_kobo=2000000, new_price_kobo=50000000, unused_credit_kobo=1000, amount_due_kobo=49999000,
+            current_period_end_snapshot=anchor2, status='issued', paystack_reference=ref2, expires_at=anchor2, created_at=anchor2 - HOUR))
+        self.db.add(main.PaymentRecord(business_id=biz2.id, subscription_id=self.sub(biz2).id, plan='business', billing_interval='annual',
+                                       amount_kobo=49999000, currency='NGN', paystack_reference=ref2, status='initialized',
+                                       purpose='subscription_upgrade', created_at=anchor2 - HOUR,
+                                       transaction_metadata=json.dumps({'purpose': 'subscription_upgrade', 'quote_reference': f'q-{biz2.id}'})))
+        self.db.commit()
+        self.ps._tx(ref2, 'abandoned', 49999000, admins2[0].email)
+        self.assertEqual(self.run_engine(biz2, anchor2 - 30 * MIN), 'pending')
+        self.db.expire_all()
+        self.assertEqual(self.db.query(main.PaymentRecord).filter_by(paystack_reference=ref2).one().status, 'initialized')
+
     def test_while_paystack_is_confirming_nothing_is_unlocked_paid_or_started(self):
         biz, anchor, admins, _ = self.business(anchor_offset=-MIN)
         self.ps.charge_outcome = 'pending'

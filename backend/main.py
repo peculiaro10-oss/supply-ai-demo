@@ -15442,6 +15442,8 @@ def settle_open_attempt(db: Session, record: "PaymentRecord", now: datetime) -> 
         result = reconcile_renewal_payment(db, record, transaction, now)
     elif record.purpose == "subscription_upgrade":
         result = reconcile_upgrade_payment(db, record, transaction)
+        if result.get("status") == "pending" and close_unpaid_upgrade_at_paid_through(db, record, now):
+            return "failed"
     else:
         business = db.query(BusinessProfile).filter(BusinessProfile.id == record.business_id).first()
         result = reconcile_first_subscription_payment(db, record, business, transaction, now)
@@ -15449,6 +15451,33 @@ def settle_open_attempt(db: Session, record: "PaymentRecord", now: datetime) -> 
     if status in ("success", "duplicate_payment_review", "flagged_verification_mismatch"):
         return "success" if status == "success" else "failed"
     return status or "unknown"
+
+
+def close_unpaid_upgrade_at_paid_through(db: Session, record: "PaymentRecord", now: datetime) -> bool:
+    """An upgrade is prorated against the paid period it was quoted for, and
+    Cauldra refuses to start one at or after the paid-through time. A checkout
+    still unpaid (Paystack: abandoned/pending) at that time can never apply, so
+    it is closed and its quote expired; it must not hold up the renewal. The
+    same holds once the paid-through time differs from the quoted one (the
+    upgrade would only be flagged for review if paid)."""
+    meta = parse_paystack_metadata(record.transaction_metadata)
+    quote = db.query(SubscriptionUpgradeQuote).filter_by(
+        quote_reference=meta.get("quote_reference"), business_id=record.business_id).with_for_update().first()
+    sub = db.query(BusinessSubscription).filter_by(id=record.subscription_id).first()
+    if quote is None or sub is None:
+        return False
+    if now < quote.current_period_end_snapshot and sub.current_period_end == quote.current_period_end_snapshot:
+        return False
+    record.status = "failed"
+    meta["closed_reason"] = "not paid by the paid-through time"
+    record.transaction_metadata = json.dumps(meta, sort_keys=True)
+    if quote.status == "issued":
+        quote.status = "expired"
+    add_audit(db, None, "SUBSCRIPTION_UPGRADE_CHECKOUT_CLOSED",
+              "An upgrade checkout that was not paid by the paid-through time was closed; the renewal continues.",
+              business_id=record.business_id)
+    db.flush()
+    return True
 
 
 class RenewalAttemptInProgress(Exception):
@@ -15619,7 +15648,10 @@ def run_subscription_renewal(db: Session, business: "BusinessProfile", now: Opti
         return "retired" if retired else None
     # Open attempts first: settle them, never start a second one beside them.
     for row in open_renewal_attempts(db, business.id):
-        if now - (row.created_at or now) < RENEWAL_PENDING_RECHECK_AFTER:
+        # An upgrade checkout is settled at once at the paid-through time
+        # (it can no longer apply), so it never delays the first attempt.
+        due_upgrade = row.purpose == "subscription_upgrade" and anchor is not None and now >= anchor
+        if not due_upgrade and now - (row.created_at or now) < RENEWAL_PENDING_RECHECK_AFTER:
             db.commit()
             return "waiting"
         outcome = settle_open_attempt(db, row, now)
