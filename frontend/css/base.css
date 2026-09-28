@@ -492,3 +492,10 @@ html[dir="rtl"] :is(i, svg).mr-1 { margin-left: 0.25rem; }
 html[dir="rtl"] :is(i, svg).mr-1\.5 { margin-left: 0.375rem; }
 html[dir="rtl"] :is(i, svg).mr-2 { margin-left: 0.5rem; }
 html[dir="rtl"] :is(.font-mono, input[type="tel"], input[type="email"], input[type="number"]) { unicode-bidi: plaintext; }
+
+/* LEGAL-UI-001 — lists in the Terms of Service and Privacy Policy. The
+   prebuilt Tailwind CSS has list-disc but no pl-5, so the markers sat
+   outside the box: scoped here to the legal document body only. The body is
+   always left-to-right English (lang="en" dir="ltr"), also in Arabic. */
+#legal-doc-body ul { list-style: disc outside; padding-left: 1.25rem; margin: 0; }
+#legal-doc-body li { padding-left: 0.125rem; overflow-wrap: anywhere; }

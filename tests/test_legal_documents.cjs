@@ -91,5 +91,11 @@ check('closing a document returns to About only when opened from About', /legalD
   && /if \(legalDocReturnsToAbout\) document\.getElementById\("about-modal"\)/.test(app));
 check('legal modal sits above the sign-up and billing dialogs', /id="legal-doc-modal" class="[^"]*z-\[151\]/.test(html));
 
+// ---- LEGAL-UI-001: list bullets and indent, scoped to the legal document --------
+const baseCss = read('frontend/css/base.css');
+check('legal lists have visible bullets and an indent (scoped rule)', /#legal-doc-body ul \{[^}]*list-style: disc outside;[^}]*padding-left: 1\.25rem;/.test(baseCss)
+  && /#legal-doc-body li \{[^}]*overflow-wrap: anywhere;/.test(baseCss));
+check('no global list styling was added', !/(^|\n)\s*(ul|ol|li)\s*[,{]/.test(baseCss));
+
 console.log(failures ? `${failures} FAILED` : 'ALL PASS');
 process.exit(failures ? 1 : 0);
