@@ -300,7 +300,7 @@ Rows are from the triage (§3 of that file); "Where" says which surfaces are aff
 
 ### 5.5 External or manual items
 
-- **LEGAL-001, row 1:** Terms of Service and Privacy Policy are still drafts with 14 bracketed placeholders. Needs legal review and owner-supplied text; the text swap afterwards is small.
+- **LEGAL-001, row 1:** final founder-approved copy integrated in `7b422c6` (§14.7). Closes once it is deployed to QA and checked there, and the new QA APK is built. Professional legal review may improve it later.
 - **Paystack B10:** success, declined, 3-D Secure, cancel and duplicate were never exercised. Needs a person, using **TEST** cards, about 45–60 minutes.
 - **QA OpenAI credit:** blocks invoice OCR success. The owner adds credit; do not debug it.
 - **Barcode live lookup:** QA's Railway egress IP has spent the free UPCitemdb quota.
@@ -1250,6 +1250,43 @@ No analytics SDK and no outgoing webhooks exist in the code.
 - **Retest log:** 2026-09-27 cloud: server 10/10, e2e 29/29, static pass, regressions as above; no QA deploy, no Android, no real provider call.
 - **Manifest:** add all commits listed above after `704b843`; no migrations; no new variables; cache v17; test-only `tests/fake_email_provider/` must never be on a deployed `PYTHONPATH`.
 - **Android checklist:** replace the separate offline lists with the combined pass above; mark every APK before this batch superseded.
+
+### 14.7 LEGAL-001 final integration and owner decisions before RC freeze (2026-09-28, cloud session)
+
+Starting head `99f0128`; QA deployment before this task `2cc30dc2-50b2-4015-81fa-fd4a744efb9b`. Code commit `7b422c6`. No migrations, no new variables, no subscription/payment/business logic change. Service-worker cache `cauldra-shell-v22-legal-final`.
+
+**What changed.**
+- `frontend/js/app.js`: the Terms of Service (23 sections) and Privacy Policy (20 sections) are the founder-approved launch copy of 2026-09-28. The draft banner (`legalDraftBanner`) and all 14 bracketed placeholders are removed. Operator `Cohren Limited`, address `No. 21, Amadi Close, Oyigbo, Rivers State, Nigeria`, governing law the Federal Republic of Nigeria, contact `contact@cohren.com` and the effective date (28 September 2026, the commit date; the app has no launch-date mechanism) are defined once and used by both documents. Documents stay English with the existing "available in English only" notice.
+- `frontend/index.html`: "By continuing, you agree to these documents: Terms of Service · Privacy Policy" at every agreement point: before **Continue to Paystack** (new business, card verification and trial), at **Create Business & Admin Account**, in **Start 14-Day Free Trial**, and in the plan purchase/change confirmation. About → Legal is unchanged.
+- Closing a document returns to About only when it was opened from About (before, it always opened About, which would cover the sign-up screen).
+- Sentence catalogued for fr/es/ar/pt.
+
+**Wording checked against the code.** 14-day trial (`PLAN_CONFIG` trial_days, all plans); renewal attempts every 12 h for 3 days (`RENEWAL_RETRY_INTERVAL`, `PAYSTACK_GRACE_PERIOD_DAYS` default 3); emails at 24 h and 5 h before expiry (`SUBSCRIPTION_EMAIL_PRE_STAGES`), after the first failed charge, at the end of the window and on renewal (`subscription_stage_emails`); no early same-plan purchase (`RENEWAL_NOT_DUE`); ₦50 refundable card verification separate from the subscription charge; card brand and last four stored (`card_type`, `card_last4`); Supabase, Paystack, Sentry, OpenAI and Google Gemini named. `tests/test_legal_documents.cjs` ties these to the code so a later billing change that contradicts the Terms fails.
+
+**Tests (cloud).**
+- `test_legal_documents.cjs`: ALL PASS; a planted `[ADDRESS TBC]` is caught.
+- Every `tests/*.cjs`: pass, except `test_native_bundle.cjs` (needs Capacitor's synced `android/.../assets/public`; environmental, as before).
+- Browser, local static server: both documents from the sign-up line and from About at 375, 768, 1024 and 1366 px: visible, inside the viewport, body scrolls, no horizontal overflow, address present, only `mailto:contact@cohren.com`; close returns to the right screen (32/32). Sign-up agreement line in English and Arabic at 375 px, no overflow.
+- `build-www.js --target=qa`: parity PASS; the bundle contains the final text and the four agreement lines, no draft banner.
+- Python: batch B 42, C 44, D 34, E 45, ops accuracy 32, pre-freeze policy 19: all OK.
+
+**Not done from the cloud (no Railway CLI or token, no Android SDK or Capacitor here).**
+1. QA deploy: pull `7b422c6` or later → `railway up --service cauldra-qa` once → startup database line and `/health`.
+2. On QA (web, guest and signed in): open Terms and Privacy from About and from the sign-up screen; check no draft banner, the operator, address, law and contact; the mailto link opens a mail app.
+3. Build one QA APK (`build-apk.bat qa`); record path, SHA-256 and size; on it, open both documents from About and from sign-up. This APK supersedes every earlier one.
+4. Then mark LEGAL-001 closed.
+
+**Owner decisions to record (already locked).**
+- Row 62 (NAT-001, old-WebView naira display): accepted for launch.
+- Row 64 (AND-002, system bars): accepted for launch; Capacitor's handling is not replaced.
+- The ~1-second paused/restored subscription notice: accepted as non-blocking polish.
+- Resend open/click tracking: must be confirmed **OFF** in the Resend dashboard before freeze. Not verified from this session (no authorized dashboard access); not claimed OFF.
+
+**Records text.**
+- **MASTER_REMEDIATION_TRACKER.md:** `LEGAL-001 (row 1) — final founder-approved Terms of Service and Privacy Policy (Cohren Limited; Nigeria; contact@cohren.com) → FIXED (7b422c6) — CLOSED once verified on QA and in the new QA APK. Professional legal review may improve the copy later.` Row 62 → accepted for launch (owner). Row 64 → accepted for launch (owner). Add: paused/restored ~1 s notice → accepted, non-blocking polish. Add: Resend open/click tracking OFF → open, owner dashboard check before freeze.
+- **LAUNCH_TRIAGE_2026-09-24.md:** LEGAL-001 moves from "external" to "fixed, awaiting QA verification + APK"; rows 62 and 64 → owner-accepted; add the Resend tracking check as a freeze prerequisite.
+- **REMEDIATION_AND_RETEST_LOG.md:** 2026-09-28 cloud: LEGAL-001 `7b422c6`; test results above; no QA deploy, no APK, no Android, no production.
+- **PRODUCTION_ROLLOUT_MANIFEST.md:** add `7b422c6`; no migrations; no new variables; cache v22; legal copy effective 28 September 2026 (if the production launch date differs, the owner decides whether to change the effective date in a follow-up commit before rollout); Resend open/click tracking OFF on the production sender.
 
 ---
 
