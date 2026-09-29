@@ -19455,12 +19455,23 @@
             forgetSignedInSession();
             quiesceAuthenticatedActivity();
 
+            // NOTIF-PUSH-001: this device stops receiving the signed-out
+            // user's pushes — ended on the server with the sign-in (and the
+            // device identity sent here), then unregistered on the device.
+            const devicePushIdentity = await currentDevicePushIdentity();
             if (!options.skipServerLogout) {
                 if (authToken) {
-                    try { await fetch(`${API_URL}/auth/logout`, { method: "POST", credentials: "include", headers: { "Authorization": `Bearer ${authToken}` } }); } catch (_) {}
+                    try {
+                        await fetch(`${API_URL}/auth/logout`, {
+                            method: "POST", credentials: "include",
+                            headers: { "Authorization": `Bearer ${authToken}`, "Content-Type": "application/json" },
+                            body: JSON.stringify(devicePushIdentity),
+                        });
+                    } catch (_) {}
                 }
                 await endPresenceSession();
             }
+            await releaseDevicePushOnSignOut();
 
             authToken = "";
             offlineWorkspaceUnlocked = false;
@@ -20823,6 +20834,9 @@
             // clear what was typed.
             closePasswordChangeDialog();
             showToast(t("auth.passwordUpdatedSuccess"), "success");
+            // NOTIF-PUSH-001: the change ended every earlier sign-in's push
+            // registration; register this device again for the new sign-in.
+            setTimeout(syncPushRegistrationForSession, 1500);
             // The password is already changed. A data reload that fails
             // afterwards is not a password failure and must not be reported
             // inside the (now closed) password dialog.
@@ -21330,7 +21344,7 @@
                 ["psycopg", "LGPL-3.0"], ["boto3", "Apache-2.0"], ["supabase-py", "MIT"], ["passlib", "BSD-2-Clause"],
                 ["bcrypt", "Apache-2.0"], ["python-jose", "MIT"], ["PyJWT", "MIT"], ["python-multipart", "Apache-2.0"],
                 ["requests", "Apache-2.0"], ["python-dotenv", "BSD-3-Clause"], ["openai (Python SDK)", "Apache-2.0"],
-                ["google-genai", "Apache-2.0"], ["Pydantic", "MIT"], ["openpyxl", "MIT"], ["pywebpush", "MPL-2.0"],
+                ["google-genai", "Apache-2.0"], ["google-auth", "Apache-2.0"], ["Pydantic", "MIT"], ["openpyxl", "MIT"], ["pywebpush", "MPL-2.0"],
                 ["sentry-sdk", "MIT"], ["phonenumbers", "Apache-2.0"],
             ];
             const frontend = [
@@ -31423,8 +31437,9 @@
             notificationPollTimer = setInterval(refreshNotificationBadge, 5000);
             // Section 15 — ask for push permission a few seconds after the
             // user is actually signed in and looking at their dashboard,
-            // never on the very first paint.
-            setTimeout(maybeShowPushPermissionPrompt, 4000);
+            // never on the very first paint. NOTIF-PUSH-001: when permission
+            // already exists, this re-registers the device for THIS user.
+            setTimeout(syncPushRegistrationForSession, 4000);
         }
 
         function stopNotificationPolling() {
@@ -31610,9 +31625,140 @@
         // WHETHER and WHO to notify lives entirely server-side in main.py's
         // notification engine; this code only ever decides whether THIS
         // browser/device is registered to receive one at all.
+        //
+        // NOTIF-PUSH-001: a registration belongs to the sign-in that made it.
+        // Every sign-in re-registers this browser/device for the signed-in
+        // user (silently when permission is already granted), and sign-out
+        // ends it here as well as on the server. NOTIF-PUSH-002: inside the
+        // Android app the same flow uses Firebase Cloud Messaging through the
+        // PushNotifications plugin instead of the browser's Web Push.
         // -----------------------------------------------------------------------
         function pushNotificationsSupported() {
             return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && typeof isNativeAppShell === "function" && !isNativeAppShell();
+        }
+
+        const NATIVE_PUSH_CHANNEL_ID = "cauldra_alerts";
+        let nativePushToken = null;
+        let nativePushReady = null;
+        let pendingPushDeepLink = null;
+
+        function nativePushPlugin() {
+            const capacitor = window.Capacitor;
+            if (!capacitor?.isNativePlatform?.() || !capacitor.isPluginAvailable?.('PushNotifications')) return null;
+            if (typeof capacitor.registerPlugin === 'function') return capacitor.registerPlugin('PushNotifications');
+            return capacitor.Plugins?.PushNotifications || null;
+        }
+
+        function pushRegistrationAllowed() {
+            return !!(authToken && hasAuthenticatedBusinessContext() && !currentUserProfile?.must_change_password);
+        }
+
+        async function postPushRegistration(path, body) {
+            if (!authToken) return false;
+            const res = await fetch(`${API_URL}${path}`, {
+                method: "POST", credentials: "include",
+                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+                body: JSON.stringify(body),
+            });
+            return res.ok;
+        }
+
+        function openPushDeepLink(deepLink) {
+            if (!deepLink) return;
+            if (pushRegistrationAllowed()) { navigateToDeepLink(deepLink); return; }
+            pendingPushDeepLink = { deepLink, at: Date.now() }; // opened once someone is signed in (see syncPushRegistrationForSession)
+        }
+
+        // One-time listener setup for the Android app. The plugin keeps a tap
+        // or token that arrived before this ran and delivers it on attach.
+        function initializeNativePush() {
+            const push = nativePushPlugin();
+            if (!push) return Promise.resolve(null);
+            if (!nativePushReady) {
+                nativePushReady = (async () => {
+                    try {
+                        await push.createChannel({ id: NATIVE_PUSH_CHANNEL_ID, name: "Cauldra alerts", description: "Critical stock, billing and security alerts", importance: 5, visibility: 0, vibration: true });
+                    } catch (_) {}
+                    await push.addListener("registration", async ({ value }) => {
+                        nativePushToken = value || null;
+                        if (!nativePushToken || !pushRegistrationAllowed()) return;
+                        try { await postPushRegistration("/push/native/register", { token: nativePushToken, platform: "android" }); } catch (_) {}
+                    });
+                    await push.addListener("registrationError", () => {});
+                    // Foreground: Android shows it (presentationOptions); bring the bell up to date.
+                    await push.addListener("pushNotificationReceived", () => { try { refreshNotificationBadge(); } catch (_) {} });
+                    await push.addListener("pushNotificationActionPerformed", (action) => {
+                        openPushDeepLink(action?.notification?.data?.deep_link || null);
+                    });
+                    return push;
+                })().catch(() => null);
+            }
+            return nativePushReady;
+        }
+
+        // Android app: ask (only when the OS still can) and register this
+        // install's FCM token for the signed-in user.
+        async function registerNativePush(allowPrompt) {
+            const push = await initializeNativePush();
+            if (!push) return false;
+            let permission = await push.checkPermissions();
+            if (permission.receive !== "granted" && allowPrompt && String(permission.receive).startsWith("prompt")) {
+                permission = await push.requestPermissions();
+            }
+            if (permission.receive !== "granted") return false;
+            await push.register(); // the "registration" listener sends the token
+            return true;
+        }
+
+        // Runs a few seconds after every sign-in / session restore.
+        async function syncPushRegistrationForSession() {
+            if (!pushRegistrationAllowed()) return;
+            if (pendingPushDeepLink) {
+                const pending = pendingPushDeepLink; pendingPushDeepLink = null;
+                if (Date.now() - pending.at < 10 * 60 * 1000) navigateToDeepLink(pending.deepLink);
+            }
+            try {
+                if (nativePushPlugin()) {
+                    if (await registerNativePush(false)) return;
+                } else if (pushNotificationsSupported() && Notification.permission === "granted") {
+                    await subscribeToPushNotifications({ silent: true });
+                    return;
+                }
+            } catch (_) {}
+            maybeShowPushPermissionPrompt();
+        }
+
+        // Sign-out, step 1: what the server should end besides the sign-in's
+        // own registrations. Never blocks sign-out for long.
+        async function currentDevicePushIdentity() {
+            const identity = {};
+            try {
+                if (nativePushPlugin()) {
+                    if (nativePushToken) identity.native_push_token = nativePushToken;
+                } else if ("serviceWorker" in navigator) {
+                    const registration = await navigator.serviceWorker.getRegistration();
+                    const subscription = registration ? await registration.pushManager.getSubscription() : null;
+                    if (subscription) identity.push_endpoint = subscription.endpoint;
+                }
+            } catch (_) {}
+            return identity;
+        }
+
+        // Sign-out, step 2: this browser/app stops being reachable at all
+        // until the next sign-in registers it again.
+        async function releaseDevicePushOnSignOut() {
+            try {
+                const push = nativePushPlugin();
+                if (push) {
+                    nativePushToken = null;
+                    await push.unregister();
+                    try { await push.removeAllDeliveredNotifications(); } catch (_) {}
+                } else if ("serviceWorker" in navigator) {
+                    const registration = await navigator.serviceWorker.getRegistration();
+                    const subscription = registration ? await registration.pushManager.getSubscription() : null;
+                    if (subscription) await subscription.unsubscribe();
+                }
+            } catch (_) {}
         }
 
         function urlBase64ToUint8Array(base64String) {
@@ -31624,13 +31770,21 @@
             return outputArray;
         }
 
-        async function subscribeToPushNotifications() {
-            if (!pushNotificationsSupported()) { showToast(t("alerts.pushUnsupported"), "info"); return false; }
+        async function subscribeToPushNotifications(options = {}) {
+            const silent = !!options.silent;
+            if (nativePushPlugin()) {
+                try {
+                    const ok = await registerNativePush(true);
+                    if (!silent) showToast(t(ok ? "alerts.pushEnabled" : "alerts.pushBlocked"), ok ? "success" : "info");
+                    return ok;
+                } catch (_) { return false; }
+            }
+            if (!pushNotificationsSupported()) { if (!silent) showToast(t("alerts.pushUnsupported"), "info"); return false; }
             try {
                 let permission = Notification.permission;
                 if (permission === "default") permission = await Notification.requestPermission();
                 if (permission !== "granted") {
-                    if (permission === "denied") showToast(t("alerts.pushBlocked"), "info");
+                    if (permission === "denied" && !silent) showToast(t("alerts.pushBlocked"), "info");
                     return false; // gracefully continue without push — in-app notifications are unaffected
                 }
                 const keyRes = await fetch(`${API_URL}/push/vapid-public-key`);
@@ -31645,34 +31799,21 @@
                     });
                 }
                 const json = subscription.toJSON();
-                await fetch(`${API_URL}/push/subscribe`, {
-                    method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
-                    body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys, user_agent: navigator.userAgent }),
-                });
-                showToast(t("alerts.pushEnabled"), "success");
-                return true;
+                const ok = await postPushRegistration("/push/subscribe", { endpoint: json.endpoint, keys: json.keys, user_agent: navigator.userAgent });
+                if (ok && !silent) showToast(t("alerts.pushEnabled"), "success");
+                return ok;
             } catch (_) {
                 return false; // a push-setup failure must never disrupt normal app use
             }
         }
 
         async function unsubscribeFromPushNotifications() {
+            const identity = await currentDevicePushIdentity();
             try {
-                const registration = await navigator.serviceWorker.ready;
-                const subscription = await registration.pushManager.getSubscription();
-                if (subscription) {
-                    const endpoint = subscription.endpoint;
-                    await subscription.unsubscribe();
-                    if (authToken) {
-                        try {
-                            await fetch(`${API_URL}/push/unsubscribe`, {
-                                method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
-                                body: JSON.stringify({ endpoint }),
-                            });
-                        } catch (_) {}
-                    }
-                }
+                if (authToken && identity.push_endpoint) await postPushRegistration("/push/unsubscribe", { endpoint: identity.push_endpoint });
+                if (authToken && identity.native_push_token) await postPushRegistration("/push/native/unregister", { token: identity.native_push_token });
             } catch (_) {}
+            await releaseDevicePushOnSignOut();
             showToast(t("alerts.pushDisabled"), "info");
         }
 
@@ -31681,11 +31822,17 @@
         // existing confirm modal, not a second dialog system) at most ONCE
         // per browser — tracked in localStorage, not per-session — and only
         // once the user is actually signed in with an active business.
-        function maybeShowPushPermissionPrompt() {
-            if (!pushNotificationsSupported()) return;
-            if (typeof Notification === "undefined" || Notification.permission !== "default") return; // already decided — never re-prompt with our own UI on top of the browser's
+        async function maybeShowPushPermissionPrompt() {
+            if (!pushRegistrationAllowed()) return;
+            if (nativePushPlugin()) {
+                const push = await initializeNativePush();
+                const permission = push ? await push.checkPermissions().catch(() => null) : null;
+                if (!permission || !String(permission.receive).startsWith("prompt")) return; // granted or refused at OS level
+            } else {
+                if (!pushNotificationsSupported()) return;
+                if (typeof Notification === "undefined" || Notification.permission !== "default") return; // already decided — never re-prompt with our own UI on top of the browser's
+            }
             if (localStorage.getItem("cauldra_push_prompt_dismissed") === "true") return;
-            if (!hasAuthenticatedBusinessContext()) return;
             showCustomConfirm(t("alerts.enablePushBody"), t("alerts.enablePushTitle"), t("alerts.enablePushConfirm"), t("alerts.enablePushDismiss")).then((confirmed) => {
                 localStorage.setItem("cauldra_push_prompt_dismissed", "true"); // asked once — never nag again regardless of the answer
                 if (confirmed) subscribeToPushNotifications();

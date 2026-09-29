@@ -62,7 +62,9 @@ captures/
 .cxx/
 
 # Google Services (e.g. APIs or Firebase)
-# google-services.json
+# NOTIF-PUSH-002: each environment's Firebase client config is supplied at
+# build time (QA / production projects differ); never committed.
+google-services.json
 
 # Freeline
 freeline.py

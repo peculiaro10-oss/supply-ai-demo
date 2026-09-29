@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAD = "0044_subscription_renewal_engine"
+HEAD = "0045_push_device_ownership"
 
 
 class _SchemaError(Exception):

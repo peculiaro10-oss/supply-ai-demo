@@ -6,5 +6,10 @@
   "server": {
     "androidScheme": "https",
     "iosScheme": "capacitor"
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    }
   }
 }

@@ -1683,6 +1683,10 @@ class RefreshSession(Base):
     revoked_at = Column(SQLDateTime, nullable=True)
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     replaced_by_hash = Column(String, nullable=True)
+    # NOTIF-PUSH-001: one id per sign-in, carried across every rotation, so a
+    # push registration can be bound to the sign-in that made it. NULL only on
+    # rows created before migration 0045 (see refresh_family_for_request()).
+    family_id = Column(String, nullable=True, index=True)
 
 class AuthFailure(Base):
     __tablename__ = "auth_failures"
@@ -2175,11 +2179,19 @@ class Notification(Base):
     resolved_at = Column(SQLDateTime, nullable=True)
 
 class PushSubscription(Base):
-    """One row per browser/device Web Push registration. A user with
-    multiple devices/browsers has multiple active rows — every one of them
-    receives a push. disabled_at marks a subscription the push service has
-    reported as gone (HTTP 404/410 from a delivery attempt) so it is never
-    retried again, without deleting the record of it having existed."""
+    """One row per browser Web Push registration (channel "webpush"; native
+    Android devices live in NativePushDevice). A user with multiple
+    browsers has multiple active rows — every live one receives a push.
+    disabled_at marks a subscription the push service has reported as gone
+    (HTTP 404/410 from a delivery attempt) so it is never retried again,
+    without deleting the record of it having existed.
+
+    NOTIF-PUSH-001 ownership: a row belongs to ONE sign-in — session_family
+    (the RefreshSession.family_id of the sign-in that registered it) and
+    auth_version (the user's auth generation at that moment). It receives
+    pushes only while that sign-in is still active and the generation still
+    matches (see push_registration_is_live()); revoked_at marks ownership
+    ended (sign-out, session revocation, password change/reset, disable)."""
     __tablename__ = "push_subscriptions"
     id = Column(Integer, primary_key=True, index=True)
     business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -2191,6 +2203,32 @@ class PushSubscription(Base):
     created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     last_seen_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
     disabled_at = Column(SQLDateTime, nullable=True)
+    session_family = Column(String, nullable=True, index=True)
+    auth_version = Column(Integer, nullable=True)
+    revoked_at = Column(SQLDateTime, nullable=True)
+    revoked_reason = Column(String, nullable=True)
+
+class NativePushDevice(Base):
+    """NOTIF-PUSH-002: one row per installed Cauldra app's Firebase Cloud
+    Messaging registration token (platform "android"). Same ownership rules
+    as PushSubscription: bound to one sign-in (session_family + auth_version),
+    revoked_at when that ownership ends, disabled_at when FCM reports the
+    token gone. The token is unique: a reinstall or a second user on the same
+    phone re-registers it, which moves (never duplicates) the row."""
+    __tablename__ = "native_push_devices"
+    id = Column(Integer, primary_key=True, index=True)
+    business_id = Column(Integer, ForeignKey("business_profile.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    platform = Column(String, nullable=False, default="android")
+    token = Column(Text, nullable=False, unique=True)
+    app_version = Column(String, nullable=True)
+    session_family = Column(String, nullable=True, index=True)
+    auth_version = Column(Integer, nullable=True)
+    created_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at = Column(SQLDateTime, default=datetime.utcnow, nullable=False)
+    disabled_at = Column(SQLDateTime, nullable=True)
+    revoked_at = Column(SQLDateTime, nullable=True)
+    revoked_reason = Column(String, nullable=True)
 
 class NotificationPreference(Base):
     """Per-user opt-out for OPTIONAL notification categories only (inventory,
@@ -4447,12 +4485,81 @@ def revoke_all_user_sessions(db: Session, user: User):
     now = datetime.utcnow()
     db.query(RefreshSession).filter(RefreshSession.user_id == user.id, RefreshSession.revoked_at.is_(None)).update({RefreshSession.revoked_at: now}, synchronize_session=False)
     user.auth_version = int(user.auth_version or 1) + 1
+    # NOTIF-PUSH-001: every path that ends a user's sessions (password change
+    # or reset, Admin reset, disable, role change) also ends the push
+    # ownership of every device that user registered.
+    revoke_push_registrations(db, user_id=user.id, reason="sessions_revoked")
+
+def new_refresh_family() -> str:
+    return secrets.token_urlsafe(18)
 
 def create_refresh_session(db: Session, user: User) -> str:
     raw = secrets.token_urlsafe(48)
-    row = RefreshSession(token_hash=hash_text(raw), user_id=user.id, business_id=user.business_id, expires_at=datetime.utcnow()+timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
+    row = RefreshSession(token_hash=hash_text(raw), user_id=user.id, business_id=user.business_id, expires_at=datetime.utcnow()+timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+                         family_id=new_refresh_family())
     db.add(row); db.commit()
     return raw
+
+def refresh_family_for_request(db: Session, user: User, refresh_token: Optional[str]) -> Optional[str]:
+    """The sign-in (refresh-session family) the caller's refresh cookie belongs
+    to, or None when the request carries no cookie of THIS user. A row from
+    before migration 0045 gets its family assigned here once (it and its
+    successors then share it)."""
+    if not refresh_token:
+        return None
+    row = db.query(RefreshSession).filter(RefreshSession.token_hash == hash_text(refresh_token)).first()
+    if not row or row.user_id != user.id or row.business_id != user.business_id:
+        return None
+    if not row.family_id:
+        row.family_id = f"legacy-{row.id}"
+    return row.family_id
+
+def live_push_families(db: Session, user: User) -> set:
+    """Sign-ins of this user that are still active right now (an unrevoked,
+    unexpired refresh row carries the family)."""
+    now = datetime.utcnow()
+    return {f for (f,) in db.query(RefreshSession.family_id).filter(
+        RefreshSession.user_id == user.id, RefreshSession.business_id == user.business_id,
+        RefreshSession.revoked_at.is_(None), RefreshSession.expires_at > now,
+        RefreshSession.family_id.isnot(None)).all()}
+
+def revoke_push_registrations(db: Session, *, reason: str, user_id: Optional[int] = None, session_family: Optional[str] = None,
+                              endpoint: Optional[str] = None, token: Optional[str] = None) -> int:
+    """Ends push ownership (Web Push and native) for the rows matching every
+    given filter; at least one filter is required. Rows are kept (revoked_at)
+    so a later registration of the same browser/device can take them over."""
+    if user_id is None and session_family is None and endpoint is None and token is None:
+        return 0
+    now = datetime.utcnow()
+    total = 0
+    targets = []
+    if endpoint is None and token is None:
+        targets = [(PushSubscription, None, None), (NativePushDevice, None, None)]
+    if endpoint is not None:
+        targets.append((PushSubscription, PushSubscription.endpoint, endpoint))
+    if token is not None:
+        targets.append((NativePushDevice, NativePushDevice.token, token))
+    for model, key_col, key in targets:
+        q = db.query(model).filter(model.revoked_at.is_(None))
+        if user_id is not None:
+            q = q.filter(model.user_id == user_id)
+        if session_family is not None:
+            q = q.filter(model.session_family == session_family)
+        if key is not None:
+            q = q.filter(key_col == key)
+        total += q.update({model.revoked_at: now, model.revoked_reason: reason}, synchronize_session=False)
+    return total
+
+def push_registration_is_live(row, user: User, families: set) -> bool:
+    """The single delivery gate (NOTIF-PUSH-001): the registration is owned by
+    this user in this business, not revoked or disabled, bound to a sign-in
+    that is still active, and made under the user's current auth generation."""
+    return bool(
+        row.revoked_at is None and row.disabled_at is None
+        and row.user_id == user.id and row.business_id == user.business_id and not user.disabled
+        and row.session_family and row.session_family in families
+        and row.auth_version is not None and int(row.auth_version) == int(user.auth_version or 1)
+    )
 
 from contextvars import ContextVar
 _native_cookie_request = ContextVar("native_cookie_request", default=False)
@@ -4991,9 +5098,11 @@ def create_notification(
         db.add(n)
         created.append(n)
     db.flush()
-    for n in created:
-        if n.push:
-            deliver_push_notification(db, n)
+    # NOTIF-PUSH-004: queued, not sent — a phone push goes out only once the
+    # transaction that wrote the row has committed (see
+    # _dispatch_committed_push()), so a rolled-back notification is never pushed.
+    pending = db.info.setdefault(PENDING_PUSH_KEY, [])
+    pending.extend(n.id for n in created if n.push)
     return created
 
 def resolve_notifications(db: Session, dedup_key: str, business_id: Optional[int] = None) -> int:
@@ -5014,43 +5123,150 @@ def resolve_notifications(db: Session, dedup_key: str, business_id: Optional[int
         row.resolved_at = now
     return len(rows)
 
-def deliver_push_notification(db: Session, notification: "Notification") -> None:
-    """Best-effort Web Push delivery for one already-created, push-eligible
-    Notification row. Never raises — a push provider outage or an expired
-    subscription must never break the request that triggered the
-    notification; the row already exists in the notification center
-    regardless of whether this succeeds. A subscription the push service
-    reports as permanently gone (404/410) is disabled so it is never retried
-    again; any other failure is left alone for the next event to retry
-    naturally (there is no separate retry queue)."""
-    if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
-        return  # push not configured — in-app notification still stands on its own
-    subs = db.query(PushSubscription).filter(PushSubscription.user_id == notification.recipient_user_id, PushSubscription.disabled_at.is_(None)).all()
-    if not subs:
+PENDING_PUSH_KEY = "cauldra_pending_push_notification_ids"
+
+@event.listens_for(Session, "after_commit")
+def _dispatch_committed_push(session) -> None:
+    """NOTIF-PUSH-004: sends the pushes queued by create_notification() in the
+    transaction that just committed, on a separate short-lived session bound
+    to the same database. Never raises into the committing request."""
+    ids = session.info.pop(PENDING_PUSH_KEY, None)
+    if not ids:
         return
-    payload = json.dumps({
-        "notification_id": notification.id, "title": notification.title, "body": notification.message,
-        "severity": notification.severity, "category": notification.category, "deep_link": notification.deep_link,
-    })
+    try:
+        bind = session.get_bind()
+    except Exception:
+        return
+    with Session(bind=bind) as push_db:
+        for notification_id in dict.fromkeys(ids):
+            try:
+                n = push_db.get(Notification, notification_id)
+                if n is None or not n.push or n.push_sent_at is not None:
+                    continue  # rolled back, not push-eligible, or already sent
+                deliver_push_notification(push_db, n)
+                push_db.commit()
+            except Exception:
+                push_db.rollback()
+
+@event.listens_for(Session, "after_soft_rollback")
+def _drop_rolled_back_push(session, previous_transaction) -> None:
+    session.info.pop(PENDING_PUSH_KEY, None)
+
+# Firebase Cloud Messaging (NOTIF-PUSH-002). FCM_SERVICE_ACCOUNT_JSON is the
+# Firebase project's service-account key (the whole JSON document); it is
+# server-only and read nowhere else. Native push is a no-op while it is unset.
+FCM_SERVICE_ACCOUNT_JSON = os.getenv("FCM_SERVICE_ACCOUNT_JSON", "").strip()
+FCM_ANDROID_CHANNEL_ID = "cauldra_alerts"
+_fcm_state: Dict[str, Any] = {}
+
+def fcm_configured() -> bool:
+    return bool(FCM_SERVICE_ACCOUNT_JSON)
+
+def _fcm_access() -> Tuple[str, str]:
+    """(project_id, OAuth access token) for the FCM HTTP v1 API, cached until
+    shortly before expiry."""
+    from google.oauth2 import service_account
+    import google.auth.transport.requests
+    creds = _fcm_state.get("creds")
+    if creds is None:
+        info = json.loads(FCM_SERVICE_ACCOUNT_JSON)
+        creds = service_account.Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/firebase.messaging"])
+        _fcm_state["creds"] = creds
+        _fcm_state["project_id"] = info["project_id"]
+    if not creds.valid:
+        creds.refresh(google.auth.transport.requests.Request())
+    return _fcm_state["project_id"], creds.token
+
+FCM_TOKEN_GONE_CODES = {"UNREGISTERED", "SENDER_ID_MISMATCH"}
+
+def fcm_send(token: str, notification: "Notification") -> str:
+    """One FCM HTTP v1 send. Returns "sent", "gone" (the token will never work
+    again — disable it) or "failed" (transient; leave it for the next event)."""
+    import requests
+    project_id, access_token = _fcm_access()
+    tag = f"cauldra-notification-{notification.id}"
+    message = {"message": {
+        "token": token,
+        "notification": {"title": notification.title, "body": notification.message},
+        "data": {"notification_id": str(notification.id), "deep_link": notification.deep_link or "",
+                 "category": notification.category or "", "severity": notification.severity or ""},
+        "android": {
+            "priority": "HIGH", "ttl": "86400s", "collapse_key": tag,
+            # PRIVATE: a locked screen shows only that Cauldra sent something.
+            "notification": {"channel_id": FCM_ANDROID_CHANNEL_ID, "tag": tag, "visibility": "PRIVATE",
+                             "icon": "ic_stat_cauldra", "color": "#436BEE"},
+        },
+    }}
+    resp = requests.post(f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send", json=message,
+                         headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
+    if resp.status_code == 200:
+        return "sent"
+    codes = set()
+    try:
+        err = resp.json().get("error", {})
+        codes = {d.get("errorCode") for d in err.get("details", []) if isinstance(d, dict)}
+        if resp.status_code == 400 and err.get("status") == "INVALID_ARGUMENT" and "registration token" in str(err.get("message", "")).lower():
+            codes.add("UNREGISTERED")
+    except Exception:
+        pass
+    if resp.status_code == 404 or codes & FCM_TOKEN_GONE_CODES:
+        return "gone"
+    return "failed"
+
+def deliver_push_notification(db: Session, notification: "Notification") -> None:
+    """Best-effort external delivery of one committed, push-eligible
+    Notification row to the recipient's LIVE registrations only — Web Push
+    browsers and native Android devices (NOTIF-PUSH-001/002). Never raises —
+    a push provider outage or an expired registration must never break
+    anything; the in-app row is authoritative and is never deleted or marked
+    read here. A registration the provider reports permanently gone is
+    disabled so it is never retried; any other failure is left alone for the
+    next event to retry naturally (there is no separate retry queue)."""
+    user = db.query(User).filter(User.id == notification.recipient_user_id).first()
+    if not user or user.disabled or user.business_id != notification.business_id:
+        return
+    families = live_push_families(db, user)
+    now = datetime.utcnow()
+    live_web, live_native = [], []
+    for model, bucket in ((PushSubscription, live_web), (NativePushDevice, live_native)):
+        for row in db.query(model).filter(model.user_id == user.id, model.revoked_at.is_(None), model.disabled_at.is_(None)).all():
+            if push_registration_is_live(row, user, families):
+                bucket.append(row)
+            else:
+                # Bound to a sign-in that has ended, an older auth generation,
+                # or another business: ownership is over for good.
+                row.revoked_at = now; row.revoked_reason = "session_inactive"
     sent_any = False
-    for sub in subs:
-        try:
-            webpush(
-                subscription_info={"endpoint": sub.endpoint, "keys": {"p256dh": sub.p256dh, "auth": sub.auth}},
-                data=payload, vapid_private_key=VAPID_PRIVATE_KEY,
-                vapid_claims={"sub": f"mailto:{VAPID_CONTACT_EMAIL}"}, ttl=86400,
-            )
-            sub.last_seen_at = datetime.utcnow()
-            sent_any = True
-        except WebPushException as exc:
-            status_code = getattr(exc.response, "status_code", None)
-            if status_code in (404, 410):
-                sub.disabled_at = datetime.utcnow()
-            # Any other failure (5xx, timeout, offline device): leave the
-            # subscription active and move on — no retry queue exists, and a
-            # future event will naturally attempt delivery again.
-        except Exception:
-            pass
+    if live_web and VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY:
+        payload = json.dumps({
+            "notification_id": notification.id, "title": notification.title, "body": notification.message,
+            "severity": notification.severity, "category": notification.category, "deep_link": notification.deep_link,
+        })
+        for sub in live_web:
+            try:
+                webpush(
+                    subscription_info={"endpoint": sub.endpoint, "keys": {"p256dh": sub.p256dh, "auth": sub.auth}},
+                    data=payload, vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims={"sub": f"mailto:{VAPID_CONTACT_EMAIL}"}, ttl=86400,
+                )
+                sub.last_seen_at = datetime.utcnow()
+                sent_any = True
+            except WebPushException as exc:
+                if getattr(exc.response, "status_code", None) in (404, 410):
+                    sub.disabled_at = datetime.utcnow()
+            except Exception:
+                pass
+    if live_native and fcm_configured():
+        for device in live_native:
+            try:
+                outcome = fcm_send(device.token, notification)
+            except Exception:
+                outcome = "failed"
+            if outcome == "sent":
+                device.last_seen_at = datetime.utcnow()
+                sent_any = True
+            elif outcome == "gone":
+                device.disabled_at = datetime.utcnow()
     if sent_any:
         notification.push_sent_at = datetime.utcnow()
 
@@ -6677,6 +6893,14 @@ class PushSubscribeRequest(BaseModel):
 class PushUnsubscribeRequest(BaseModel):
     endpoint: str
 
+class NativePushRegisterRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=4096)
+    platform: str = Field(default="android", max_length=16)
+    app_version: Optional[str] = Field(default=None, max_length=64)
+
+class NativePushUnregisterRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=4096)
+
 class PasswordChangeRequest(BaseModel):
     current_password: str
     new_password: str
@@ -6836,6 +7060,13 @@ class PresenceHeartbeatRequest(BaseModel):
     # next scheduled heartbeat. True means "the user interacted with Cauldra at
     # least once since the previous heartbeat".
     activity: bool = False
+
+class LogoutRequest(PresenceHeartbeatRequest):
+    # NOTIF-PUSH-001: this device's own push registration, when the client
+    # knows it, is ended by the sign-out too (the sign-in's own registrations
+    # are ended server-side regardless).
+    push_endpoint: Optional[str] = Field(default=None, max_length=4096)
+    native_push_token: Optional[str] = Field(default=None, max_length=4096)
 
 class PermissionOverrideUpdate(BaseModel):
     permission: str
@@ -7042,7 +7273,7 @@ def register_business(data: RegisterBusinessRequest, request: Request, response:
             add_audit(db, admin, "TRIAL_RISK_SIGNAL", f"Owner identity (email/phone) previously started a trial for another business (ip={client_ip}). Flagged for review only; trial not restricted.", admin)
         db.add(RefreshSession(
             token_hash=hash_text(refresh_raw), user_id=admin.id, business_id=new_biz.id,
-            expires_at=now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+            expires_at=now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS), family_id=new_refresh_family(),
         ))
         db.commit()
     except HTTPException:
@@ -7190,12 +7421,22 @@ def auth_me(user: User = Depends(get_authenticated_user), db: Session = Depends(
     return {"permissions": get_effective_permissions(user), **serialize_business(biz, db), **serialize_user(user)}
 
 @app.post("/auth/logout")
-def auth_logout(response: Response, payload_body: Optional[PresenceHeartbeatRequest] = None, token: str = Depends(oauth2_scheme), refresh_token: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME), user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def auth_logout(response: Response, payload_body: Optional[LogoutRequest] = None, token: str = Depends(oauth2_scheme), refresh_token: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME), user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
     payload, jti = token_from_payload(token)
     exp_ts = payload.get("exp")
     exp_dt = datetime.utcfromtimestamp(exp_ts) if exp_ts else datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     if not db.query(SessionRevocation).filter(SessionRevocation.jti == jti).first():
         db.add(SessionRevocation(jti=jti, user_id=user.id, expires_at=exp_dt)); db.commit()
+    # NOTIF-PUSH-001: the device stops receiving this user's pushes at sign-out.
+    # Server-side by the sign-in itself (every registration this sign-in made),
+    # plus the exact browser endpoint / native token the client reports.
+    family = refresh_family_for_request(db, user, refresh_token)
+    if family:
+        revoke_push_registrations(db, user_id=user.id, session_family=family, reason="signed_out")
+    if payload_body and payload_body.push_endpoint:
+        revoke_push_registrations(db, user_id=user.id, endpoint=payload_body.push_endpoint, reason="signed_out")
+    if payload_body and payload_body.native_push_token:
+        revoke_push_registrations(db, user_id=user.id, token=payload_body.native_push_token, reason="signed_out")
     if refresh_token:
         rs = db.query(RefreshSession).filter(RefreshSession.token_hash==hash_text(refresh_token), RefreshSession.user_id==user.id, RefreshSession.revoked_at.is_(None)).first()
         if rs: rs.revoked_at = datetime.utcnow()
@@ -7269,7 +7510,8 @@ def auth_refresh(response: Response, refresh_token: Optional[str] = Cookie(defau
     ).update({RefreshSession.revoked_at: now, RefreshSession.replaced_by_hash: new_hash}, synchronize_session=False)
 
     if affected == 1:
-        db.add(RefreshSession(token_hash=new_hash, user_id=user.id, business_id=user.business_id, expires_at=now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)))
+        db.add(RefreshSession(token_hash=new_hash, user_id=user.id, business_id=user.business_id, expires_at=now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+                              family_id=row.family_id or f"legacy-{row.id}"))
         db.commit()  # old-row revoke + replaced_by_hash + new row, all at once
         set_refresh_cookie(response, new_raw)
         return _issue_refresh_success(db, user)
@@ -8282,6 +8524,8 @@ def delete_user(user_id: int, actor: User = Depends(get_current_user), db: Sessi
         admins = db.query(User).filter(User.business_id == actor.business_id, User.role == "admin", User.disabled == False).count()
         if target.id == actor.id or admins <= 1: raise HTTPException(status_code=400, detail="The last active Admin cannot be deleted.")
     add_audit(db, actor, "USER_DELETED", "Account deleted. Business-owned records were retained.", target, action_category="TEAM", resource_type="user", resource_id=target.id)
+    # NOTIF-PUSH-001: explicit, not only the FK cascade that removes the rows.
+    revoke_push_registrations(db, user_id=target.id, reason="account_deleted")
     db.delete(target); db.commit()
     return {"message": "Account deleted. Business data was preserved."}
 
@@ -14006,30 +14250,66 @@ def get_vapid_public_key():
         raise HTTPException(status_code=503, detail="Push notifications are not configured on this server.")
     return {"public_key": VAPID_PUBLIC_KEY}
 
+PUSH_SIGN_IN_REQUIRED_DETAIL = "Sign in again on this device to turn on notifications."
+
+def push_owner_family(db: Session, user: User, refresh_token: Optional[str]) -> str:
+    """NOTIF-PUSH-001: a device can only be registered from a live sign-in on
+    it (the refresh cookie), so its ownership ends with that sign-in."""
+    family = refresh_family_for_request(db, user, refresh_token)
+    if not family or family not in live_push_families(db, user):
+        raise HTTPException(status_code=409, detail=PUSH_SIGN_IN_REQUIRED_DETAIL)
+    return family
+
+def claim_push_registration(row, user: User, family: str) -> None:
+    """The same browser endpoint / device token registering again always moves
+    to whoever just registered it from their own live sign-in — a previous,
+    possibly different user's or business's ownership never survives it."""
+    row.user_id = user.id; row.business_id = user.business_id
+    row.session_family = family; row.auth_version = int(user.auth_version or 1)
+    row.revoked_at = None; row.revoked_reason = None; row.disabled_at = None
+    row.last_seen_at = datetime.utcnow()
+
 @app.post("/push/subscribe")
-def subscribe_to_push(payload: PushSubscribeRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    existing = db.query(PushSubscription).filter(PushSubscription.endpoint == payload.endpoint).first()
-    if existing:
-        # The SAME browser endpoint re-subscribing (e.g. after a permission
-        # reset) always reassigns to whichever account just subscribed it —
-        # never left silently pointing at a previous, possibly different
-        # user's account.
-        existing.user_id = user.id; existing.business_id = user.business_id
-        existing.p256dh = payload.keys.p256dh; existing.auth = payload.keys.auth
-        existing.user_agent = payload.user_agent; existing.last_seen_at = datetime.utcnow(); existing.disabled_at = None
-    else:
-        db.add(PushSubscription(
-            business_id=user.business_id, user_id=user.id, endpoint=payload.endpoint,
-            p256dh=payload.keys.p256dh, auth=payload.keys.auth, user_agent=payload.user_agent,
-        ))
+def subscribe_to_push(payload: PushSubscribeRequest, refresh_token: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
+                      user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
+    family = push_owner_family(db, user, refresh_token)
+    row = db.query(PushSubscription).filter(PushSubscription.endpoint == payload.endpoint).first()
+    if not row:
+        row = PushSubscription(endpoint=payload.endpoint, p256dh=payload.keys.p256dh, auth=payload.keys.auth)
+        db.add(row)
+    row.p256dh = payload.keys.p256dh; row.auth = payload.keys.auth; row.user_agent = payload.user_agent
+    claim_push_registration(row, user, family)
     db.commit()
     return {"message": "Push notifications enabled."}
 
 @app.post("/push/unsubscribe")
-def unsubscribe_from_push(payload: PushUnsubscribeRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    row = db.query(PushSubscription).filter(PushSubscription.endpoint == payload.endpoint, PushSubscription.user_id == user.id).first()
-    if row:
-        db.delete(row); db.commit()
+def unsubscribe_from_push(payload: PushUnsubscribeRequest, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
+    revoke_push_registrations(db, user_id=user.id, endpoint=payload.endpoint, reason="unsubscribed")
+    db.commit()
+    return {"message": "Push notifications disabled."}
+
+@app.post("/push/native/register")
+def register_native_push(payload: NativePushRegisterRequest, refresh_token: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
+                         user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
+    """NOTIF-PUSH-002: the installed Android app's FCM token, sent on every
+    sign-in and whenever Firebase rotates it."""
+    if payload.platform != "android":
+        raise HTTPException(status_code=400, detail="Only the Android app can register for native notifications.")
+    family = push_owner_family(db, user, refresh_token)
+    token = payload.token.strip()
+    row = db.query(NativePushDevice).filter(NativePushDevice.token == token).first()
+    if not row:
+        row = NativePushDevice(token=token)
+        db.add(row)
+    row.platform = "android"; row.app_version = payload.app_version
+    claim_push_registration(row, user, family)
+    db.commit()
+    return {"message": "Push notifications enabled."}
+
+@app.post("/push/native/unregister")
+def unregister_native_push(payload: NativePushUnregisterRequest, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
+    revoke_push_registrations(db, user_id=user.id, token=payload.token.strip(), reason="unsubscribed")
+    db.commit()
     return {"message": "Push notifications disabled."}
 
 # -----------------------------------------------------------------------------

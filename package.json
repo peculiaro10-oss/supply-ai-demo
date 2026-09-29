@@ -25,7 +25,8 @@
   "dependencies": {
     "@capacitor/app": "8.1.1",
     "@capacitor/core": "latest",
-    "@capacitor/inappbrowser": "3.0.3"
+    "@capacitor/inappbrowser": "3.0.3",
+    "@capacitor/push-notifications": "8.1.2"
   },
   "devDependencies": {
     "@capacitor/android": "latest",
