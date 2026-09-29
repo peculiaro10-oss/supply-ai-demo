@@ -485,6 +485,14 @@ class FcmSend(unittest.TestCase):
         body = {'error': {'status': 'INVALID_ARGUMENT', 'message': 'The registration token is not a valid FCM registration token'}}
         self.assertEqual(self.run_with(400, body)[0], 'gone')
 
+    def test_service_account_with_a_byte_order_mark_is_accepted(self):
+        import subprocess, sys
+        code = ("import os; os.environ['FCM_SERVICE_ACCOUNT_JSON'] = '\\ufeff{\"project_id\": \"p\"}\\n'; import main, json; "
+                "print(json.loads(main.FCM_SERVICE_ACCOUNT_JSON)['project_id'])")
+        env = {**os.environ, 'PYTHONPATH': os.pathsep.join([os.path.join(os.path.dirname(__file__), '..', 'backend'), os.environ.get('PYTHONPATH', '')])}
+        out = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, env=env, timeout=300)
+        self.assertEqual(out.stdout.strip().splitlines()[-1], 'p', out.stderr[-500:])
+
     def test_server_errors_are_transient(self):
         for status in (429, 500, 503):
             self.assertEqual(self.run_with(status, {'error': {'status': 'UNAVAILABLE'}})[0], 'failed')

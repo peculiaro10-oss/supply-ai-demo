@@ -5155,7 +5155,9 @@ def _drop_rolled_back_push(session, previous_transaction) -> None:
 # Firebase Cloud Messaging (NOTIF-PUSH-002). FCM_SERVICE_ACCOUNT_JSON is the
 # Firebase project's service-account key (the whole JSON document); it is
 # server-only and read nowhere else. Native push is a no-op while it is unset.
-FCM_SERVICE_ACCOUNT_JSON = os.getenv("FCM_SERVICE_ACCOUNT_JSON", "").strip()
+# A leading byte-order mark (what a Windows PowerShell pipe adds when the key
+# is pasted in) is ignored rather than breaking every native send.
+FCM_SERVICE_ACCOUNT_JSON = os.getenv("FCM_SERVICE_ACCOUNT_JSON", "").strip().lstrip("﻿").strip()
 FCM_ANDROID_CHANNEL_ID = "cauldra_alerts"
 _fcm_state: Dict[str, Any] = {}
 
