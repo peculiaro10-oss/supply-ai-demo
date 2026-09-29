@@ -16,7 +16,7 @@
 // below deletes every cache whose name doesn't match the current one, which
 // is the only thing standing between a fixed startup bug and a browser
 // silently keeping the old broken app.js around after the fix ships.
-const SHELL_CACHE = "cauldra-shell-v27-push-ownership";
+const SHELL_CACHE = "cauldra-shell-v28-push-ownership";
 
 // Precached at install time. Kept small and static-only — anything dynamic
 // (products, sales, etc.) never belongs in this cache. List each file once, by
@@ -157,7 +157,7 @@ self.addEventListener("push", (event) => {
     const options = {
         body: data.body || "",
         icon: "/assets/icon-192.png",
-        badge: "/assets/icon-192.png",
+        badge: "/assets/notification-badge-96.png", // one-colour Cauldra mark; Android draws the badge as a silhouette
         tag: data.notification_id ? `cauldra-notification-${data.notification_id}` : undefined, // a re-delivered/duplicate push for the same notification replaces the prior one instead of stacking
         data: { deep_link: data.deep_link || null, notification_id: data.notification_id || null },
     };

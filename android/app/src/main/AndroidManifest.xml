@@ -48,8 +48,10 @@
         </provider>
 
         <!-- NOTIF-PUSH-002: Firebase Cloud Messaging display defaults (small
-             status-bar icon, accent colour, and the channel the app creates at
-             start-up; the server names the same channel on every message). -->
+             status-bar icon = the Cauldra mark as a one-colour silhouette, built
+             from the launcher's monochrome layer; accent colour; and the channel
+             the app creates at start-up - the server names the same channel on
+             every message). -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
             android:resource="@drawable/ic_stat_cauldra" />
