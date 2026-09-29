@@ -1378,7 +1378,15 @@ The owner's four permanent records were attached to this session and updated dir
 - `tests/test_price_upgrade_001.py`: 24 tests + 103 subtests PASS. Against `7763a26` the same file fails: 17 tests and 102 subtests, including the three `change-plan` bypass subcases.
 - `tests/test_price_upgrade_ui.cjs`: 15 checks PASS, browser included; it fails on `7763a26`.
 - Post-fix matrix (`PRICING_MATRIX_PRICE-UPGRADE-001_POSTFIX.md`): 120 rows, **120 PASS, 0 SUSPECT**, including 12 expected refusals.
-- Full per-file Python and JS suites: see "Regression" below.
+- **Regression.** All 57 Python test files were run one process per file, on this commit and on `7763a26` side by side (local PostgreSQL 16).
+  - The only difference is the new PRICE-UPGRADE-001 file.
+  - Subscription/billing suites all PASS: lifecycle 21, pre-freeze policy 19, renewal engine 32, trial cancellation 8, trial-expiry calendar 10, batch C billing/staff 44, Paystack verification (Postgres) 3, webhook atomicity (Postgres) 2, email/Paystack closure 4.
+  - With a migrated database, `test_inapp_payments` passes 22/23; the one failure (onboarding email-verification setup) fails identically on `7763a26`.
+  - The failures that remain are the same on `7763a26` and are this sandbox's environment:
+    - Location currency reference data is missing ("no authoritative currency": business-day and sales Postgres suites);
+    - one subprocess test runs with an empty environment;
+    - Sentry and infrastructure checks.
+- **JS.** All 35 JS test files PASS: 34 existing plus the new UI test, with the browser tests on Chromium via Playwright 1.56. That includes `test_native_bundle` after `build:www:qa` + `cap sync android`, and `test_legal_documents`.
 
 **Not done here (sandbox limits: `cauldra-qa.up.railway.app`, `api.paystack.co` and `checkout.paystack.com` are blocked by the network policy; there is no Android SDK; the Railway connector cannot deploy local code or change the QA source branch):**
 - the QA deploy;
