@@ -1371,6 +1371,10 @@
         // refreshDashboardLocationScopedCards().
         let dashboardLowStockCount = null;
         let dashboardLowStockReady = false;
+        // The Location (null = whole business) the figure on screen belongs
+        // to, and a request counter so only the newest response is applied.
+        let dashboardLowStockScope;
+        let dashboardLowStockRequestSeq = 0;
         let inventoryEverLoaded = false;
         // Gates the one-time "Loading your Cauldra data…" banner — shown for
         // the genuine first load of a session only, never on subsequent
@@ -1996,6 +2000,8 @@
                     quantity: "Quantity", price: "Price", total: "Total", notes: "Notes", retry: "Retry", refresh: "Refresh",
                     signOut: "Sign Out", signOutConfirmBody: "Are you sure you want to sign out?", phoneNumber: "Phone number", localNumberWithPrefix: "Local number ({prefix})",
                     invalidPhoneForCountry: "Enter a valid phone number for the selected country.",
+                    phoneTooShortForCountry: "This phone number is too short for the selected country.",
+                    phoneTooLongForCountry: "This phone number is too long for the selected country.",
                     signInOrRegister: "Sign in or register a business first.", noResultsFound: "No results found.",
                     somethingWentWrong: "Something went wrong. Please try again.", tryAgain: "Please try again.",
                     unsavedChanges: "You have unsaved changes.", confirmDelete: "Are you sure you want to delete this?",
@@ -16677,17 +16683,64 @@
         // to_e164() is the authoritative check and will reject it properly;
         // this function is frontend UX convenience, not the source of truth.
         function normalizeBusinessPhone(raw) {
-            const value = String(raw || "").trim();
-            if (!value) return value;
-            const iso2 = resolvePhoneRegionIso2(businessProfile);
-            if (typeof libphonenumber !== "undefined" && iso2) {
-                try {
-                    const parsed = libphonenumber.parsePhoneNumberFromString(value, iso2);
-                    if (parsed && parsed.isValid()) return parsed.number; // E.164, e.g. "+2348031234567"
-                } catch (_) { /* fall through to the safe best-effort value below */ }
-            }
-            if (value.startsWith("+")) return value.replace(/[^+0-9]/g, "");
-            return value;
+            return phoneE164ForSubmit(raw, businessProfile);
+        }
+
+        // POLISH-PHONE: the value shown in a phone field and the value sent to
+        // the API are two different things. The field shows the number the way
+        // the country writes it ("0803 123 4567", "(201) 555-0123"); the API
+        // gets canonical E.164 ("+2348031234567"). Punctuation the person typed
+        // is never stored, and the country code is never added twice.
+        //
+        // A leading "00" is read as "+" (the international access prefix),
+        // exactly like the backend's to_e164().
+        function phoneTextForParse(value) {
+            const text = String(value || "").trim();
+            return text.startsWith("00") && !text.startsWith("000") ? "+" + text.slice(2) : text;
+        }
+        // E.164 when the number is valid for the country (or, if it was typed
+        // with its own "+code", for that country); otherwise the trimmed value
+        // unchanged, so the backend's to_e164() rejects it with its own message
+        // and nothing is silently rewritten.
+        function phoneE164ForSubmit(value, context) {
+            const text = String(value || "").trim();
+            if (!text || typeof libphonenumber === "undefined") return text;
+            const iso2 = resolvePhoneRegionIso2(context);
+            try {
+                const parsed = libphonenumber.parsePhoneNumberFromString(phoneTextForParse(text), iso2 || undefined);
+                if (parsed && parsed.isValid()) return parsed.number;
+            } catch (_) { /* returned unchanged below */ }
+            return text;
+        }
+        // A saved value (E.164, local digits, or older formatted text) shown in
+        // an edit field: national format for a number of this country,
+        // international format for another country's number, and exactly as
+        // stored when it cannot be parsed (a legacy value is never rewritten on
+        // load; the field's validation reports it when the person edits).
+        function formatPhoneForDisplay(value, context) {
+            const text = String(value || "").trim();
+            if (!text || typeof libphonenumber === "undefined") return text;
+            const iso2 = resolvePhoneRegionIso2(context);
+            try {
+                const parsed = libphonenumber.parsePhoneNumberFromString(phoneTextForParse(text), iso2 || undefined);
+                if (parsed && parsed.isValid()) return iso2 && parsed.country === iso2 ? parsed.formatNational() : parsed.formatInternational();
+            } catch (_) { /* shown as stored */ }
+            return text;
+        }
+        // null when valid for the country; otherwise the message key: too
+        // short / too long come from the country's numbering metadata (many
+        // countries allow several lengths — there is no fixed digit count),
+        // anything else is "not a valid number for the selected country".
+        function phoneProblemKey(value, iso2) {
+            const text = phoneTextForParse(value);
+            if (!text || !iso2 || typeof libphonenumber === "undefined") return null;
+            try {
+                if (libphonenumber.isValidPhoneNumber(text, iso2)) return null;
+                const length = libphonenumber.validatePhoneNumberLength(text, iso2);
+                if (length === "TOO_SHORT") return "common.phoneTooShortForCountry";
+                if (length === "TOO_LONG") return "common.phoneTooLongForCountry";
+            } catch (_) { /* invalid below */ }
+            return "common.invalidPhoneForCountry";
         }
 
         // ---------------------------------------------------------------------
@@ -16720,60 +16773,142 @@
         // the field is already wired). errorEl: optional inline message element
         // (created once per field, toggled here — reuses the app's existing
         // border-danger/text-danger inline-error convention, no new visual system).
-        function wireCountryAwarePhoneInput(inputEl, getRegionIso2, errorEl) {
-            if (!inputEl || typeof libphonenumber === "undefined") return;
-            const { AsYouType, isValidPhoneNumber } = libphonenumber;
-            const showError = (msg) => {
-                if (errorEl) { errorEl.textContent = msg; errorEl.classList.remove("hidden"); }
+        // Only what a phone number can contain survives typing or pasting:
+        // digits, one leading "+", and the usual separators. Letters and other
+        // symbols never reach the field.
+        function sanitizePhoneText(value) {
+            const text = String(value || "");
+            const plus = /^\s*(\+|00(?!0))/.test(text);
+            const body = text.replace(/^\s*(\+|00(?!0))/, "").replace(/[^0-9\s().\-]/g, "");
+            return (plus ? "+" : "") + body.replace(/^\s+/, "");
+        }
+        const countPhoneDigits = (value) => (String(value || "").match(/\d/g) || []).length;
+        // The caret position after the n-th digit (so the caret stays after
+        // the same digit when formatting adds or removes spaces).
+        function caretAfterDigits(formatted, n) {
+            if (n <= 0) return formatted.startsWith("+") ? 1 : 0;
+            let seen = 0;
+            for (let i = 0; i < formatted.length; i++) {
+                if (/\d/.test(formatted[i]) && ++seen === n) return i + 1;
+            }
+            return formatted.length;
+        }
+        function formatPhoneAsTyped(text, iso2) {
+            if (!text) return text;
+            try { return new libphonenumber.AsYouType(iso2 || undefined).input(text) || text; } catch (_) { return text; }
+        }
+        function setPhoneFieldError(inputEl, errorEl, key) {
+            if (key) {
+                if (errorEl) { errorEl.textContent = t(key); errorEl.classList.remove("hidden"); }
                 inputEl.classList.add("border-danger");
-            };
-            const hideError = () => {
+                inputEl.setAttribute("aria-invalid", "true");
+            } else {
                 if (errorEl) { errorEl.textContent = ""; errorEl.classList.add("hidden"); }
                 inputEl.classList.remove("border-danger");
-            };
-            inputEl.addEventListener("input", () => {
-                const iso2 = resolvePhoneRegionIso2(getRegionIso2 ? getRegionIso2() : null);
-                const raw = inputEl.value;
-                // No country resolved yet: leave the value exactly as typed,
-                // usable and never flagged invalid — there is nothing to
-                // format or validate against.
-                if (!raw) { hideError(); return; }
-                if (!iso2) return;
-                const prevCursor = inputEl.selectionStart ?? raw.length;
-                let formatted = null;
-                try { formatted = new AsYouType(iso2).input(raw); } catch (_) { /* best-effort only */ }
-                if (formatted && formatted !== raw) {
-                    inputEl.value = formatted;
-                    // Preserve roughly where the user was typing instead of
-                    // always snapping the caret to the end — a simple
-                    // length-delta offset (not a full masking engine),
-                    // matching how many formatting characters AsYouType just
-                    // inserted/removed at-or-before the caret.
-                    const delta = formatted.length - raw.length;
-                    const newCursor = Math.max(0, Math.min(formatted.length, prevCursor + delta));
-                    try { inputEl.setSelectionRange(newCursor, newCursor); } catch (_) {}
-                }
-                // Only ever CLEAR an existing error while the user is still
-                // typing (the number just became complete/valid) — a new
-                // error is never raised here, only on blur/submit, so a
-                // partially-typed number is never flagged red mid-keystroke.
-                if (errorEl && !errorEl.classList.contains("hidden") && isValidPhoneNumber(inputEl.value, iso2)) {
-                    hideError();
-                }
-            });
-            inputEl.addEventListener("blur", () => {
-                const iso2 = resolvePhoneRegionIso2(getRegionIso2 ? getRegionIso2() : null);
-                const raw = inputEl.value.trim();
-                if (!raw || !iso2) { hideError(); return; }
-                if (isValidPhoneNumber(raw, iso2)) hideError();
-                else showError(t("common.invalidPhoneForCountry"));
-            });
+                inputEl.removeAttribute("aria-invalid");
+            }
         }
 
-        // Shared submit-time guard for the four wired fields — returns true
-        // (and shows the field's inline error) when the value is NOT a valid
-        // number for the resolved country, so a caller can block its fetch
-        // exactly like it already blocks on any other required-field failure.
+        function wireCountryAwarePhoneInput(inputEl, getRegionIso2, errorEl) {
+            if (!inputEl || typeof libphonenumber === "undefined") return;
+            // A form that re-wires its field each time it opens (Add/Edit
+            // Location) only refreshes the country source; the listeners are
+            // attached once.
+            if (inputEl._cauldraPhone) { inputEl._cauldraPhone.getRegionIso2 = getRegionIso2; inputEl._cauldraPhone.errorEl = errorEl; return; }
+            const state = inputEl._cauldraPhone = { getRegionIso2, errorEl, accepted: inputEl.value || "" };
+            if (errorEl && inputEl.id && !errorEl.id) errorEl.id = inputEl.id + "-error";
+            if (errorEl?.id) inputEl.setAttribute("aria-describedby", errorEl.id);
+            inputEl.setAttribute("inputmode", "tel");
+            inputEl.setAttribute("autocomplete", inputEl.getAttribute("autocomplete") || "tel");
+            const region = () => resolvePhoneRegionIso2(state.getRegionIso2 ? state.getRegionIso2() : null);
+
+            inputEl.addEventListener("input", (event) => {
+                const iso2 = region();
+                const typed = inputEl.value;
+                const inputType = event.inputType || "";
+                if (!typed) { state.accepted = ""; setPhoneFieldError(inputEl, state.errorEl, null); return; }
+                let text = sanitizePhoneText(typed);
+                const caretDigits = countPhoneDigits(typed.slice(0, inputEl.selectionStart ?? typed.length));
+                let digitsBeforeCaret = caretDigits;
+                // Typing a character a phone number cannot contain: ignored.
+                if (inputType === "insertText" && countPhoneDigits(text) === countPhoneDigits(state.accepted) && sanitizePhoneText(state.accepted) === text.replace(/\s+$/, "")) {
+                    text = state.accepted;
+                }
+                // Backspace/Delete over a space or hyphen that formatting put
+                // there would be undone by the next format: remove the digit
+                // next to it instead, so deleting always makes progress.
+                if (inputType.startsWith("delete") && countPhoneDigits(text) === countPhoneDigits(state.accepted) && text.length < state.accepted.length) {
+                    const digits = text.replace(/\D/g, "");
+                    const at = inputType === "deleteContentForward" ? caretDigits : caretDigits - 1;
+                    if (at >= 0 && at < digits.length) {
+                        const plus = text.startsWith("+") ? "+" : "";
+                        text = plus + digits.slice(0, at) + digits.slice(at + 1);
+                        digitsBeforeCaret = Math.max(0, at);
+                    }
+                }
+                if (iso2) {
+                    // Typing past the longest number this country allows: the
+                    // extra digit is refused and the reason is shown. A paste
+                    // is kept whole (never silently cut) and flagged instead.
+                    const tooLong = libphonenumber.validatePhoneNumberLength(phoneTextForParse(text), iso2) === "TOO_LONG";
+                    if (tooLong && inputType === "insertText" && state.accepted
+                            && libphonenumber.validatePhoneNumberLength(phoneTextForParse(state.accepted), iso2) !== "TOO_LONG") {
+                        const back = state.accepted;
+                        inputEl.value = back;
+                        const caret = caretAfterDigits(back, Math.max(0, caretDigits - 1));
+                        try { inputEl.setSelectionRange(caret, caret); } catch (_) {}
+                        setPhoneFieldError(inputEl, state.errorEl, "common.phoneTooLongForCountry");
+                        return;
+                    }
+                }
+                const formatted = iso2 ? formatPhoneAsTyped(text, iso2) : text;
+                if (formatted !== typed) {
+                    inputEl.value = formatted;
+                    const caret = caretAfterDigits(formatted, digitsBeforeCaret);
+                    try { inputEl.setSelectionRange(caret, caret); } catch (_) {}
+                }
+                state.accepted = inputEl.value;
+                if (!iso2) return;
+                const problem = phoneProblemKey(inputEl.value, iso2);
+                // While typing, only "too long" is raised (a partly typed
+                // number is not an error yet); an existing error clears as
+                // soon as the number becomes valid. Too short / invalid show on
+                // blur and on submit.
+                if (!problem || problem === "common.phoneTooLongForCountry" || inputEl.classList.contains("border-danger")) {
+                    setPhoneFieldError(inputEl, state.errorEl, problem);
+                }
+            });
+            // Forms fill these fields in code (an edit form showing the saved
+            // number), so the accepted value is re-read when the person starts.
+            inputEl.addEventListener("focus", () => { state.accepted = inputEl.value; });
+            inputEl.addEventListener("blur", () => revalidatePhoneInput(inputEl));
+        }
+
+        // Re-reads the field against the CURRENT country — used on blur and
+        // whenever the country behind the field changes (registration country,
+        // Location country). A national number is re-formatted for the new
+        // country; an empty field is never flagged.
+        function revalidatePhoneInput(inputEl) {
+            const state = inputEl?._cauldraPhone;
+            if (!state) return true;
+            const iso2 = resolvePhoneRegionIso2(state.getRegionIso2 ? state.getRegionIso2() : null);
+            const value = inputEl.value.trim();
+            if (!value || !iso2) { setPhoneFieldError(inputEl, state.errorEl, null); return true; }
+            const text = sanitizePhoneText(value);
+            if (!text.startsWith("+")) {
+                const formatted = formatPhoneAsTyped(text, iso2);
+                if (formatted !== inputEl.value) inputEl.value = formatted;
+            }
+            state.accepted = inputEl.value;
+            const problem = phoneProblemKey(inputEl.value, iso2);
+            setPhoneFieldError(inputEl, state.errorEl, problem);
+            return !problem;
+        }
+
+        // Shared submit-time guard for every wired field — returns true (and
+        // shows the field's inline error: too short, too long or invalid for
+        // the country) when the value is NOT a valid number, so a caller can
+        // block its fetch exactly like any other required-field failure.
         // Frontend-only UX; to_e164() on the backend remains authoritative.
         function phoneFieldHasBlockingError(inputEl, getRegionIso2, errorEl) {
             if (!inputEl || typeof libphonenumber === "undefined") return false;
@@ -16781,9 +16916,9 @@
             if (!raw) return false; // emptiness is handled by the field's own `required`, not here
             const iso2 = resolvePhoneRegionIso2(getRegionIso2 ? getRegionIso2() : null);
             if (!iso2) return false; // no country yet — nothing to validate against
-            if (libphonenumber.isValidPhoneNumber(raw, iso2)) return false;
-            if (errorEl) { errorEl.textContent = t("common.invalidPhoneForCountry"); errorEl.classList.remove("hidden"); }
-            inputEl.classList.add("border-danger");
+            const problem = phoneProblemKey(raw, iso2);
+            if (!problem) return false;
+            setPhoneFieldError(inputEl, errorEl, problem);
             return true;
         }
 
@@ -16874,12 +17009,12 @@
         wireCountryAwarePhoneInput(
             document.getElementById("company-phone-input"),
             () => businessProfile,
-            null,
+            document.getElementById("company-phone-error"),
         );
         wireCountryAwarePhoneInput(
             document.getElementById("profile-phone"),
             () => businessProfile,
-            null,
+            document.getElementById("profile-phone-error"),
         );
 
         function applyBusinessLocale(profile = businessProfile) {
@@ -17154,8 +17289,18 @@
             document.getElementById("reg-biz-currency").value = currencyInfo.display;
             document.getElementById("reg-biz-currency-display").value = currencyInfo.display;
             /* The calling code shows in its own read-only field; the label stays "Business Phone". */
-            window.selectedBusinessContext = { country: c.name, country_code: iso, phone_country_code: phoneCode, currency: currencyInfo.display, timezone, locale };
+            // The chosen app language travels with the country: without it,
+            // applyBusinessLocale() fell back to English and set the page to
+            // left-to-right while the form was still shown in Arabic.
+            window.selectedBusinessContext = { country: c.name, country_code: iso, phone_country_code: phoneCode, currency: currencyInfo.display, timezone, locale,
+                language: document.getElementById("reg-biz-language")?.value || currentLanguage || DEFAULT_LANGUAGE };
             applyBusinessLocale(window.selectedBusinessContext);
+            // A phone number already typed is re-formatted and re-checked for
+            // the newly selected country.
+            ["reg-biz-phone", "reg-owner-phone"].forEach(id => {
+                const el = document.getElementById(id);
+                if (el && el.value.trim()) revalidatePhoneInput(el);
+            });
         }
 
         // Mandatory temporary-password lock: prevent accidental dismissal via Escape/backdrop.
@@ -18676,7 +18821,11 @@
             set("profile-firstname", u.firstname);
             set("profile-lastname", u.lastname);
             set("profile-username", u.username);
-            set("profile-phone", u.phone);
+            set("profile-phone", formatPhoneForDisplay(u.phone, businessProfile));
+            // Remembered so an unchanged (possibly older-format) number is not
+            // re-sent and re-validated when only the name is edited.
+            const profilePhoneEl = document.getElementById("profile-phone");
+            if (profilePhoneEl) profilePhoneEl.dataset.savedValue = profilePhoneEl.value;
             set("profile-email", u.email);
 
             const statusEl = document.getElementById("profile-email-status");
@@ -18721,13 +18870,20 @@
         async function saveMyProfile(event) {
             event.preventDefault();
             const btn = document.getElementById("profile-save-btn");
+            const phoneEl = document.getElementById("profile-phone");
+            const phoneChanged = phoneEl && phoneEl.value.trim() !== (phoneEl.dataset.savedValue || "").trim();
+            if (phoneChanged && phoneFieldHasBlockingError(phoneEl, () => businessProfile, document.getElementById("profile-phone-error"))) {
+                phoneEl.focus();
+                return;
+            }
             if (btn) btn.disabled = true;
             try {
                 const body = {
                     firstname: document.getElementById("profile-firstname").value.trim(),
                     lastname: document.getElementById("profile-lastname").value.trim(),
-                    phone: document.getElementById("profile-phone").value.trim(),
                 };
+                // Sent only when edited, as canonical E.164 (empty clears it).
+                if (phoneChanged) body.phone = phoneE164ForSubmit(phoneEl.value, businessProfile);
                 const res = await fetch(`${API_URL}/users/me/profile`, {
                     method: "PATCH",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
@@ -19041,19 +19197,20 @@
             const refreshButtons = document.querySelectorAll('[data-refresh-action]');
             const newSale = document.getElementById('nav-btn-new-sale');
             const guest = document.getElementById('guest-get-started-btn');
-            // Global search bar: driven by the SAME authenticated-session
-            // state as everything else here, never a role check. Hidden
-            // entirely (not left as an empty/disabled field) with no session;
-            // shown again the moment one exists (login, or a restored session
-            // on page load — this function already runs at both). On the
-            // sign-out path, also clear whatever it was showing so a later
-            // guest browsing the same tab never sees a previous session's
-            // leftover query or filtered results.
-            const searchWrap = document.getElementById('header-global-search-wrap');
-            if (searchWrap) { searchWrap.hidden = !signedIn; searchWrap.classList.toggle('hidden', !signedIn); searchWrap.classList.toggle('flex', signedIn); }
+            // Inventory search (inside the Stock Inventory card): driven by
+            // the SAME authenticated-session state as everything else here,
+            // never a role check. Hidden entirely (not left as an
+            // empty/disabled field) with no session; shown again the moment
+            // one exists (login, or a restored session on page load — this
+            // function already runs at both). On the sign-out path, also
+            // clear whatever it was showing so a later guest browsing the
+            // same tab never sees a previous session's leftover query or
+            // filtered results.
+            const searchWrap = document.getElementById('inventory-search-wrap');
+            if (searchWrap) { searchWrap.hidden = !signedIn; searchWrap.classList.toggle('hidden', !signedIn); }
             if (!signedIn) {
-                const searchInput = document.getElementById('header-global-search');
-                if (searchInput && searchInput.value) { searchInput.value = ''; syncHeaderSearch(''); }
+                const searchInput = document.getElementById('inventory-search');
+                if (searchInput && searchInput.value) { searchInput.value = ''; filterInventoryByWarehouse(); }
             }
             if (notify) { notify.classList.toggle('hidden', !signedIn); notify.classList.toggle('flex', signedIn); }
             refreshButtons.forEach(refresh => {
@@ -19323,6 +19480,8 @@
             locationsReady = false;
             dashboardLowStockCount = null;
             dashboardLowStockReady = false;
+            dashboardLowStockScope = undefined;
+            dashboardLowStockRequestSeq++;
             businessEmployees = [];
             employeeDirectoryUsers = [];
             posCart = [];
@@ -19421,6 +19580,8 @@
             locationsReady = false;
             dashboardLowStockCount = null;
             dashboardLowStockReady = false;
+            dashboardLowStockScope = undefined;
+            dashboardLowStockRequestSeq++;
             businessEmployees = [];
             inventoryStatusCounts = { healthy: 0, low: 0, out: 0 };
             inventoryStatusFilter = null;
@@ -20277,7 +20438,10 @@
                 (bizPhoneInvalid ? document.getElementById("reg-biz-phone") : ownerPhoneRawEl)?.focus();
                 return;
             }
-            const phone = `${phonePrefix} ${phoneNumberRaw}`;
+            // Canonical E.164 for the selected country ("+2348031234567"): the
+            // calling code is added once by the parser, never glued in front of
+            // what was typed (a pasted "+44…" used to become "+234 +44…").
+            const phone = phoneE164ForSubmit(phoneNumberRaw, window.selectedBusinessContext);
             const address = document.getElementById("reg-biz-address").value.trim();
             const currency = document.getElementById("reg-biz-currency").value;
             const language = document.getElementById("reg-biz-language")?.value || "en";
@@ -20287,7 +20451,7 @@
             const lastname = document.getElementById("reg-owner-lastname").value.trim();
             const owner_email = document.getElementById("reg-owner-email").value.trim();
             const ownerPhoneRaw = ownerPhoneRawEl.value.trim();
-            const owner_phone = ownerPhoneRaw ? `${phonePrefix} ${ownerPhoneRaw}` : "";
+            const owner_phone = ownerPhoneRaw ? phoneE164ForSubmit(ownerPhoneRaw, window.selectedBusinessContext) : "";
             const username = document.getElementById("reg-owner-username").value.trim();
             const password = document.getElementById("reg-owner-password").value;
             const position = document.getElementById("reg-admin-position").value.trim();
@@ -22071,7 +22235,7 @@
             document.getElementById("company-name-input").value = profile.company_name || "";
             document.getElementById("company-code-input").value = profile.business_code || "";
             document.getElementById("company-email-input").value = profile.email || "";
-            document.getElementById("company-phone-input").value = profile.phone || "";
+            document.getElementById("company-phone-input").value = formatPhoneForDisplay(profile.phone, profile);
             document.getElementById("company-address-input").value = profile.address || "";
             document.getElementById("company-currency-input").value = profile.currency || "USD ($)";
             populateLanguageSelects(profile.language || "en");
@@ -23209,7 +23373,12 @@
             }
             const company_name = document.getElementById("company-name-input").value.trim();
             const email = document.getElementById("company-email-input").value.trim();
-            const phone = document.getElementById("company-phone-input").value.trim();
+            const companyPhoneEl = document.getElementById("company-phone-input");
+            if (phoneFieldHasBlockingError(companyPhoneEl, () => businessProfile, document.getElementById("company-phone-error"))) {
+                companyPhoneEl.focus();
+                return;
+            }
+            const phone = phoneE164ForSubmit(companyPhoneEl.value, businessProfile);
             const address = document.getElementById("company-address-input").value.trim();
             const tax_id = document.getElementById("company-tax-input").value.trim();
             const language = document.getElementById("company-language-input")?.value || businessProfile.language || "en";
@@ -23909,14 +24078,6 @@
                     tipEl.textContent = `${data.advice || t("products.geminiAdviceReady")} ${t("products.suggestedPrices", {wholesale: formatCurrency(data.suggested_wholesale), retail: formatCurrency(data.suggested_retail)})}`;
                 } catch (e) { tipEl.textContent = e.status === 403 ? (e.message || t("products.advisorStarterRequired", {plan: featureMinPlanLabels.ai})) : t("products.geminiTemporarilyUnavailable"); }
             }, 500);
-        }
-
-        function syncHeaderSearch(val) {
-            const inventorySearch = document.getElementById("inventory-search");
-            if (inventorySearch) {
-                inventorySearch.value = val;
-                filterInventoryByWarehouse();
-            }
         }
 
         function scrollToInventory() {
@@ -27478,6 +27639,8 @@
             locationsReady = false;
             dashboardLowStockCount = null;
             dashboardLowStockReady = false;
+            dashboardLowStockScope = undefined;
+            dashboardLowStockRequestSeq++;
             inventoryEverLoaded = false;
             coreDataEverLoaded = false;
             // Clear the prior business's Brief before rendering signed-out UI.
@@ -27803,7 +27966,7 @@
                 document.getElementById('location-city-input').value = existing.city || '';
                 document.getElementById('location-timezone-output').textContent = existing.timezone || 'Derived from geography';
                 document.getElementById('location-currency-output').textContent = existing.currency || 'Derived from geography';
-                document.getElementById('location-phone-input').value = existing.contact_phone || '';
+                document.getElementById('location-phone-input').value = formatPhoneForDisplay(existing.contact_phone, existing.country_code);
                 document.getElementById('location-email-input').value = existing.contact_email || '';
                 document.getElementById('location-address-input').value = existing.address || '';
             }
@@ -27826,6 +27989,9 @@
             if (businessProfile?.country_code) select.value = businessProfile.country_code;
         }
         function handleLocationCountryChange() {
+            // The contact phone is checked against the Location's own country.
+            const phoneEl = document.getElementById('location-phone-input');
+            if (phoneEl && phoneEl.value.trim()) revalidatePhoneInput(phoneEl);
             scheduleLocationContextPreview();
         }
 
@@ -27872,7 +28038,7 @@
                 country_code: iso2 || null,
                 region: document.getElementById('location-region-input').value.trim() || null,
                 city: document.getElementById('location-city-input').value.trim() || null,
-                contact_phone: phoneInput.value.trim() || null,
+                contact_phone: phoneE164ForSubmit(phoneInput.value, iso2) || null,
                 contact_email: document.getElementById('location-email-input').value.trim() || null,
                 address: document.getElementById('location-address-input').value.trim() || null,
             };
@@ -28030,16 +28196,32 @@
             // Warehouses' own pending state is derived live in
             // updateDashboardMetrics() from locationsReady/warehousesReady,
             // so it needs no separate reset here.
-            dashboardLowStockReady = false;
-            updateDashboardMetrics();
+            // This function also runs on every Business Day refresh, sale and
+            // expense; then the selection is unchanged and the Low Stock
+            // figure on screen is still the right one, so it stays visible
+            // while the new figure loads (it used to flash "Loading…").
+            if (dashboardLowStockScope !== (selectedBusinessDayLocationId || null)) {
+                dashboardLowStockReady = false;
+                updateDashboardMetrics();
+            }
             await Promise.all([
                 loadProfitDashboardCards(),
                 loadDashboardLowStockCount(),
             ]);
         }
 
+        // A background refresh keeps the last known Low Stock figure on screen
+        // and fetches silently: the card changes only when a newer result
+        // arrives, and a failed refresh keeps the last good figure. "—" /
+        // "Loading…" is only for a figure that has never loaded (first load
+        // of the session, or a switch to another Location, which resets
+        // dashboardLowStockReady itself in refreshDashboardLocationScopedCards).
+        // Only the newest request may update the card, so a slow earlier
+        // response can never overwrite a newer one (dashboardLowStockRequestSeq,
+        // declared with the other Low Stock state near the top).
         async function loadDashboardLowStockCount() {
-            dashboardLowStockReady = false;
+            const seq = ++dashboardLowStockRequestSeq;
+            const scope = selectedBusinessDayLocationId || null;
             if (!hasAuthenticatedBusinessContext()) {
                 dashboardLowStockCount = null;
                 dashboardLowStockReady = true;
@@ -28053,12 +28235,20 @@
                 // which /products/inventory-summary already treats as the
                 // whole-business aggregate (identical to today's behavior
                 // for those businesses).
-                if (selectedBusinessDayLocationId) params.set("location_id", selectedBusinessDayLocationId);
+                if (scope) params.set("location_id", scope);
                 const res = await fetch(`${API_URL}/products/inventory-summary?${params.toString()}`, { credentials: "include", headers: { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" } });
-                dashboardLowStockCount = res.ok ? (await res.json()).low : 0;
+                if (!res.ok) throw new Error(`inventory-summary ${res.status}`);
+                const low = (await res.json()).low;
+                if (!Number.isFinite(low)) throw new Error("inventory-summary: no low-stock figure");
+                if (seq !== dashboardLowStockRequestSeq || !hasAuthenticatedBusinessContext()) return;
+                dashboardLowStockCount = low;
             } catch (_) {
-                dashboardLowStockCount = 0;
+                if (seq !== dashboardLowStockRequestSeq || !hasAuthenticatedBusinessContext()) return;
+                // Keep the last good figure; a first load that fails still
+                // settles to 0, as before, instead of "Loading…" forever.
+                if (!dashboardLowStockReady) dashboardLowStockCount = 0;
             }
+            dashboardLowStockScope = scope;
             dashboardLowStockReady = true;
             updateDashboardMetrics();
         }

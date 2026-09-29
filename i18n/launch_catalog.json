@@ -12922,5 +12922,35 @@
   "Al continuar, aceptas estos documentos:",
   "بالمتابعة، فإنك توافق على هذه المستندات:",
   "Ao continuar, você concorda com estes documentos:"
+ ],
+ "Starting session…": [
+  "Démarrage de la session…",
+  "Iniciando la sesión…",
+  "جارٍ بدء الجلسة…",
+  "Iniciando a sessão…"
+ ],
+ "Search products, SKU or category…": [
+  "Rechercher un produit, un SKU ou une catégorie…",
+  "Buscar producto, SKU o categoría…",
+  "ابحث عن منتج أو SKU أو فئة…",
+  "Pesquisar produto, SKU ou categoria…"
+ ],
+ "Search inventory": [
+  "Rechercher dans le stock",
+  "Buscar en el inventario",
+  "ابحث في المخزون",
+  "Pesquisar no estoque"
+ ],
+ "This phone number is too short for the selected country.": [
+  "Ce numéro de téléphone est trop court pour le pays sélectionné.",
+  "Este número de teléfono es demasiado corto para el país seleccionado.",
+  "رقم الهاتف هذا قصير جدًا بالنسبة للدولة المختارة.",
+  "Este número de telefone é curto demais para o país selecionado."
+ ],
+ "This phone number is too long for the selected country.": [
+  "Ce numéro de téléphone est trop long pour le pays sélectionné.",
+  "Este número de teléfono es demasiado largo para el país seleccionado.",
+  "رقم الهاتف هذا طويل جدًا بالنسبة للدولة المختارة.",
+  "Este número de telefone é longo demais para o país selecionado."
  ]
 }

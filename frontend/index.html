@@ -120,7 +120,7 @@
 </head>
 <body class="bg-bgMain text-textMain font-sans antialiased min-h-screen flex selection:bg-primary/35 selection:text-primary" onclick="closeAllActionDropdowns(event)">
 
-    <div id="cauldra-auth-boot-screen" role="status" aria-live="polite"><img src="/assets/cauldra-mark-96.png" alt="" width="48" height="48" class="cauldra-boot-mark"><span class="cauldra-boot-text">Restoring your session…</span></div>
+    <div id="cauldra-auth-boot-screen" role="status" aria-live="polite"><img src="/assets/cauldra-mark-96.png" alt="" width="48" height="48" class="cauldra-boot-mark"><span class="cauldra-boot-text">Starting session…</span></div>
 
     <div id="toast-container" class="fixed top-20 right-6 z-[100] flex flex-col gap-2.5 pointer-events-none max-w-sm w-[calc(100%-2rem)] sm:w-full"></div>
     <div id="row-action-menu" class="hidden fixed z-[140] bg-cardBg border border-borderCol rounded-xl shadow-2xl py-1 text-xs min-w-[180px]"></div>
@@ -308,17 +308,6 @@
         <!-- CLEAN TOP NAVIGATION BAR -->
         <header class="h-16 border-b border-borderCol bg-sidebarBg/90 backdrop-blur-md px-3 sm:px-6 flex justify-between items-center sticky top-0 z-30">
             <button type="button" id="mobile-menu-btn" onclick="openMobileNav()" class="md:hidden w-9 h-9 rounded-xl bg-cardBg border border-borderCol text-textMain flex items-center justify-center shrink-0 mr-2 cursor-pointer" aria-label="Open menu"><i class="fa-solid fa-bars"></i></button>
-            <!-- Global Search Bar — starts hidden (not just empty/disabled) so
-                 a page load with no valid session never flashes it before
-                 updateGuestHeaderState() runs; that function is what shows it
-                 once an authenticated session is actually confirmed. -->
-            <div id="header-global-search-wrap" hidden class="hidden items-center flex-1 min-w-0 max-w-lg">
-                <div class="relative w-full">
-                    <input type="text" id="header-global-search" oninput="syncHeaderSearch(this.value)" placeholder="Search products, SKU, orders..." class="hidden sm:block w-full bg-bgMain border border-borderCol text-textMain text-xs rounded-xl pl-9 pr-3 py-2 focus:outline-none focus:border-primary transition placeholder-textSec">
-                    <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-textSec text-xs"></i>
-                </div>
-            </div>
-
             <!-- Offline / sync status — small and unobtrusive; hidden entirely
                  when online with nothing pending, per updateSyncStatusUI(). -->
             <div id="sync-status-indicator" class="hidden items-center gap-1.5 text-[10px] font-medium mx-2 shrink-0"></div>
@@ -531,6 +520,19 @@
                         <button type="button" onclick="checkFeatureAccess('add product', openAddProductModal)" class="shrink-0 bg-primary hover:bg-primaryHover text-white text-xs font-semibold px-3.5 py-2 rounded-xl transition shadow-md shadow-primary/20 flex items-center gap-1.5 cursor-pointer whitespace-nowrap">
                             <i class="fa-solid fa-plus text-xs"></i> Add Product
                         </button>
+                    </div>
+
+                    <!-- Inventory search — part of the Stock Inventory card, the
+                         only thing it filters (name, SKU, category). It starts
+                         hidden so a page load with no valid session never shows
+                         it; updateGuestHeaderState() shows it once an
+                         authenticated session is confirmed, and clears it on
+                         sign-out. -->
+                    <div id="inventory-search-wrap" hidden class="hidden inventory-search-row">
+                        <div class="relative w-full">
+                            <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-textSec text-xs pointer-events-none" aria-hidden="true"></i>
+                            <input type="search" id="inventory-search" oninput="filterInventoryByWarehouse()" placeholder="Search products, SKU or category…" aria-label="Search inventory" autocomplete="off" enterkeyhint="search" class="w-full bg-bgMain border border-borderCol text-textMain text-xs rounded-xl pl-9 pr-3 py-2 focus:outline-none focus:border-primary transition placeholder-textSec">
+                        </div>
                     </div>
                 </div>
 
@@ -1222,7 +1224,8 @@
                     </div>
                     <div>
                         <label class="block font-medium text-textSec mb-1">Phone Number</label>
-                        <input type="text" id="company-phone-input" placeholder="+country code and number" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                        <input type="tel" id="company-phone-input" placeholder="8000000000" class="w-full bg-bgMain border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary font-mono">
+                        <p id="company-phone-error" class="hidden text-danger text-[10px] mt-1" aria-live="polite"></p>
                     </div>
                 </div>
 
@@ -1333,6 +1336,7 @@
                         <div>
                             <label class="block font-medium text-textSec mb-1" for="profile-phone" data-i18n="profile.phone">Phone</label>
                             <input type="tel" id="profile-phone" maxlength="40" class="w-full bg-cardBg border border-borderCol rounded-xl px-3 py-2 text-textMain focus:outline-none focus:border-primary">
+                            <p id="profile-phone-error" class="hidden text-danger text-[10px] mt-1" aria-live="polite"></p>
                         </div>
                         <div class="sm:col-span-2">
                             <label class="block font-medium text-textSec mb-1" for="profile-email" data-i18n="profile.email">Email</label>
@@ -3305,8 +3309,6 @@
             </div>
         </div>
     </div>
-
-    <input type="text" id="inventory-search" class="hidden" value="">
 
     <script src="/assets/vendor/zxing.umd.js"></script>
     <script src="/assets/vendor/libphonenumberjs1.11.15.min.js"></script>

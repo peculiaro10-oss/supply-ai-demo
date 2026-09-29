@@ -257,8 +257,7 @@
             #mobile-nav-content .guest-preview-disabled{opacity:.55;cursor:default;pointer-events:none;}
             #mobile-auth-container .guest-preview-disabled{opacity:.55;pointer-events:none;}
             #mobile-menu-btn{width:40px;height:40px;border-radius:.8rem;margin-right:.5rem;}
-            #header-global-search{display:block!important;min-width:0;width:100%;height:40px;font-size:11px;padding-left:2.25rem;}
-            #header-global-search-wrap:not(.hidden):not([hidden]){display:block;}
+            #inventory-search{height:40px;font-size:11px;}
             #header-action-controls{gap:.35rem;margin-left:.5rem;}
             #nav-btn-new-sale{padding-left:.7rem;padding-right:.7rem;height:40px;}
             #dynamic-dashboard-container section{padding-left:.75rem;padding-right:.75rem;padding-top:.75rem;}
@@ -335,8 +334,7 @@
             .inventory-filter-row select,.inventory-filter-row button{height:clamp(38px,10vw,42px)!important;font-size:clamp(.62rem,2.7vw,.72rem)!important;}
             #inventory-guest-preview:not([hidden]):not(.hidden){display:flex;}
             .guest-inventory-preview-row{filter:blur(3px);opacity:.7;user-select:none;}
-            #header-global-search{font-size:clamp(.64rem,2.8vw,.75rem)!important;height:clamp(38px,10vw,42px)!important;}
-            #header-global-search-wrap{max-width:none;flex:1;min-width:0;}
+            #inventory-search{font-size:clamp(.64rem,2.8vw,.75rem)!important;height:clamp(38px,10vw,42px)!important;}
             #header-action-controls{min-width:auto;}
             #nav-btn-new-sale{font-size:clamp(.58rem,2.5vw,.7rem)!important;padding-inline:clamp(.55rem,2.8vw,.8rem)!important;}
             #nav-btn-new-sale i{display:none;}
@@ -393,6 +391,8 @@
             .inventory-filter-row{order:3!important;justify-self:end;width:auto!important;}
             .inventory-filter-row select{height:44px!important;min-width:220px;}
             .inventory-filter-row button{height:44px!important;}
+            .inventory-search-row{grid-column:1/-1;order:4;margin-top:16px;}
+            #inventory-search{height:44px;}
             .inventory-table-container{border-top:1px solid #172033;max-height:560px;overflow:auto;}
             .inventory-table-container table{min-width:0!important;}
             #inventory-status-chip{display:none!important;}
@@ -414,15 +414,19 @@
             .inventory-filter-row{order:2!important;flex:0 1 auto;min-width:0;max-width:100%;flex-wrap:wrap;justify-content:flex-end;margin-left:auto;}
             .inventory-filter-row select{flex:1 1 220px;width:220px;min-width:0!important;}
             .inventory-status-row{order:3!important;flex:1 1 100%;justify-self:auto;}
+            .inventory-search-row{order:4!important;flex:1 1 100%;margin-top:0;}
         }
 
         @media (max-width:767px){
             #dynamic-dashboard-container section{padding-left:clamp(14px,4vw,20px)!important;padding-right:clamp(14px,4vw,20px)!important;padding-top:16px!important;}
-            #dynamic-welcome-banner{background:transparent!important;border:0!important;box-shadow:none!important;border-radius:0!important;padding:0!important;margin-bottom:14px!important;gap:12px!important;}
+            /* The welcome section stays one boxed card at every width (it used
+               to lose its background, border and padding below 768px), and the
+               role badge stays right after the name instead of being pinned to
+               the card's far edge; it wraps under the name only when the line
+               is genuinely full. */
+            #dynamic-welcome-banner{padding:16px!important;border-radius:18px!important;margin-bottom:14px!important;gap:12px!important;}
             #dynamic-welcome-banner .welcome-copy-row{display:block!important;}
-            #dynamic-welcome-banner.signed-in > div:last-child{display:flex!important;align-items:flex-start!important;justify-content:flex-end!important;}
-            #dynamic-welcome-banner.signed-in #welcome-role-badge{position:absolute;right:0;top:0;}
-            #dynamic-welcome-banner.signed-in > div:first-child{position:relative;padding-right:74px;}
+            #dynamic-welcome-banner.signed-in > div:last-child{display:flex!important;align-items:flex-start!important;}
             #welcome-heading-text{font-size:clamp(1.15rem,5vw,1.4rem)!important;line-height:1.2!important;}
             #welcome-sub-text{font-size:.78rem!important;}
             #metrics-grid{gap:12px!important;}
@@ -437,12 +441,17 @@
             .inventory-filter-row{order:3;width:100%!important;display:flex!important;}
             .inventory-filter-row select{height:44px!important;}
             .inventory-filter-row button{height:44px!important;}
+            .inventory-search-row{order:4;width:100%;margin-top:0;}
+            #inventory-search{height:44px!important;}
             .inventory-table-container{border-top:1px solid #172033;overflow-x:auto;}
             .inventory-table-container table{min-width:640px;}
         }
 
 /* Guest visibility wins over all responsive display rules. */
-#header-global-search-wrap.hidden,#header-global-search-wrap[hidden]{display:none!important}
+#inventory-search-wrap.hidden,#inventory-search-wrap[hidden]{display:none!important}
+/* Welcome heading and role badge are one group: the badge follows the name
+   with a small gap; a long name wraps safely instead of overflowing. */
+#welcome-heading-text{min-width:0;overflow-wrap:anywhere;}
 
 /* UX-013: the AI Center cards are buttons; keyboard focus uses the app's usual ring. */
 .ai-center-card:focus-visible{outline:2px solid #436BEE;outline-offset:2px;}

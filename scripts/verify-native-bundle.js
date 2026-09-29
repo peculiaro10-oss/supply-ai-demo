@@ -133,7 +133,7 @@ function verify(native = true, target) {
     for (const dir of ['frontend',...dirs]) {
         const file = path.join(root,dir,'index.html');
         if (!fs.existsSync(file)) continue;
-        const tag = fs.readFileSync(file,'utf8').match(/<[^>]+id="header-global-search-wrap"[^>]*>/)?.[0] || '';
+        const tag = fs.readFileSync(file,'utf8').match(/<[^>]+id="inventory-search-wrap"[^>]*>/)?.[0] || '';
         if (!/class="[^"]*\bhidden\b/.test(tag)) failures.push(dir+'/index.html guest search must start hidden');
     }
     const forbiddenEmailStartupError = 'Email return could not initialize. Reopen Cauldra to retry.';
