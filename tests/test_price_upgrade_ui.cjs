@@ -40,6 +40,12 @@ check('the quote box exists in the confirmation dialog', () => {
 check('the amount shown is the server amount_due_kobo', () => {
     assert.match(app, /data-quote-amount-kobo="\$\{Number\(quote\.amount_due_kobo\)\}"[^>]*>\$\{escapeHtml\(formatQuoteNaira\(quote\.amount_due_kobo\)\)\}/);
 });
+check('the disabled confirm button has its own look, scoped to that button (hover included)', () => {
+    const css = fs.readFileSync(path.join(frontend, 'css/base.css'), 'utf8');
+    const rule = (css.match(/#plan-change-confirm-submit:disabled,\s*#plan-change-confirm-submit:disabled:hover,\s*#plan-change-confirm-submit:disabled:active \{([^}]*)\}/) || [])[1] || '';
+    assert.match(rule, /cursor: not-allowed;/);
+    assert.match(rule, /background-color: rgb\(23 32 51\);/);
+});
 check('every new sentence is catalogued for fr/es/ar/pt', () => {
     for (const s of SENTENCES) assert.equal((catalog[s] || []).filter(Boolean).length, 4, s);
 });
@@ -147,6 +153,53 @@ async function scenario(page, { lang, quoteStatus = 200, quoteBody = QUOTE }) {
         const refused = await scenario(page, { lang: 'en', quoteStatus: 409, quoteBody: { detail: { code: 'UPGRADE_CREDIT_EXCEEDS_TERM', message: 'The unused part of your current paid period (₦500,000.00) is worth more than one monthly term of Enterprise (₦200,000.00). Choose Enterprise Annual, or change plan when your current period ends on 1 Oct 2027.' } } });
         expect('refused quote: the server reason is shown and no payment is offered', refused.shown.disabled && refused.started.length === 0
             && refused.shown.text.includes('Choose Enterprise Annual'), refused.shown);
+
+        // The button as a person sees it: resting, under the pointer, and clicked.
+        const REFUSAL = { detail: { code: 'UPGRADE_CREDIT_EXCEEDS_TERM', message: 'The unused part of your current paid period (₦500,000.00) is worth more than one monthly term of Enterprise (₦200,000.00). Choose Enterprise Annual, or change plan when your current period ends on 1 Oct 2027.' } };
+        const PAY_BLUE = 'rgb(67, 107, 238)', PAY_BLUE_HOVER = 'rgb(55, 91, 204)';
+        async function openDialog(quoteStatus, quoteBody) {
+            await page.evaluate(async ({ usage, quoteStatus, quoteBody }) => {
+                // No backend here: the connection dialog would sit over the page and take the pointer.
+                document.querySelectorAll('dialog[open]').forEach(d => { d.close(); d.remove(); });
+                currentUserProfile = { role: 'admin', username: 'test' }; authToken = 'test-token'; billingUsageCache = usage;
+                setLanguage('en', { persist: false });
+                window.__calls = []; window.__started = [];
+                window.fetch = async (url, init) => {
+                    window.__calls.push(String(url));
+                    if (String(url).includes('/subscription/upgrade-quote')) return new Response(JSON.stringify(quoteBody), { status: quoteStatus, headers: { 'content-type': 'application/json' } });
+                    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+                };
+                CauldraPayments.start = async (kind, payload) => { window.__started.push({ kind, payload }); };
+                await subscribeNow('enterprise', 'annual');
+                await new Promise(r => setTimeout(r, 400));
+            }, { usage: USAGE, quoteStatus, quoteBody });
+            await page.mouse.move(0, 0);
+        }
+        const look = () => page.evaluate(() => { const b = document.getElementById('plan-change-confirm-submit'); const s = getComputedStyle(b);
+            return { disabled: b.disabled, bg: s.backgroundColor, color: s.color, cursor: s.cursor }; });
+        const button = page.locator('#plan-change-confirm-submit');
+
+        await openDialog(409, REFUSAL);
+        const restR = await look();
+        await button.hover({ force: true });
+        const hoverR = await look();
+        await button.click({ force: true });
+        await page.waitForTimeout(200);
+        const afterR = await page.evaluate(() => ({ started: window.__started.length, checkout: window.__calls.filter(u => u.includes('upgrade-checkout')).length,
+            message: document.getElementById('plan-change-confirm-quote').innerText, open: !document.getElementById('plan-change-confirm-modal').classList.contains('hidden') }));
+        await page.evaluate(() => closePlanChangeConfirm());
+        expect('refused quote: the upgrade button is disabled', restR.disabled, restR);
+        expect('refused quote: it looks disabled — not the blue payment button', restR.bg !== PAY_BLUE && restR.bg !== PAY_BLUE_HOVER && restR.color !== 'rgb(255, 255, 255)', restR);
+        expect('refused quote: no pointer cursor and no hover payment styling', restR.cursor === 'not-allowed' && hoverR.cursor === 'not-allowed' && hoverR.bg === restR.bg, { restR, hoverR });
+        expect('refused quote: a click starts no checkout and the reason stays visible', afterR.started === 0 && afterR.checkout === 0 && afterR.open && afterR.message.includes('Choose Enterprise Annual'), afterR);
+
+        await openDialog(200, QUOTE);
+        const restOk = await look();
+        await button.hover();
+        const hoverOk = await look();
+        await page.evaluate(() => closePlanChangeConfirm());
+        expect('valid quote: the normal blue payment button, pointer and hover still work', !restOk.disabled && restOk.bg === PAY_BLUE && restOk.cursor === 'pointer'
+            && hoverOk.bg === PAY_BLUE_HOVER && hoverOk.cursor === 'pointer', { restOk, hoverOk });
 
         for (const lang of LANGS) {
             const r = await scenario(page, { lang });

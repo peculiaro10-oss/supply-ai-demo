@@ -499,3 +499,10 @@ html[dir="rtl"] :is(.font-mono, input[type="tel"], input[type="email"], input[ty
    always left-to-right English (lang="en" dir="ltr"), also in Arabic. */
 #legal-doc-body ul { list-style: disc outside; padding-left: 1.25rem; margin: 0; }
 #legal-doc-body li { padding-left: 0.125rem; overflow-wrap: anywhere; }
+
+/* PRICE-UPGRADE-001 - the upgrade confirm button while no payable quote is
+   shown (loading, or refused by the server): neutral, not the blue payment
+   button, no pointer and no hover change. Scoped to this one button. */
+#plan-change-confirm-submit:disabled,
+#plan-change-confirm-submit:disabled:hover,
+#plan-change-confirm-submit:disabled:active { background-color: rgb(23 32 51); color: rgb(124 139 161); border: 1px solid rgb(124 139 161 / 0.35); cursor: not-allowed; box-shadow: none; }
