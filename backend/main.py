@@ -4512,9 +4512,21 @@ def get_authenticated_user(token: str = Depends(oauth2_scheme), db: Session = De
         raise HTTPException(status_code=401, detail="Your session is no longer valid. Please sign in again.")
     return user
 
-def get_current_user(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)) -> User:
+TEMP_PASSWORD_GATE_DETAIL = "You must change your temporary password before using the application."
+
+def get_password_settled_user(user: User = Depends(get_authenticated_user)) -> User:
+    """TMPPW-001: an authenticated user who has set a permanent password.
+
+    Everything except the forced-change screen's own minimum (/auth/me,
+    /auth/logout, /auth/change-password, GET /users/me/profile, revoking the
+    caller's own offline device) goes through this. It deliberately does NOT
+    apply the subscription-paused gate, so billing controls stay reachable
+    while a business is paused - get_current_user adds that gate on top."""
     if user.must_change_password:
-        raise HTTPException(status_code=403, detail="You must change your temporary password before using the application.")
+        raise HTTPException(status_code=403, detail=TEMP_PASSWORD_GATE_DETAIL)
+    return user
+
+def get_current_user(user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)) -> User:
     require_subscription_access(db, user)
     return user
 
@@ -7303,6 +7315,9 @@ def change_password(data: PasswordChangeRequest, response: Response, background_
     validate_password_strength(data.new_password)
     if not verify_password(data.current_password, user.password):
         raise HTTPException(status_code=400, detail="Incorrect current or temporary password.")
+    # TMPPW-002: the permanent password must replace the temporary one, not repeat it.
+    if user.must_change_password and verify_password(data.new_password, user.password):
+        raise HTTPException(status_code=400, detail="Choose a new password that is different from your temporary password.")
     if user.previous_password_hash and verify_password(data.new_password, user.previous_password_hash):
         raise HTTPException(status_code=400, detail="Last created password cannot be used.")
     user.previous_password_hash = user.password
@@ -7725,7 +7740,7 @@ def reset_password(payload: PasswordResetRequest, background_tasks: BackgroundTa
 # BUSINESS PROFILE
 # -----------------------------------------------------------------------------
 @app.get("/business-profile/", response_model=BusinessProfileSchema)
-def get_business_profile(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def get_business_profile(user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Read the CALLER'S OWN business profile.
 
     Authorization (V30): Admin and Manager may read; Staff may not - Business
@@ -7911,7 +7926,7 @@ def get_my_profile(user: User = Depends(get_authenticated_user), db: Session = D
 
 
 @app.patch("/users/me/profile")
-def update_my_profile(data: UserProfileUpdate, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def update_my_profile(data: UserProfileUpdate, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Update only the authenticated user's own personal fields.
 
     Authorization-bearing fields (role / business_id / disabled / position /
@@ -7953,7 +7968,7 @@ def update_my_profile(data: UserProfileUpdate, user: User = Depends(get_authenti
 
 
 @app.post("/users/me/avatar")
-def upload_my_avatar(payload: UserAvatarUpload, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def upload_my_avatar(payload: UserAvatarUpload, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Server-side validated profile photo. The browser's declared MIME type is
     NOT trusted: decode_base64_upload re-parses the data URL header against an
     image-only allow-list, and the filename is sanitized by persist_upload's
@@ -7974,7 +7989,7 @@ def upload_my_avatar(payload: UserAvatarUpload, user: User = Depends(get_authent
 
 
 @app.get("/users/me/avatar")
-def get_my_avatar(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def get_my_avatar(user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Streams ONLY the authenticated user's own avatar."""
     if not user.avatar_upload_id:
         raise HTTPException(status_code=404, detail="No profile photo set.")
@@ -8001,7 +8016,7 @@ def _delete_stored_upload(db: Session, user: User, upload_id: int) -> None:
 
 
 @app.delete("/users/me/avatar")
-def delete_my_avatar(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def delete_my_avatar(user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     upload_id = user.avatar_upload_id
     user.avatar_upload_id = None
     if upload_id:
@@ -8027,7 +8042,7 @@ def _verification_email_rate_limited(provider_detail: str) -> HTTPException:
 
 
 @app.post("/users/me/email-change")
-def start_my_email_change(payload: UserEmailChangeRequest, request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def start_my_email_change(payload: UserEmailChangeRequest, request: Request, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Begin a VERIFIED email change. The currently trusted address is kept
     until Supabase confirms the new one, so account recovery is never weakened
     by an unverified address."""
@@ -8058,7 +8073,7 @@ def start_my_email_change(payload: UserEmailChangeRequest, request: Request, use
 
 
 @app.post("/users/me/email-change/confirm")
-def confirm_my_email_change(background_tasks: BackgroundTasks, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def confirm_my_email_change(background_tasks: BackgroundTasks, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Swap in the pending address ONLY after Supabase itself reports it
     confirmed. The browser can never assert verification - this endpoint takes
     no body at all and re-checks with Supabase every time."""
@@ -8082,14 +8097,14 @@ def confirm_my_email_change(background_tasks: BackgroundTasks, user: User = Depe
 
 
 @app.delete("/users/me/email-change")
-def cancel_my_email_change(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def cancel_my_email_change(user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     user.pending_email = None
     db.commit()
     return {"message": "Email change cancelled."}
 
 
 @app.post("/users/me/email-verify")
-def start_my_email_verify(request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def start_my_email_verify(request: Request, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Send/resend a verification link for the CURRENT account email - distinct
     from /users/me/email-change above, which only ever verifies a NEW,
     different address. This is what lets an admin created at registration
@@ -8122,7 +8137,7 @@ def start_my_email_verify(request: Request, user: User = Depends(get_authenticat
 
 
 @app.post("/users/me/email-verify/confirm")
-def confirm_my_email_verify(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def confirm_my_email_verify(user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """The browser can never assert verification - this takes no body at all
     and re-checks with Supabase every time (via the same mirror-refresh helper
     /users/me/profile already uses), exactly like /users/me/email-change/confirm."""
@@ -13901,13 +13916,11 @@ def sync_condition_driven_notifications(db: Session, business_id: int) -> None:
     check_expiry_notifications(db, business_id)
     db.commit()
 
-def get_notification_reader(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)) -> User:
+def get_notification_reader(user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)) -> User:
     """SUB-LIFECYCLE-001: the notification centre is readable while the
     subscription is paused (read and acknowledge only), so subscription and
     security notices reach the user. It exposes no business operation; every
     operational route and deep link stays behind get_current_user's 402."""
-    if user.must_change_password:
-        raise HTTPException(status_code=403, detail="You must change your temporary password before using the application.")
     return user
 
 def notification_reader_is_paused(db: Session, user: User) -> bool:
@@ -14462,7 +14475,7 @@ def redact_billing_for_role(user: "User", summary: dict) -> dict:
     return summary
 
 @app.get("/subscription/usage")
-def subscription_usage(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def subscription_usage(user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     # Read-only status/usage view. Deliberately NOT gated by require_subscription_access:
     # a business with no active entitlement yet (status="pending_payment_method",
     # "expired", or "cancelled") must still be able to see its own subscription
@@ -14561,7 +14574,7 @@ def over_limit_resources(db: Session, business: BusinessProfile, plan_id: Option
     return rows
 
 @app.get("/subscription/downgrade-impact")
-def downgrade_impact(plan: str, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def downgrade_impact(plan: str, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Read-only, server-authoritative impact preview for every capacity key."""
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Only an Admin can review subscription downgrade impact.")
@@ -17063,7 +17076,7 @@ class TrialInitRequest(BaseModel):
     billing_interval: Optional[str] = None
 
 @app.post("/subscription/trial/init")
-def trial_init(data: TrialInitRequest, request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def trial_init(data: TrialInitRequest, request: Request, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Step 1 of the card-required trial. Charges a small, refundable card-
     tokenization amount so Paystack can authenticate the card via 2FA and return
     a reusable authorization — this is Paystack's own currently-supported route
@@ -17122,7 +17135,7 @@ class TrialConfirmRequest(BaseModel):
     reference: str
 
 @app.post("/subscription/trial/confirm")
-def trial_confirm(data: TrialConfirmRequest, request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def trial_confirm(data: TrialConfirmRequest, request: Request, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Step 2 of the card-required trial. The frontend can only report that
     Paystack's popup finished — it can NEVER decide the trial has started. This
     endpoint independently re-verifies the transaction and authorization with
@@ -17287,7 +17300,7 @@ def trial_cancel(request: Request, user: User = Depends(get_current_user), db: S
 
 
 @app.post("/subscription/cancel")
-def subscription_cancel(request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def subscription_cancel(request: Request, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     # SUB-LIFECYCLE-001: a billing control, so it stays reachable while the
     # business is paused (an Admin can stop a renewal that is still pending).
     if user.role != "admin":
@@ -17313,7 +17326,7 @@ def subscription_cancel(request: Request, user: User = Depends(get_authenticated
 
 
 @app.get("/subscription/payments")
-def subscription_payments(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def subscription_payments(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     """Payment history for the authenticated user's own business only —
     business_id is always taken from the session, never from the client. X1:
     Admin only, like every other billing-administration surface."""
@@ -17351,7 +17364,7 @@ class CheckoutRequest(BaseModel):
     billing_interval: str = "monthly"
 
 @app.post("/subscription/checkout")
-def start_checkout(data: CheckoutRequest, request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def start_checkout(data: CheckoutRequest, request: Request, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Only an Admin can start a subscription payment.")
     client_ip = request.client.host if request and request.client else "unknown"
@@ -17438,7 +17451,7 @@ class SubscriptionCheckoutConfirmRequest(BaseModel):
 @app.post("/subscription/checkout/confirm")
 def confirm_subscription_checkout(
     data: SubscriptionCheckoutConfirmRequest,
-    user: User = Depends(get_authenticated_user),
+    user: User = Depends(get_password_settled_user),
     db: Session = Depends(get_db),
 ):
     """Reconcile a Paystack browser callback through the webhook's authority.
@@ -17524,7 +17537,7 @@ def finish_recurring_setup(db, record):
 
 
 @app.post('/subscription/payment-method/init')
-def payment_method_init(request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def payment_method_init(request: Request, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     if user.role != 'admin':
         raise HTTPException(status_code=403, detail='Only an Admin can change the payment method.')
     if not PAYSTACK_SECRET_KEY:
@@ -17588,7 +17601,7 @@ def reconcile_payment_method(db, record, tx):
 
 
 @app.post('/subscription/payment-method/confirm')
-def payment_method_confirm(data: SubscriptionCheckoutConfirmRequest, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def payment_method_confirm(data: SubscriptionCheckoutConfirmRequest, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     if user.role != 'admin':
         raise HTTPException(status_code=403, detail='Only an Admin can confirm a payment method.')
     record = db.query(PaymentRecord).filter_by(business_id=user.business_id, paystack_reference=data.reference, purpose='payment_method').with_for_update().first()
@@ -17742,7 +17755,7 @@ def upgrade_quote_amounts(from_plan: str, from_interval: str, to_plan: str, to_i
             "new_paid_through_if_paid_now": add_billing_interval(now, to_interval)}
 
 @app.post("/subscription/upgrade-quote")
-def create_upgrade_quote(data: UpgradeQuoteRequest, request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def create_upgrade_quote(data: UpgradeQuoteRequest, request: Request, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Only an Admin can request a subscription upgrade.")
     client_ip = request.client.host if request and request.client else "unknown"
@@ -17860,7 +17873,7 @@ class UpgradeCheckoutRequest(BaseModel):
     quote_reference: str
 
 @app.post("/subscription/upgrade-checkout")
-def start_upgrade_checkout(data: UpgradeCheckoutRequest, request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
+def start_upgrade_checkout(data: UpgradeCheckoutRequest, request: Request, user: User = Depends(get_password_settled_user), db: Session = Depends(get_db)):
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Only an Admin can start a subscription payment.")
     client_ip = request.client.host if request and request.client else "unknown"
