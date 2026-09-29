@@ -1427,6 +1427,68 @@ The owner's four permanent records were attached to this session and updated dir
 
 **Production and `main`:** untouched (`origin/main` `4195d98`, production deployment `44a12849`). No PR, no tag.
 
+### 14.10 RC `1e7b1df`, then the local polish batch and RC `bdb105d` (2026-09-29, local session)
+
+The four permanent records are the source of detail; this section mirrors them.
+
+**PRICE-UPGRADE-001 verified in QA; RC `1e7b1df` frozen, then superseded.**
+- `c7e7df6` was deployed to QA and verified with live Paystack TEST (owner-paid cases A–D exact to the kobo; E–H refusals, bypass, payment window, replay and mismatch PASS; no Paystack Subscription object). Pricing matrix 120 PASS / 0 FAIL / 0 SUSPECT.
+- `1e7b1df` made the refused-quote Upgrade button visibly disabled (scoped CSS rule + `tests/test_price_upgrade_ui.cjs` 21 checks). QA `bf135970-…`; APK `cauldra-qa-rc-1e7b1df.apk` (SHA-256 `6ef9392d…`, 16,014,316 bytes); Android emulator smoke PASS (legal + upgrade UI, English + Arabic). RC `1e7b1df` was frozen, then deliberately broken by the owner for the batch below. The §14.9 runbook is complete; do not reopen it.
+
+**POLISH-001 + PHONE-VALIDATION-001 (local UI / input polish batch).**
+- **Commit:** `bdb105d` (`bdb105de582336b2862e5bd74d8c26810684c1cd`) on `remediation/batch-e-ai-forecast-brain` (pushed), directly on RC `1e7b1df`. The owner deliberately broke the `1e7b1df` freeze for this one local polish batch. No backend change, no migration, no new environment variable, no new dependency, no pricing or subscription change.
+- **POLISH-001 (UI) — five items, each FIXED + VERIFIED IN QA:**
+  1. **Inventory search** moved from the global header into the Stock Inventory card (below the filter row, full width), the only thing it filters (name, SKU, category; client-side, unchanged logic). Signed-in only; cleared on sign-out; the hidden mirror input and the header copy are gone. `verify-native-bundle` now checks `inventory-search-wrap`.
+  2. **Startup text** "Restoring your session…" → **"Starting session…"** (fr/es/ar/pt catalogued).
+  3. **Role badge** follows the name (flex, 10 px gap) instead of being pinned to the far edge below 768 px; a long name wraps (`overflow-wrap:anywhere`).
+  4. **Welcome section** keeps its card (background, border, 18 px radius, 16 px padding) at every width; the ≤767 px transparent/borderless override was removed.
+  5. **Low Stock "Loading…" flash** — root cause: `refreshDashboardLocationScopedCards()` (run after every Business Day refresh, sale and expense) reset the metric to not-ready every time. Now it resets only when the Location changes; only the newest response is applied (request sequence); a failed refresh keeps the last good figure; a failure before any figure shows 0.
+- **PHONE-VALIDATION-001 (called out separately) — FIXED + VERIFIED IN QA:**
+  - **Library:** the already-vendored `frontend/assets/vendor/libphonenumberjs1.11.15.min.js` (libphonenumber-js, full metadata) — no new dependency. The backend's `to_e164()` (`phonenumbers` 9.0.38) stays authoritative.
+  - **Storage:** registration (business + owner), business settings, My Profile and Location contact send canonical **E.164**. Registration no longer glues `+<code> ` in front of the typed text, so a pasted `+44…` is no longer sent as `+234 +44…`. Leading `00` is read as `+`.
+  - **Validation:** too short / too long / invalid for the selected country are named separately (two new sentences, fr/es/ar/pt); digits past the country's maximum are **refused while typing** with the reason shown — never silently truncated; a too-long **paste is kept whole and flagged**; formatted pastes are cleaned; letters are ignored; deleting across a space removes the adjacent digit; a **country change re-checks** the number; `inputmode=tel`, `aria-invalid`, `aria-describedby`.
+  - **Legacy values:** saved numbers are shown formatted (national for the same country, international otherwise); an unparseable legacy value is shown exactly as stored and never rewritten; My Profile re-sends the phone only when it was edited.
+  - **Countries tested:** NG, US, GB, FR, ES, PT (library-derived examples, frontend and backend).
+  - **Also fixed:** picking a registration country no longer flips an Arabic form to left-to-right (the country context now carries the chosen language); the Location form no longer stacks a new phone listener on every open.
+- **Files:** `frontend/index.html`, `frontend/css/base.css`, `frontend/js/app.js`, `frontend/sw.js` (cache `cauldra-shell-v26-ui-input-polish`), `i18n/launch_catalog.json` + regenerated `frontend/js/i18n-catalog.js`, `scripts/verify-native-bundle.js`; new `tests/test_ui_input_polish.cjs` (152 checks) and `tests/test_phone_country_normalization.py`.
+- **Tests:** `test_ui_input_polish.cjs` **152/152** locally **and against deployed QA**; `test_phone_country_normalization.py` **4 passed + 12 subtests**; JS suite 36 files PASS (the two CRLF-sensitive files pass on an LF copy; `test_native_bundle` PASS after the build); full pytest **652 passed** with the same 8 failures / 23 errors as the pre-existing baseline — no new failure.
+- **Responsive (Chromium):** 360, 390, 412, 600, 700, 768, 820, 1024, 1366 px (English, short and long names) and 390 / 1024 px Arabic — welcome boxed, badge beside the name, search inside the card, no horizontal overflow. PASS.
+- **QA `76195fca-868c-4ead-bfaa-abe06ff01ce5`** @ `bdb105d`: SUCCESS; `/health` 200; `Database migration: 0044_subscription_renewal_engine (matches this code)`; serves SW v26, "Starting session…", no header search.
+- **APK** `cauldra-qa-rc-bdb105d.apk` — SHA-256 `d5c066a348e20bf9422341702bac11069a882dd9494a919303c66f69c8ae3105` — **16,019,300 bytes** — QA target only (`https://cauldra-qa.up.railway.app`); `verify-apk-target` PASS; `test_native_bundle` PASS; `verify-native-bundle --target=qa` PASS (bundle parity).
+- **Android emulator smoke: **PASS** (sufficient for THIS RC freeze only)** — Pixel 7 emulator (1080×2400, 411 CSS px), `cauldra-qa-rc-bdb105d.apk` installed, real adb key input + CDP:
+  - Phone (guest registration, English + Arabic): typing `08031234567` → `0803 123 4567`, E.164 `+2348031234567`, numeric keyboard; extra digits refused with the reason; each delete removes one digit; too short reported on leaving; formatted and `+44` pastes; US → NG re-check; letters refused; field fits; Arabic RTL page, digits in order, Arabic message. **PASS**
+  - Dashboard (signed in by the owner; QA business 40): welcome card boxed, "Admin" badge on the name's line 10 px after it (English and Arabic); header shows New Sale + notifications, no search; search inside the Stock Inventory card, 354 px wide, filters by name (`rice`) and SKU (`POL-SOAP`, `POL-R` in Arabic), clearing restores both rows; no horizontal scroll; **Low Stock stayed `1` through 3 background refreshes and a simulated failed refresh** (MutationObserver: never "Loading…"), same in Arabic. **PASS** (two temporary products were added for this and deleted afterwards.)
+- **Galaxy A23 hardware smoke: **NOT RUN — owner unavailable with device; deferred to pre-production/native-release verification.****
+- **Non-blocking observations (recorded, not fixed):**
+  - supplier phones (`s-phone`, `supplier-edit-phone`) are still stored as typed and the WhatsApp link uses digits only, so a national-format supplier number lacks the country code (suppliers are outside this batch);
+  - one metadata difference: `080312345678` (NG, 12 digits) passes the frontend library but the backend rejects it on save (the backend stays authoritative, the user sees the server error);
+  - in Arabic the search box's magnifier stays on the physical left (no overlap; cosmetic);
+  - the emulator drops characters when adb sends a burst of keys; typed one key at a time the search is exact (the app never rewrites the field) — harness behaviour, not an app defect.
+- Evidence: `Cauldra-Records/session_evidence_2026-09-29/ui_input_polish/` (`web_local/`, `web_qa/`, `emulator/`, `apk/`, deploy and build logs, full pytest output, `records_before/`). No password, token or card data recorded; the sign-in file was deleted after use.
+
+**RC FREEZE — release candidate `bdb105d`.**
+- **Frozen application commit:** `bdb105d` (`bdb105de582336b2862e5bd74d8c26810684c1cd`) on `remediation/batch-e-ai-forecast-brain` (pushed).
+- **QA deployment:** `76195fca-868c-4ead-bfaa-abe06ff01ce5` — SUCCESS; `/health` 200.
+- **Migration:** `0044_subscription_renewal_engine` (matches the code; no new migration).
+- **Frozen QA APK:** `cauldra-qa-rc-bdb105d.apk` — SHA-256 `d5c066a348e20bf9422341702bac11069a882dd9494a919303c66f69c8ae3105` — **16,019,300 bytes** — QA target; parity PASS.
+- **Contents:** RC `1e7b1df` (PRICE-UPGRADE-001 verified with live Paystack TEST A–H; pricing matrix 120/0/0) + the POLISH-001 / PHONE-VALIDATION-001 batch above. The batch touches no pricing, subscription, payment or backend code.
+- **Android emulator smoke: **PASS** (sufficient for THIS RC freeze only)** (phone input English + Arabic; signed-in dashboard English + Arabic).
+- **Galaxy A23 hardware smoke: **NOT RUN — owner unavailable with device; deferred to pre-production/native-release verification.****
+- **Supersedes:** RC `1e7b1df` / QA `bf135970-…` / `cauldra-qa-rc-1e7b1df.apk` (SHA-256 `6ef9392d…`) — historical evidence, not deleted.
+- **Freeze rule:** no features, refactors or unrelated polish; any code change after `bdb105d` breaks this RC and needs explicit re-verification.
+- **Remaining production-only blockers:**
+- production migrations 0038–0044 (never run in production);
+- production upload-storage variables (QA-STORAGE-001: bucket + variables before promotion);
+- the `main` promotion shape (merge the frozen line, including the two 2026-09-22 `index.html` edits on `main`), promoting exactly `bdb105d`;
+- Paystack LIVE: live keys, the production webhook URL and delivery, a live verification (QA never received a Paystack webhook);
+- Supabase Auth production configuration;
+- production AI smoke tests;
+- Android release signing and the production APK, built from the promoted commit;
+- Galaxy A23 hardware smoke (deferred, above);
+- the queued PO inbox receipt check;
+- DMARC `p=none` (production DNS decision).
+- Production and `main` (`4195d98`) untouched; no production migration; LIVE Paystack unchanged.
+
 ---
 
 *Handoff prepared 2026-09-26 from `remediation/batch-e-ai-forecast-brain` @ `2aeec3f`. Documentation only — no product code, QA, `main` or production change.*
