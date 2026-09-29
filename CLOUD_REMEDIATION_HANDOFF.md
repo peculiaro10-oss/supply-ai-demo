@@ -1489,6 +1489,49 @@ The four permanent records are the source of detail; this section mirrors them.
 - DMARC `p=none` (production DNS decision).
 - Production and `main` (`4195d98`) untouched; no production migration; LIVE Paystack unchanged.
 
+### 14.11 TMPPW-001 / TMPPW-002 — temporary-password gate; RC `4353477` (2026-09-29, local session)
+
+The four permanent records are the source of detail; this section mirrors them.
+
+- **Found by:** the owner-requested temporary-password / forced-change audit of frozen RC `bdb105d` (2026-09-29, audit only, no change). Verified on QA `76195fca` @ `bdb105d` with a disposable business (id 41, deleted).
+- **TMPPW-001 — HIGH — FIXED + VERIFIED IN QA.** The `must_change_password` gate lived only in `get_current_user`. 22 routes used `get_authenticated_user` (chosen so billing stays reachable while a subscription is paused), which also skipped the gate. Before the fix, an Admin still on a temporary password **cancelled the subscription** (200, `cancel_at_period_end` false → true) and **obtained an upgrade quote** on QA; any temporary-password user could edit their profile, avatar and email and read `/subscription/usage`; Admin/Manager could read the Business Profile. Business data (products, users, suppliers, expenses, notifications, offline snapshot, 126 routes) was already gated.
+  - **Fix:** new dependency `get_password_settled_user` (authenticated + temporary-password gate, **without** the subscription-paused check); `get_current_user` and the notification reader build on it; all subscription, business-profile and own-account routes use it. Paused-subscription access, role checks, session revocation, the atomic password change and Admin reset are unchanged.
+  - **Allowlist while the gate is active:** `GET /auth/me`, `POST /auth/logout`, `POST /auth/change-password`, `GET /users/me/profile`, `DELETE /offline/devices/{device_id}` (revoke own device). Everything else answers 403 "You must change your temporary password before using the application."
+- **TMPPW-002 — MEDIUM — FIXED + VERIFIED IN QA.** The permanent password could equal the temporary one, so the temporary password kept working. Now refused while `must_change_password` is set: "Choose a new password that is different from your temporary password."
+- **Unchanged and confirmed correct (audit):** the flag is server-side only (database column, re-read every request; not in the token or the browser); refresh, a second sign-in and cleared storage keep it; the change is one transaction (a simulated failure left the flag and the temporary password intact); success revokes every earlier access token and refresh session; Admin reset re-arms the flag and revokes live sessions; the temporary password is never echoed.
+- **Commit:** `4353477` (`43534772cd0526ca861408f56b7f153f7ec404b3`) — `backend/main.py` + new `tests/test_temp_password_gate.py`. No frontend, native, migration, environment-variable or dependency change.
+- **Tests:** `test_temp_password_gate.py` **8 tests + 444 subtests PASS** (enumerates every route that resolves a business user with a temporary-password token for Staff, Manager and Admin; only the allowlist answers); the same file on `bdb105d`: **70 failures**. Full pytest **660 passed** with the same 8 failures / 23 errors as the pre-existing baseline — no new failure.
+- **QA `ea65b546-2fe2-4312-9988-b061522d10d5`** @ `4353477`: SUCCESS; `/health` 200; `Database migration: 0044_subscription_renewal_engine (matches this code)`.
+- **Live QA, disposable business 42 (`QT-2762-82`, deleted after):**
+  - **API** (temporary Staff, Manager, Admin): `/auth/me` and `GET /users/me/profile` 200; products, inventory summary, users, suppliers, expenses, notifications, offline snapshot, business profile, subscription usage / payments / downgrade-impact, profile edit, upgrade quote, **subscription cancel → all 403 (gate)**; `cancel_at_period_end` stayed false. **PASS**
+  - **Web** (owner signed in as temporary Staff; browser pane): lock shown, not dismissable (no Cancel, Escape and the close function ignored); direct API calls incl. `POST /products/`, `/subscription/cancel`, `/users/me/email-change` → 403; forcing the lock hidden + navigating + reloading data → lock returned, no data; reload, cleared local/session storage + IndexedDB, a second tab → lock again, APIs 403. Failed changes: weak → 400, mismatch → refused in the form, **same as temporary → 400 with the new message** (after a strong temporary password was issued by a live Admin reset); lock and flag stayed. **Admin reset (live endpoint):** flag re-armed, auth version 1 → 2, open refresh sessions 1 → 0, the old token 401, the page returned signed out, the previous temporary password rejected (owner). **Success:** 200; lock gone; products/expenses 200; the pre-change token 401; reload stays unlocked; server: flag false, auth version 3, exactly one open refresh session; after sign-out the temporary password was rejected and the permanent password signed in with no lock (owner). **PASS**
+  - **Android emulator smoke: **PASS** (sufficient for THIS RC freeze only)** — Pixel 7, `cauldra-qa-rc-bdb105d.apk` (frontend identical to `4353477`; bundle parity `ed899414…` PASS against `4353477`): temporary Manager signed in by the owner → lock shown, no Cancel; products, users, business profile, subscription usage, profile edit, offline snapshot → 403; forcing the lock hidden + navigating → lock returned; app force-stop + relaunch → signed out (no access; the session cookie did not survive the forced stop, so the lock-after-restart path was shown on Web instead); owner set the permanent password → released, products 200; server flag false, auth version 2, one open refresh session. **PASS**
+- **UX notes (non-blocking, not fixed):** the lock title reads "Create your permanent password" at sign-in but "Password Change Required" after a reload; a mismatch is caught in the form without a server call (by design).
+- Evidence: `Cauldra-Records/session_evidence_2026-09-29/tmppw_audit/` (audit + live helper JSON, full pytest output, emulator screenshots, deploy log). No password or token recorded; both sign-in files deleted.
+
+**RC FREEZE — release candidate `4353477`.**
+- **Frozen application commit:** `4353477` (`43534772cd0526ca861408f56b7f153f7ec404b3`) on `remediation/batch-e-ai-forecast-brain` (pushed).
+- **QA deployment:** `ea65b546-2fe2-4312-9988-b061522d10d5` — SUCCESS; `/health` 200.
+- **Migration:** `0044_subscription_renewal_engine` (matches the code; no new migration).
+- **Frozen QA APK:** `cauldra-qa-rc-bdb105d.apk` — SHA-256 `d5c066a348e20bf9422341702bac11069a882dd9494a919303c66f69c8ae3105` — **16,019,300 bytes** — QA target. Not rebuilt: `4353477` changes no frontend or native file (`git diff bdb105d 4353477 -- frontend android scripts package.json capacitor.config.*` is empty) and `verify-native-bundle --target=qa` at `4353477` PASS with the same bundle hash `ed899414…`; `verify-apk-target` PASS.
+- **Contents:** RC `bdb105d` (PRICE-UPGRADE-001, POLISH-001, PHONE-VALIDATION-001) + TMPPW-001 / TMPPW-002 (backend only).
+- **Android emulator smoke: **PASS** (sufficient for THIS RC freeze only)** (temporary-password lock, bypass attempts, release after the permanent password).
+- **Galaxy A23 hardware smoke: **NOT RUN — owner unavailable with device; deferred to pre-production/native-release verification.****
+- **Supersedes:** RC `bdb105d` / QA `76195fca-…` (historical evidence, not deleted).
+- **Freeze rule:** no features, refactors or unrelated polish; any code change after `4353477` breaks this RC and needs explicit re-verification.
+- **Remaining production-only blockers:**
+- production migrations 0038–0044 (never run in production);
+- production upload-storage variables (QA-STORAGE-001: bucket + variables before promotion);
+- the `main` promotion shape (merge the frozen line, including the two 2026-09-22 `index.html` edits on `main`), promoting exactly `4353477`;
+- Paystack LIVE: live keys, the production webhook URL and delivery, a live verification (QA never received a Paystack webhook);
+- Supabase Auth production configuration;
+- production AI smoke tests;
+- Android release signing and the production APK, built from the promoted commit;
+- Galaxy A23 hardware smoke (deferred, above);
+- the queued PO inbox receipt check;
+- DMARC `p=none` (production DNS decision).
+- Production and `main` (`4195d98`) untouched; no production migration; LIVE Paystack unchanged.
+
 ---
 
 *Handoff prepared 2026-09-26 from `remediation/batch-e-ai-forecast-brain` @ `2aeec3f`. Documentation only — no product code, QA, `main` or production change.*
