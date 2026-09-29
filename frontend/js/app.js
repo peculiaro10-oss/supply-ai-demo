@@ -27676,6 +27676,9 @@
             renderBusinessInsights();
             renderAuthButton();
             updateGuestHeaderState();
+            // NOTIF-PUSH-001: a device whose session is gone stops receiving
+            // that user's pushes (the next sign-in registers it again).
+            releaseDevicePushOnSignOut();
             if (hadSession) showSessionEndedNotice(message || SESSION_EXPIRED_MESSAGE);
             else if (message) {
                 const authMsg = document.getElementById("auth-session-message");
@@ -29443,6 +29446,11 @@
                     productsSuppliersReady = true; warehousesReady = true; inventoryEverLoaded = true; coreDataEverLoaded = true;
                     updateDashboardMetrics(); updateWarehouseUIElements(); renderInventoryTable([]);
                     renderAuthButton(); updateGuestHeaderState(); renderMobileNav();
+                    // NOTIF-PUSH-001: started with nobody signed in (e.g. the
+                    // Android app's session did not survive the process being
+                    // killed) — this device must not keep receiving the last
+                    // user's pushes while it shows the guest app.
+                    releaseDevicePushOnSignOut();
                     return;
                 }
                 // PERM-001 F2 — the supplier directory is now gated on

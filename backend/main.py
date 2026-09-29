@@ -5159,9 +5159,9 @@ def _drop_rolled_back_push(session, previous_transaction) -> None:
 # is pasted in) is ignored rather than breaking every native send.
 FCM_SERVICE_ACCOUNT_JSON = os.getenv("FCM_SERVICE_ACCOUNT_JSON", "").strip().lstrip("﻿").strip()
 FCM_ANDROID_CHANNEL_ID = "cauldra_alerts"
-# The circle behind the Cauldra mark: the logo's dark navy (matches the app's
-# res/values/notification_colors.xml).
-FCM_ANDROID_ACCENT_COLOR = "#0B1B3F"
+# The circle behind the Cauldra mark: navy blue, owner's choice (matches the
+# app's res/values/notification_colors.xml). Used only by notifications.
+FCM_ANDROID_ACCENT_COLOR = "#000080"
 _fcm_state: Dict[str, Any] = {}
 
 def fcm_configured() -> bool:
