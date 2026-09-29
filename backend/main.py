@@ -5159,6 +5159,9 @@ def _drop_rolled_back_push(session, previous_transaction) -> None:
 # is pasted in) is ignored rather than breaking every native send.
 FCM_SERVICE_ACCOUNT_JSON = os.getenv("FCM_SERVICE_ACCOUNT_JSON", "").strip().lstrip("﻿").strip()
 FCM_ANDROID_CHANNEL_ID = "cauldra_alerts"
+# The circle behind the Cauldra mark: the logo's dark navy (matches the app's
+# res/values/notification_colors.xml).
+FCM_ANDROID_ACCENT_COLOR = "#0B1B3F"
 _fcm_state: Dict[str, Any] = {}
 
 def fcm_configured() -> bool:
@@ -5196,7 +5199,7 @@ def fcm_send(token: str, notification: "Notification") -> str:
             "priority": "HIGH", "ttl": "86400s", "collapse_key": tag,
             # PRIVATE: a locked screen shows only that Cauldra sent something.
             "notification": {"channel_id": FCM_ANDROID_CHANNEL_ID, "tag": tag, "visibility": "PRIVATE",
-                             "icon": "ic_stat_cauldra", "color": "#436BEE"},
+                             "icon": "ic_stat_cauldra", "color": FCM_ANDROID_ACCENT_COLOR},
         },
     }}
     resp = requests.post(f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send", json=message,

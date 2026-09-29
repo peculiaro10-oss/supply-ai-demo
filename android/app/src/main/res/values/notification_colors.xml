@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- NOTIF-PUSH-002: accent colour of Cauldra notifications (matches the app's primary blue). -->
-    <color name="cauldra_notification_accent">#436BEE</color>
+    <!-- NOTIF-PUSH-002: accent colour of Cauldra notifications - the circle behind the Cauldra mark.
+         Dark navy from the logo's own tile (owner choice); the server sends the same value. -->
+    <color name="cauldra_notification_accent">#0B1B3F</color>
 </resources>

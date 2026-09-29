@@ -477,6 +477,8 @@ class FcmSend(unittest.TestCase):
         self.assertEqual(msg['android']['notification']['channel_id'], 'cauldra_alerts')
         self.assertEqual(msg['android']['notification']['visibility'], 'PRIVATE')
         self.assertEqual(msg['android']['notification']['tag'], 'cauldra-notification-7')
+        self.assertEqual(msg['android']['notification']['icon'], 'ic_stat_cauldra')
+        self.assertEqual(msg['android']['notification']['color'], '#0B1B3F')
 
     def test_unregistered_and_mismatch_are_gone(self):
         for status, code in ((404, 'UNREGISTERED'), (403, 'SENDER_ID_MISMATCH')):
