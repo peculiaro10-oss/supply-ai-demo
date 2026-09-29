@@ -2130,7 +2130,10 @@
                     confirmPlanTitle: "Switch to {plan}?", confirmUpgradeTitle: "Upgrade to {plan}?", confirmSubscribeTitle: "Subscribe to {plan}?",
                     confirmTrialSwitchBody: "Your free trial continues on {plan}. You won't be charged now. When the trial ends, your subscription continues at {price}.",
                     confirmCheckoutBody: "You'll go to Paystack's secure checkout to pay {price}. Your plan changes only after Paystack confirms the payment.",
-                    confirmUpgradeBody: "You'll go to Paystack's secure checkout to pay for the upgrade. Paystack shows the exact amount before you pay; your plan changes only after the payment is confirmed. From your next renewal you pay {price}.",
+                    confirmUpgradeBody: "You'll pay the amount below on Paystack's secure checkout. Your plan changes only after the payment is confirmed; a new billing period starts then and renews at {price}.",
+                    quoteNewPrice: "{plan} {interval} price", quoteCredit: "Credit for the unused part of your current period", quoteDue: "You pay now",
+                    quotePeriod: "If paid now, your new period runs until {time}.", quoteLoading: "Preparing your upgrade price…",
+                    quoteFailed: "The upgrade price could not be prepared. Please try again.",
                     actionSwitchTo: "Switch to {plan}", actionUpgradeTo: "Upgrade to {plan}", actionSubscribeTo: "Subscribe to {plan}", actionRenew: "Renew {plan}",
                     pausedTitle: "Subscription paused", pausedDataSafe: "Your business data is safe. Nothing has been deleted.",
                     pausedUnlocks: "Cauldra unlocks as soon as a renewal payment is confirmed.",
@@ -21822,22 +21825,61 @@
             const current = String(billingUsageCache?.plan || '').toLowerCase();
             if (billingUsageCache?.status === 'active' && !billingUsageCache?.access_paused
                     && rank[plan] > rank[current]) {
-                try {
-                    const response = await fetch(`${API_URL}/subscription/upgrade-quote`, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: {'Content-Type':'application/json', 'Authorization':`Bearer ${authToken}`},
-                        body: JSON.stringify({plan, billing_interval:interval})
-                    });
-                    const quote = await response.json();
-                    if (!response.ok) throw new Error('upgrade_quote_failed');
-                    return CauldraPayments.start('upgrade', {quote_reference:quote.quote_reference});
-                } catch (_) {
-                    showToast('A secure upgrade quote could not be prepared. Please try again.', 'error');
-                    return;
-                }
+                // PRICE-UPGRADE-001: an upgrade is only ever paid after the
+                // Admin has seen the server's quote (price, credit, new period).
+                return openPlanChangeConfirm(plan, interval, 'upgrade');
             }
             return CauldraPayments.start('checkout', {plan, billing_interval:interval});
+        }
+
+        // PRICE-UPGRADE-001: the upgrade confirmation shows the server's quote
+        // exactly as issued — the amount the checkout will charge, the credit
+        // for the unused part of the current period, and the new period that
+        // starts when Paystack confirms the payment. Nothing here is computed
+        // on the device; the checkout only ever charges the quote's amount.
+        function formatQuoteNaira(kobo) {
+            const naira = Number(kobo || 0) / 100;
+            return "₦" + naira.toLocaleString("en-NG", { minimumFractionDigits: Number.isInteger(naira) ? 0 : 2, maximumFractionDigits: 2 });
+        }
+        function renderUpgradeQuote(box, quote) {
+            const interval = quote.new_interval === 'annual' ? 'Annual' : 'Monthly';
+            const rows = [
+                [t('subscription.quoteNewPrice', { plan: quote.new_plan_label, interval }), formatQuoteNaira(Math.round(quote.new_price * 100))],
+                [t('subscription.quoteCredit'), '−' + formatQuoteNaira(Math.round(quote.unused_credit * 100))],
+            ];
+            box.innerHTML = rows.map(([label, value]) => `<div class="flex justify-between gap-3"><span class="text-textSec min-w-0 break-words">${escapeHtml(label)}</span><span class="text-textMain font-semibold shrink-0">${escapeHtml(value)}</span></div>`).join('')
+                + `<div class="flex justify-between gap-3 border-t border-borderCol mt-1.5 pt-1.5"><span class="text-textMain font-bold min-w-0 break-words">${escapeHtml(t('subscription.quoteDue'))}</span><span data-quote-amount-kobo="${Number(quote.amount_due_kobo)}" class="text-textMain font-bold shrink-0">${escapeHtml(formatQuoteNaira(quote.amount_due_kobo))}</span></div>`
+                + `<p class="text-textSec mt-1.5 leading-relaxed">${escapeHtml(t('subscription.quotePeriod', { time: formatBusinessDateTime(quote.new_paid_through_if_paid_now) }))}</p>`;
+            box.classList.remove('hidden');
+        }
+        async function loadUpgradeQuote(plan, interval) {
+            const box = document.getElementById('plan-change-confirm-quote');
+            const submit = document.getElementById('plan-change-confirm-submit');
+            if (!box || !submit) return;
+            submit.disabled = true;
+            box.innerHTML = `<p class="text-textSec">${escapeHtml(t('subscription.quoteLoading'))}</p>`;
+            box.classList.remove('hidden');
+            try {
+                const response = await fetch(`${API_URL}/subscription/upgrade-quote`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: {'Content-Type':'application/json', 'Authorization':`Bearer ${authToken}`},
+                    body: JSON.stringify({plan, billing_interval:interval})
+                });
+                const quote = await response.json().catch(() => ({}));
+                if (pendingPlanChange?.plan !== plan || pendingPlanChange?.interval !== interval) return;
+                if (!response.ok) {
+                    const detail = quote?.detail;
+                    const message = (detail && typeof detail === 'object' ? detail.message : detail) || t('subscription.quoteFailed');
+                    box.innerHTML = `<p class="text-danger leading-relaxed">${escapeHtml(message)}</p>`;
+                    return;
+                }
+                pendingPlanChange.quote = quote;
+                renderUpgradeQuote(box, quote);
+                submit.disabled = false;
+            } catch (_) {
+                if (pendingPlanChange?.plan === plan) box.innerHTML = `<p class="text-danger leading-relaxed">${escapeHtml(t('subscription.quoteFailed'))}</p>`;
+            }
         }
 
         // PLAN-005: one renderer for "usage above the plan's limits", used by
@@ -21881,8 +21923,11 @@
             submit.disabled = false;
             const impactBox = document.getElementById('plan-change-confirm-impact');
             impactBox.classList.add('hidden'); impactBox.innerHTML = '';
+            const quoteBox = document.getElementById('plan-change-confirm-quote');
+            if (quoteBox) { quoteBox.classList.add('hidden'); quoteBox.innerHTML = ''; }
             document.getElementById('plan-change-confirm-modal').classList.remove('hidden');
             submit.focus();
+            if (kind === 'upgrade') loadUpgradeQuote(plan, interval);
             const rank = {core:0, starter:1, business:2, enterprise:3};
             if (rank[plan] < rank[String(usage.plan || '').toLowerCase()]) {
                 try {
@@ -21910,6 +21955,10 @@
             submit.disabled = true;
             closePlanChangeConfirm();
             if (selection.kind === 'trial_switch') return switchPlanImmediate(selection.plan, selection.interval, selection.price);
+            if (selection.kind === 'upgrade') {
+                if (!selection.quote?.quote_reference) { showToast(t('subscription.quoteFailed'), 'error'); return; }
+                return CauldraPayments.start('upgrade', {quote_reference: selection.quote.quote_reference});
+            }
             return subscribeNow(selection.plan, selection.interval);
         }
 

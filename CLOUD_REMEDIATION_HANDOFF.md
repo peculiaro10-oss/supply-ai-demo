@@ -1311,6 +1311,114 @@ The owner's four permanent records were attached to this session and updated dir
 - **Production and `main`:** untouched (`origin/main` `4195d98`). No production preflight yet. No PR, no tag.
 - Superseded by local evidence (do not reopen): the §14.6 / §14.7 "awaiting QA + APK + Android" and "Resend tracking to confirm" items.
 
+### 14.9 PRICE-UPGRADE-001 — upgrade pricing and the change-plan bypass (2026-09-29, cloud session) — RC `7763a26` freeze deliberately broken
+
+**Discovery.** Found in the read-only production preflight of 2026-09-29, against the frozen RC `7763a26`. Evidence: `PRODUCTION_PREFLIGHT_2026-09-29.md` and `PRICING_MATRIX_7763a26.md` (120 rows, 108 SUSPECT; kept unchanged as historical evidence).
+
+**Root cause.**
+- The quote charged `destination full-term price − unused credit`, but the paid upgrade kept the old paid-through time. The next renewal then billed the full destination price again.
+- So the customer bought a full destination term but received only the rest of the old period. Example: Business Monthly → Enterprise Annual with hours left charged ≈ ₦2,099,919 for those hours.
+- The ₦1 floor sold months of a higher tier from annual → monthly moves.
+- Separately, `POST /subscription/change-plan` compared **list prices**, not plan rank. A paying Admin could therefore take a higher tier without paying whenever its price was not higher (Business Annual ₦200,000 → Enterprise Monthly ₦200,000; Starter Annual → Business Monthly; Premium Annual → Enterprise Monthly). It also allowed same-plan annual → monthly during the paid period.
+
+**Model chosen (one): the upgrade payment starts a fresh destination period at Paystack confirmation.**
+- **Formula**, in `upgrade_quote_amounts()`, the only implementation:
+  - `fraction = remaining ÷ paid-period seconds` (clamped 0–1);
+  - `credit = round(source price kobo × fraction)`;
+  - `due = destination one-term price kobo − credit`.
+- Kobo = naira × 100, applied once. No tax or fee is added.
+- **Refused** (409 `UPGRADE_CREDIT_EXCEEDS_TERM`) when `credit > destination term − 100 kobo`. This is only possible annual → higher-tier monthly early in the year. The customer is offered the annual option, or a change at renewal.
+- **On confirmed payment:**
+  - `current_period_start` = Paystack `paid_at`;
+  - `current_period_end` = `next_billing_at` = start + one destination term;
+  - the renewal engine anchors there.
+- **Why this model:**
+  - It matches the locked rule that a late renewal starts at provider confirmation.
+  - The quote already priced a full destination term, so only the period handling was wrong.
+  - Credit and price are both plain naira values of service, so it is sound across monthly and annual.
+  - The alternative (charge only the remaining fraction, keep the old date) would bill up to a year of monthly-rate service upfront for annual → monthly moves.
+
+**Safety added.**
+- **One checkout per quote.** A repeat request resumes the same Paystack checkout; the access code is now stored.
+- **One open upgrade at a time.** A new quote first settles any earlier open upgrade checkout with Paystack. If it was paid, it is applied and the new quote is refused. Otherwise it is closed.
+- **Reconciliation also requires:**
+  - the record still open;
+  - the record to be the quote's own checkout;
+  - record amount = quote amount;
+  - provider amount = record amount (a fee added on top ⇒ flagged).
+- **Payment window `UPGRADE_PAYMENT_WINDOW` = 1 h** from the quote:
+  - an open upgrade checkout is closed after it (as well as at the paid-through time);
+  - a payment confirmed after it, or after the old paid-through time, is **flagged for review**, never applied with a stale credit.
+- The quote API now also returns `amount_due_kobo`, the current period start and end, `unused_fraction`, and `new_paid_through_if_paid_now`.
+
+**`change-plan` for a paying business.**
+- Any higher rank → 402 (use the paid upgrade).
+- Lower rank → 409 (schedule the downgrade), as before.
+- Same plan, pricier interval → 402, as before.
+- Same plan, other interval while the paid period runs → 409 `INTERVAL_CHANGE_AT_RENEWAL`.
+- Trials are unchanged (free switch).
+
+**Frontend.**
+- An upgrade opens the confirmation dialog, which fetches the server quote and shows:
+  - the destination price;
+  - the credit;
+  - "You pay now" = `amount_due_kobo`, exactly;
+  - the new paid-through if paid now.
+- Confirm starts `CauldraPayments.start('upgrade', {quote_reference})` for that quote only. A refused quote shows the server's reason and offers no payment.
+- Six new sentences plus the reworded upgrade body, in fr/es/ar/pt. Service-worker cache `v24-upgrade-quote`.
+
+**Files.**
+- `backend/main.py`;
+- `frontend/js/app.js`, `frontend/index.html`, `frontend/sw.js`;
+- `i18n/launch_catalog.json` and the regenerated `frontend/js/i18n-catalog.js`;
+- new `tests/test_price_upgrade_001.py`, `tests/test_price_upgrade_ui.cjs`, `scripts/price_upgrade_matrix.py`.
+- No migration (head stays `0044_subscription_renewal_engine`). No new environment variable. No Paystack plan or subscription object.
+
+**Verification in this cloud session.**
+- `tests/test_price_upgrade_001.py`: 24 tests + 103 subtests PASS. Against `7763a26` the same file fails: 17 tests and 102 subtests, including the three `change-plan` bypass subcases.
+- `tests/test_price_upgrade_ui.cjs`: 15 checks PASS, browser included; it fails on `7763a26`.
+- Post-fix matrix (`PRICING_MATRIX_PRICE-UPGRADE-001_POSTFIX.md`): 120 rows, **120 PASS, 0 SUSPECT**, including 12 expected refusals.
+- Full per-file Python and JS suites: see "Regression" below.
+
+**Not done here (sandbox limits: `cauldra-qa.up.railway.app`, `api.paystack.co` and `checkout.paystack.com` are blocked by the network policy; there is no Android SDK; the Railway connector cannot deploy local code or change the QA source branch):**
+- the QA deploy;
+- live QA and Paystack TEST verification;
+- the QA APK and native checks.
+
+**Status: FIXED IN CODE — NOT YET VERIFIED IN QA.** Do not freeze a new RC until the owner's QA run passes (runbook below).
+
+**QA runbook (owner, local):**
+1. Deploy the new commit to `cauldra-qa` (`railway up`, as for earlier RCs). Confirm the deployment is SUCCESS, `/health` returns 200, and the startup line reads "Database migration: 0044_subscription_renewal_engine (matches this code)".
+2. On a QA business, Active **Business Monthly**:
+   - Billing → Enterprise **Annual**. The dialog shows destination ₦2,100,000, the credit, and "You pay now". Paystack TEST shows the **same** amount.
+   - Pay with the TEST card. The business becomes Enterprise Annual, with period start = the payment time and paid-through = one year later. Billing shows the next renewal there.
+3. Repeat for:
+   - Starter Monthly → Business Monthly (≈50% through);
+   - one annual source → annual destination.
+4. **Bypass.** As a paying Admin, call `POST /subscription/change-plan` with `{"plan":"enterprise","billing_interval":"monthly"}` from Business Annual. Expect **402**, with the plan unchanged. Same-plan annual → monthly: expect **409**.
+5. **Refusal.** Premium Annual early in the year → Enterprise Monthly. The dialog shows the refusal; no checkout opens.
+6. **Abandon / duplicate.**
+   - Open an upgrade checkout and close it; request a new quote. The first is closed, and only one payment is possible.
+   - After paying, press Check status or replay the webhook. The paid-through time does not move again.
+7. **APK.** Build `cauldra-qa-rc-<commit>.apk` (the frontend changed) and record the SHA-256 and size.
+   - Native: the upgrade dialog shows the quote; Paystack opens with the same amount; returning shows the new plan and period.
+   - The A23 legal smoke can be done on this APK.
+
+**Previous RC.** `7763a26` / QA `5e9f973a-…` / `cauldra-qa-rc-7763a26.apk` is **superseded as production candidate (PRICE-UPGRADE-001)** — kept as history, not deleted. The new RC is named only after the QA runbook passes.
+
+**Unchanged and still open (not in scope):**
+- production migrations 0038–0044;
+- production storage variables;
+- the main promotion shape;
+- Paystack LIVE;
+- Supabase Auth;
+- production AI smoke tests;
+- Android release signing and the production APK;
+- the A23 legal smoke;
+- the queued PO inbox receipt.
+
+**Production and `main`:** untouched (`origin/main` `4195d98`, production deployment `44a12849`). No PR, no tag.
+
 ---
 
 *Handoff prepared 2026-09-26 from `remediation/batch-e-ai-forecast-brain` @ `2aeec3f`. Documentation only — no product code, QA, `main` or production change.*

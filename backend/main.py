@@ -2441,16 +2441,25 @@ def effective_subscription_status(sub: Optional["BusinessSubscription"], now: Op
 # a genuine upgrade (see /subscription/upgrade-quote). A billing-interval
 # change on the SAME plan (e.g. Business Monthly -> Business Annual) is
 # intentionally NOT an "upgrade" under this ranking, even though the annual
-# price is numerically larger — that stays on the existing /subscription/
-# change-plan lateral-move path, unchanged by this feature.
+# price is numerically larger. PRICE-UPGRADE-001: /subscription/change-plan
+# refuses such a change while the paid period runs (it is chosen at renewal),
+# and refuses any higher-rank plan for a paying business whatever its price.
 PLAN_RANK = {"core": 0, "starter": 1, "business": 2, "enterprise": 3}
 UPGRADE_QUOTE_VALIDITY_MINUTES = 15
+# PRICE-UPGRADE-001: an upgrade payment buys one full term of the new plan,
+# starting when Paystack confirms it; the unused value of the current paid
+# period is credited against that term. The credit is computed when the quote
+# is issued, so the payment must be confirmed soon after: a checkout left open
+# longer is closed, and a payment confirmed later is kept for review instead of
+# being applied with a stale credit.
+UPGRADE_PAYMENT_WINDOW = timedelta(hours=1)
+UPGRADE_CREDIT_EXCEEDS_TERM_CODE = "UPGRADE_CREDIT_EXCEEDS_TERM"
 # SUB-LIFECYCLE-001: an upgrade keeps the current period, so once the paid
 # period has ended it would charge the full new price and leave the business
 # paused. A paused business renews on the plan it wants through checkout.
 UPGRADE_AFTER_PAID_THROUGH_MESSAGE = ("Your paid period has ended, so there is no current period to upgrade. "
                                       "Renew on the plan you want from Subscription & Billing.")
-UPGRADE_MINIMUM_CHARGE_KOBO = 100  # Paystack requires a positive amount; this is a floor, never the norm
+UPGRADE_MINIMUM_CHARGE_KOBO = 100  # smallest upgrade charge; a quote whose credit would leave less is refused (PRICE-UPGRADE-001)
 
 @app.get("/plans")
 def list_public_plans():
@@ -14602,13 +14611,29 @@ def change_plan(data: ChangePlanRequest, request: Request, user: User = Depends(
     # here for paying customers.
     current_plan_id = (sub.plan or "starter").strip().lower()
     if sub.status not in ("trialing",):
-        current_amount = plan_amount_naira(current_plan_id, sub.billing_interval or "monthly")
+        current_interval = (sub.billing_interval or "monthly").strip().lower()
+        current_amount = plan_amount_naira(current_plan_id, current_interval)
         new_amount = plan_amount_naira(plan, interval)
-        if new_amount > current_amount:
-            add_audit(db, user, "SUBSCRIPTION_PLAN_CHANGE_REJECTED", f"Blocked attempt to change to {PLAN_CONFIG[plan]['label']} ({interval}) without payment — current plan costs less than requested plan.", business_id=business.id)
+        # PRICE-UPGRADE-001: a higher tier always needs the paid upgrade flow,
+        # whatever the two list prices are (Business Annual costs as much as
+        # Enterprise Monthly, but Enterprise is still an upgrade). Within the
+        # same tier, a more expensive interval is a purchase too.
+        higher_tier = PLAN_RANK.get(plan, -1) > PLAN_RANK.get(current_plan_id, -1)
+        same_tier = PLAN_RANK.get(plan, -1) == PLAN_RANK.get(current_plan_id, -1)
+        if higher_tier or (same_tier and new_amount > current_amount):
+            add_audit(db, user, "SUBSCRIPTION_PLAN_CHANGE_REJECTED", f"Blocked attempt to change to {PLAN_CONFIG[plan]['label']} ({interval}) without payment — "
+                      + ("a higher plan needs the paid upgrade." if higher_tier else "current plan costs less than requested plan."), business_id=business.id)
             db.commit()
             record_failure(db, "change-plan", f"business:{user.business_id}")
             raise HTTPException(status_code=402, detail="Upgrading plans requires payment. Please use Subscribe / Upgrade to start checkout for the new plan.")
+        # Owner policy: a same-plan interval change never applies while the
+        # current paid period runs (it would change what was paid for). It is
+        # chosen at renewal, when Pay Now opens.
+        if same_tier and interval != current_interval and sub.current_period_end and datetime.utcnow() < sub.current_period_end:
+            add_audit(db, user, "SUBSCRIPTION_PLAN_CHANGE_REJECTED", f"Blocked a billing-interval change to {PLAN_CONFIG[plan]['label']} ({interval}) during the paid period.", business_id=business.id)
+            db.commit()
+            raise HTTPException(status_code=409, detail={"code": "INTERVAL_CHANGE_AT_RENEWAL",
+                                "message": f"Your billing interval can change when your current period ends on {_format_reminder_time(business, sub.current_period_end)}. Choose it then when you renew."})
         # SECURITY: a genuine plan-tier downgrade (as opposed to a same-plan
         # interval change) must never apply immediately for a paying customer —
         # it has to be scheduled for the end of their current, already-paid
@@ -15441,7 +15466,7 @@ def settle_open_attempt(db: Session, record: "PaymentRecord", now: datetime) -> 
     if record.purpose == "subscription_renewal":
         result = reconcile_renewal_payment(db, record, transaction, now)
     elif record.purpose == "subscription_upgrade":
-        result = reconcile_upgrade_payment(db, record, transaction)
+        result = reconcile_upgrade_payment(db, record, transaction, now)
         if result.get("status") == "pending" and close_unpaid_upgrade_at_paid_through(db, record, now):
             return "failed"
     else:
@@ -15458,18 +15483,21 @@ def close_unpaid_upgrade_at_paid_through(db: Session, record: "PaymentRecord", n
     Cauldra refuses to start one at or after the paid-through time. A checkout
     still unpaid (Paystack: abandoned/pending) at that time can never apply, so
     it is closed and its quote expired; it must not hold up the renewal. The
-    same holds once the paid-through time differs from the quoted one (the
-    upgrade would only be flagged for review if paid)."""
+    same holds once the paid-through time differs from the quoted one, or once
+    UPGRADE_PAYMENT_WINDOW has passed since the quote (PRICE-UPGRADE-001: the
+    credit was computed then; the upgrade would only be flagged for review if
+    paid)."""
     meta = parse_paystack_metadata(record.transaction_metadata)
     quote = db.query(SubscriptionUpgradeQuote).filter_by(
         quote_reference=meta.get("quote_reference"), business_id=record.business_id).with_for_update().first()
     sub = db.query(BusinessSubscription).filter_by(id=record.subscription_id).first()
     if quote is None or sub is None:
         return False
-    if now < quote.current_period_end_snapshot and sub.current_period_end == quote.current_period_end_snapshot:
+    window_open = quote.created_at is None or now < quote.created_at + UPGRADE_PAYMENT_WINDOW
+    if now < quote.current_period_end_snapshot and sub.current_period_end == quote.current_period_end_snapshot and window_open:
         return False
     record.status = "failed"
-    meta["closed_reason"] = "not paid by the paid-through time"
+    meta["closed_reason"] = "not paid by the paid-through time" if window_open else "not paid within the upgrade payment window"
     record.transaction_metadata = json.dumps(meta, sort_keys=True)
     if quote.status == "issued":
         quote.status = "expired"
@@ -17577,18 +17605,26 @@ def payment_method_confirm(data: SubscriptionCheckoutConfirmRequest, user: User 
     return JSONResponse(status_code=200 if result['status'] == 'success' else 202 if result['status'] == 'pending' else 409, content=result)
 
 
-def reconcile_upgrade_payment(db, record, tx):
+def reconcile_upgrade_payment(db, record, tx, now=None):
+    """PRICE-UPGRADE-001: a verified upgrade payment buys one full term of the
+    new plan and interval, starting when Paystack confirmed it; the unused value
+    of the old period was already credited in the quote. The paid-through time
+    moves to start + that term, and the next renewal is anchored there."""
     if record.status == 'success':
         return {'status': 'success', 'already_processed': True}
     if tx.get('status') in ('pending', 'processing', 'ongoing', 'queued', 'abandoned'):
         return {'status': 'pending'}
+    now = now or datetime.utcnow()
     meta = parse_paystack_metadata(record.transaction_metadata)
     actual = parse_paystack_metadata(tx.get('metadata'))
     quote = db.query(SubscriptionUpgradeQuote).filter_by(quote_reference=meta.get('quote_reference'), business_id=record.business_id).with_for_update().first()
     business = db.query(BusinessProfile).filter_by(id=record.business_id).one()
     sub = db.query(BusinessSubscription).filter_by(id=record.subscription_id).with_for_update().one()
+    confirmed_at = provider_confirmed_at(tx, now)
     if (not quote or quote.status != 'issued' or sub.plan != quote.from_plan
             or sub.billing_interval != quote.from_interval or sub.current_period_end != quote.current_period_end_snapshot
+            or record.status not in OPEN_ATTEMPT_STATUSES or quote.paystack_reference != record.paystack_reference
+            or record.amount_kobo != quote.amount_due_kobo
             or tx.get('status') != 'success' or tx.get('reference') != record.paystack_reference
             or tx.get('amount') != record.amount_kobo or tx.get('currency') != 'NGN'
             or actual.get('quote_reference') != quote.quote_reference
@@ -17598,15 +17634,42 @@ def reconcile_upgrade_payment(db, record, tx):
             or not transaction_id_available(db, tx, record)):
         record.status = 'flagged_verification_mismatch'; db.flush()
         return {'status': 'flagged_verification_mismatch'}
-    record.status = 'success'; record.paid_at = datetime.utcnow(); record.paystack_transaction_id = str(tx['id'])
+    # The credit in the quote is the unused value at quote time. A payment
+    # confirmed after the old paid-through time, or long after the quote, would
+    # apply a credit for time already used: kept for review, never applied.
+    if confirmed_at >= quote.current_period_end_snapshot or (quote.created_at and confirmed_at > quote.created_at + UPGRADE_PAYMENT_WINDOW):
+        meta['review_reason'] = 'upgrade payment confirmed after the paid-through time or the upgrade payment window'
+        record.transaction_metadata = json.dumps(meta, sort_keys=True)
+        record.paystack_transaction_id = str(tx.get('id') or '') or None
+        record.paid_at = confirmed_at
+        record.status = 'flagged_verification_mismatch'
+        if quote.status == 'issued':
+            quote.status = 'expired'
+        add_audit(db, None, 'SUBSCRIPTION_UPGRADE_LATE_PAYMENT_REVIEW',
+                  f"Upgrade payment {record.paystack_reference} was confirmed too late to apply its quoted credit. The plan was not changed; the payment needs a refund review.",
+                  business_id=business.id)
+        db.flush()
+        return {'status': 'flagged_verification_mismatch'}
+    start = confirmed_at
+    end = add_billing_interval(start, quote.to_interval)
+    meta.update({'paystack_transaction_id': str(tx.get('id') or ''),
+                 'server_verified_at': now.replace(microsecond=0).isoformat() + 'Z',
+                 'period_start': to_utc_iso(start), 'period_end': to_utc_iso(end),
+                 'replaced_period_end': to_utc_iso(quote.current_period_end_snapshot)})
+    record.transaction_metadata = json.dumps(meta, sort_keys=True)
+    record.status = 'success'; record.paid_at = confirmed_at; record.paystack_transaction_id = str(tx['id'])
     sub.plan = quote.to_plan; sub.billing_interval = quote.to_interval
-    sub.status = 'active'; sub.payment_status = 'paid'; sub.paid_at = record.paid_at
-    sub.next_billing_at = sub.current_period_end; sub.latest_transaction_reference = record.paystack_reference
+    sub.status = 'active'; sub.payment_status = 'paid'; sub.paid_at = confirmed_at
+    sub.current_period_start = start; sub.current_period_end = end
+    sub.next_billing_at = end; sub.latest_transaction_reference = record.paystack_reference
     sub.cancel_at_period_end = False; sub.cancelled_at = None; sub.grace_period_ends_at = None
     clear_pending_downgrade(sub); safe_payment_method(sub, tx)
     business.subscription_plan = sub.plan; business.billing_interval = sub.billing_interval
-    quote.status = 'paid'; quote.consumed_at = record.paid_at
-    add_audit(db, None, 'SUBSCRIPTION_UPGRADED', 'Paystack verified the upgrade. Existing billing period preserved.', business_id=business.id,
+    quote.status = 'paid'; quote.consumed_at = confirmed_at
+    add_audit(db, None, 'SUBSCRIPTION_UPGRADED',
+              f"Paystack verified the upgrade to {PLAN_CONFIG[quote.to_plan]['label']} ({quote.to_interval}). "
+              f"A new {quote.to_interval} period started at confirmation; paid through {to_utc_iso(end)} "
+              f"(unused credit {quote.unused_credit_kobo/100:.2f} NGN applied).", business_id=business.id,
               metadata=plan_change_metadata(quote.from_plan, quote.to_plan))
     db.flush()
     return {'status': 'success'}
@@ -17625,6 +17688,58 @@ def reconcile_upgrade_payment(db, record, tx):
 class UpgradeQuoteRequest(BaseModel):
     plan: str
     billing_interval: str
+
+
+class UpgradeNotQuotable(Exception):
+    """The unused value of the current period is worth at least one full term
+    of the requested plan and interval (only possible from an annual period to
+    a monthly one). Charging the floor would give that term almost free and
+    forfeit the rest of the credit, so the upgrade is refused instead."""
+    def __init__(self, unused_credit_kobo: int, new_price_kobo: int, to_plan: str, to_interval: str):
+        super().__init__(UPGRADE_CREDIT_EXCEEDS_TERM_CODE)
+        self.unused_credit_kobo, self.new_price_kobo = unused_credit_kobo, new_price_kobo
+        self.to_plan, self.to_interval = to_plan, to_interval
+
+    def detail(self, business, sub) -> dict:
+        label = PLAN_CONFIG[self.to_plan]["label"]
+        return {"code": UPGRADE_CREDIT_EXCEEDS_TERM_CODE,
+                "unused_credit": self.unused_credit_kobo / 100, "new_price": self.new_price_kobo / 100,
+                "message": (f"The unused part of your current paid period (₦{self.unused_credit_kobo / 100:,.2f}) is worth more than "
+                            f"one {self.to_interval} term of {label} (₦{self.new_price_kobo / 100:,.2f}). "
+                            f"Choose {label} Annual, or change plan when your current period ends on "
+                            f"{_format_reminder_time(business, sub.current_period_end)}.")}
+
+
+def upgrade_quote_amounts(from_plan: str, from_interval: str, to_plan: str, to_interval: str,
+                          period_start: datetime, period_end: datetime, now: datetime) -> dict:
+    """PRICE-UPGRADE-001 — the one upgrade formula (pure; used by the quote
+    endpoint, the tests and the pricing matrix).
+
+    The payment buys one full term of the new plan and interval, starting when
+    Paystack confirms it (reconcile_upgrade_payment). The unused part of the
+    current paid period is credited at the price actually paid for it:
+
+        unused_fraction = remaining seconds / paid-period seconds   (0..1)
+        credit_kobo     = round(current price kobo x unused_fraction)
+        due_kobo        = new term price kobo - credit_kobo
+
+    Both amounts are naira values of service, so monthly and annual periods
+    compare directly. Kobo = naira x 100 exactly once; no tax or fee is added.
+    """
+    total_seconds = (period_end - period_start).total_seconds()
+    if total_seconds <= 0:
+        raise ValueError("invalid billing period")
+    remaining_seconds = max((period_end - now).total_seconds(), 0.0)
+    unused_fraction = min(remaining_seconds / total_seconds, 1.0)
+    current_price_kobo = plan_amount_naira(from_plan, from_interval) * 100
+    new_price_kobo = plan_amount_naira(to_plan, to_interval) * 100
+    unused_credit_kobo = round(current_price_kobo * unused_fraction)
+    if unused_credit_kobo > new_price_kobo - UPGRADE_MINIMUM_CHARGE_KOBO:
+        raise UpgradeNotQuotable(unused_credit_kobo, new_price_kobo, to_plan, to_interval)
+    return {"unused_fraction": unused_fraction, "current_price_kobo": current_price_kobo,
+            "new_price_kobo": new_price_kobo, "unused_credit_kobo": unused_credit_kobo,
+            "amount_due_kobo": new_price_kobo - unused_credit_kobo,
+            "new_paid_through_if_paid_now": add_billing_interval(now, to_interval)}
 
 @app.post("/subscription/upgrade-quote")
 def create_upgrade_quote(data: UpgradeQuoteRequest, request: Request, user: User = Depends(get_authenticated_user), db: Session = Depends(get_db)):
@@ -17667,18 +17782,36 @@ def create_upgrade_quote(data: UpgradeQuoteRequest, request: Request, user: User
         raise HTTPException(status_code=400, detail="That isn't a plan upgrade. Choose a higher plan to upgrade.")
 
     now = datetime.utcnow()
-    total_seconds = (sub.current_period_end - sub.current_period_start).total_seconds()
-    if total_seconds <= 0:
+    try:
+        amounts = upgrade_quote_amounts(from_plan, from_interval, to_plan, to_interval,
+                                        sub.current_period_start, sub.current_period_end, now)
+    except UpgradeNotQuotable as refusal:
+        raise HTTPException(status_code=409, detail=refusal.detail(business, sub))
+    except ValueError:
         raise HTTPException(status_code=409, detail="Your billing period looks invalid. Please contact support before upgrading.")
-    remaining_seconds = max((sub.current_period_end - now).total_seconds(), 0.0)
-    unused_fraction = min(remaining_seconds / total_seconds, 1.0)
+    current_price_kobo, new_price_kobo = amounts["current_price_kobo"], amounts["new_price_kobo"]
+    unused_credit_kobo, amount_due_kobo = amounts["unused_credit_kobo"], amounts["amount_due_kobo"]
 
-    current_price_kobo = plan_amount_naira(from_plan, from_interval) * 100
-    new_price_kobo = plan_amount_naira(to_plan, to_interval) * 100
-    unused_credit_kobo = round(current_price_kobo * unused_fraction)
-    # Never let the credit exceed the new plan's price (would mean a "free"
-    # upgrade); floor at a small positive amount since Paystack requires one.
-    amount_due_kobo = max(new_price_kobo - unused_credit_kobo, UPGRADE_MINIMUM_CHARGE_KOBO)
+    # One upgrade payment at a time: an earlier upgrade checkout is settled
+    # with Paystack first. If it was paid, it is applied and this request is
+    # refused; if it is still open it is closed, so it can never be applied
+    # beside the new one (a late payment on it is kept for review).
+    for row in open_renewal_attempts(db, business.id):
+        if row.purpose != "subscription_upgrade":
+            continue
+        outcome = settle_open_attempt(db, row, now)
+        if outcome == "success":
+            db.commit()
+            raise HTTPException(status_code=409, detail="Your earlier upgrade payment was confirmed. Refresh Billing to see your new plan.")
+        if outcome == "unknown":
+            db.commit()
+            raise HTTPException(status_code=409, detail="An earlier upgrade checkout could not be checked with Paystack. Please try again in a minute.")
+        if row.status in OPEN_ATTEMPT_STATUSES:
+            meta = parse_paystack_metadata(row.transaction_metadata)
+            meta["closed_reason"] = "superseded by a newer upgrade quote"
+            row.transaction_metadata = json.dumps(meta, sort_keys=True)
+            row.status = "failed"
+    sub = get_or_create_subscription(db, business)
 
     # Only one live quote per business at a time — a later quote request
     # supersedes any earlier one rather than leaving multiple valid quotes
@@ -17693,7 +17826,7 @@ def create_upgrade_quote(data: UpgradeQuoteRequest, request: Request, user: User
         current_price_kobo=current_price_kobo, new_price_kobo=new_price_kobo,
         unused_credit_kobo=unused_credit_kobo, amount_due_kobo=amount_due_kobo,
         current_period_end_snapshot=sub.current_period_end, status="issued",
-        expires_at=now + timedelta(minutes=UPGRADE_QUOTE_VALIDITY_MINUTES),
+        expires_at=now + timedelta(minutes=UPGRADE_QUOTE_VALIDITY_MINUTES), created_at=now,
     )
     db.add(quote)
     add_audit(db, user, "SUBSCRIPTION_UPGRADE_QUOTED",
@@ -17708,9 +17841,18 @@ def create_upgrade_quote(data: UpgradeQuoteRequest, request: Request, user: User
         "current_price": current_price_kobo / 100, "new_price": new_price_kobo / 100,
         "unused_credit": unused_credit_kobo / 100, "amount_due": amount_due_kobo / 100,
         "currency": "NGN",
+        "current_period_start": to_utc_iso(sub.current_period_start),
         "current_period_end": to_utc_iso(sub.current_period_end),
+        "unused_fraction": round(amounts["unused_fraction"], 6),
+        # PRICE-UPGRADE-001: the payment buys one full new term that starts
+        # when Paystack confirms it; these are the values if paid now.
+        "new_period_starts": "at_payment_confirmation",
+        "new_period_start_if_paid_now": to_utc_iso(now),
+        "new_paid_through_if_paid_now": to_utc_iso(amounts["new_paid_through_if_paid_now"]),
         "next_renewal_amount": new_price_kobo / 100,
+        "amount_due_kobo": amount_due_kobo,
         "expires_at": to_utc_iso(quote.expires_at),
+        "payment_window_minutes": int(UPGRADE_PAYMENT_WINDOW.total_seconds() // 60),
     }
 
 
@@ -17757,6 +17899,17 @@ def start_upgrade_checkout(data: UpgradeCheckoutRequest, request: Request, user:
     claim, replay = claim_checkout(db, request, user, 'paystack-upgrade', {'quote_reference': quote_reference})
     if replay:
         return replay
+    # PRICE-UPGRADE-001: one checkout per quote. A second request for the same
+    # quote resumes its open checkout; it never creates a second payment.
+    if quote.paystack_reference:
+        existing = db.query(PaymentRecord).filter_by(paystack_reference=quote.paystack_reference, business_id=business.id).first()
+        resume = checkout_resume_payload(existing) if existing is not None and existing.status in OPEN_ATTEMPT_STATUSES else None
+        if claim is not None:
+            db.delete(claim)
+        db.commit()
+        if resume is not None:
+            return resume
+        raise HTTPException(status_code=409, detail="A payment was already started for this upgrade quote. Please request a new quote.")
     reference = f"cauldra_upgrade_{business.business_code}_{secrets.token_hex(8)}"
     record = PaymentRecord(
         business_id=business.id, subscription_id=sub.id, plan=quote.to_plan, billing_interval=quote.to_interval,
@@ -17779,6 +17932,11 @@ def start_upgrade_checkout(data: UpgradeCheckoutRequest, request: Request, user:
     meta = parse_paystack_metadata(record.transaction_metadata)
     result = initialize_owned_checkout(db, request, record, business.email or user.email,
         {**meta, 'business_id': business.id, 'quote_reference': quote.quote_reference}, user)
+    # Kept so a repeated request for this quote resumes this same checkout.
+    stored = parse_paystack_metadata(record.transaction_metadata)
+    stored.update({"access_code": result.get("access_code"), "authorization_url": result.get("authorization_url"),
+                   "callback_url": result.get("callback_url")})
+    record.transaction_metadata = json.dumps(stored)
     complete_idempotent_mutation(claim, result); db.commit()
     return result
 

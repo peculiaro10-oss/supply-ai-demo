@@ -8597,11 +8597,47 @@
   "ستنتقل إلى صفحة الدفع الآمن في Paystack لدفع {price}. لا تتغيّر خطتك إلا بعد تأكيد Paystack للدفع.",
   "Você irá para o pagamento seguro do Paystack para pagar {price}. Seu plano só muda depois que o Paystack confirmar o pagamento."
  ],
- "You'll go to Paystack's secure checkout to pay for the upgrade. Paystack shows the exact amount before you pay; your plan changes only after the payment is confirmed. From your next renewal you pay {price}.": [
-  "Vous allez accéder au paiement sécurisé de Paystack pour régler la mise à niveau. Paystack affiche le montant exact avant paiement ; votre forfait ne change qu’après confirmation. À partir du prochain renouvellement, vous payez {price}.",
-  "Irás al pago seguro de Paystack para pagar la mejora. Paystack muestra el importe exacto antes de pagar; tu plan cambia solo tras confirmarse el pago. Desde tu próxima renovación pagas {price}.",
-  "ستنتقل إلى صفحة الدفع الآمن في Paystack لدفع قيمة الترقية. تعرض Paystack المبلغ الدقيق قبل الدفع، ولا تتغيّر خطتك إلا بعد تأكيده. ابتداءً من التجديد القادم تدفع {price}.",
-  "Você irá para o pagamento seguro do Paystack para pagar o upgrade. O Paystack mostra o valor exato antes do pagamento; seu plano só muda após a confirmação. A partir da próxima renovação você paga {price}."
+ "You'll pay the amount below on Paystack's secure checkout. Your plan changes only after the payment is confirmed; a new billing period starts then and renews at {price}.": [
+  "Vous paierez le montant ci-dessous sur le paiement sécurisé de Paystack. Votre forfait ne change qu’après confirmation du paiement ; une nouvelle période de facturation commence alors et se renouvelle à {price}.",
+  "Pagarás el importe de abajo en el pago seguro de Paystack. Tu plan cambia solo cuando se confirma el pago; entonces empieza un nuevo periodo de facturación que se renueva a {price}.",
+  "ستدفع المبلغ أدناه عبر صفحة الدفع الآمن في Paystack. لا تتغيّر خطتك إلا بعد تأكيد الدفع؛ وعندها تبدأ فترة فوترة جديدة تتجدّد بسعر {price}.",
+  "Você pagará o valor abaixo no pagamento seguro do Paystack. Seu plano só muda após a confirmação do pagamento; então começa um novo período de cobrança, renovado a {price}."
+ ],
+ "{plan} {interval} price": [
+  "Prix {plan} {interval}",
+  "Precio de {plan} {interval}",
+  "سعر {plan} {interval}",
+  "Preço {plan} {interval}"
+ ],
+ "Credit for the unused part of your current period": [
+  "Crédit pour la partie inutilisée de votre période actuelle",
+  "Crédito por la parte no usada de tu periodo actual",
+  "رصيد عن الجزء غير المستخدم من فترتك الحالية",
+  "Crédito pela parte não utilizada do seu período atual"
+ ],
+ "You pay now": [
+  "Vous payez maintenant",
+  "Pagas ahora",
+  "تدفع الآن",
+  "Você paga agora"
+ ],
+ "If paid now, your new period runs until {time}.": [
+  "Si vous payez maintenant, votre nouvelle période court jusqu’au {time}.",
+  "Si pagas ahora, tu nuevo periodo dura hasta {time}.",
+  "إذا دفعت الآن، تستمر فترتك الجديدة حتى {time}.",
+  "Se pagar agora, seu novo período vai até {time}."
+ ],
+ "Preparing your upgrade price…": [
+  "Préparation du prix de votre mise à niveau…",
+  "Preparando el precio de tu mejora…",
+  "جارٍ تجهيز سعر الترقية…",
+  "Preparando o preço do seu upgrade…"
+ ],
+ "The upgrade price could not be prepared. Please try again.": [
+  "Le prix de la mise à niveau n’a pas pu être préparé. Veuillez réessayer.",
+  "No se pudo preparar el precio de la mejora. Inténtalo de nuevo.",
+  "تعذّر تجهيز سعر الترقية. يرجى المحاولة مرة أخرى.",
+  "Não foi possível preparar o preço do upgrade. Tente novamente."
  ],
  "Switch to {plan}": [
   "Passer au forfait {plan}",
