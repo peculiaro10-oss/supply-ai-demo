@@ -19468,6 +19468,7 @@
                             body: JSON.stringify(devicePushIdentity),
                         });
                     } catch (_) {}
+                    await flushNativeSessionCookies(); // persist the cleared cookie
                 }
                 await endPresenceSession();
             }
@@ -19572,6 +19573,7 @@
             try {
                 await fetch(`${API_URL}/auth/clear-client-session`, { method: "POST", credentials: "include", headers: { "Accept": "application/json" } });
             } catch (_) {}
+            await flushNativeSessionCookies();
             stopAuthRefreshHeartbeat();
             authToken = "";
             offlineWorkspaceUnlocked = false;
@@ -19640,6 +19642,7 @@
                     const res = await fetch(`${API_URL}/business-profile/`, { method: "DELETE", credentials: "include", headers: { "Authorization": `Bearer ${authToken}`, "Accept": "application/json" } });
                     const data = await res.json().catch(() => ({}));
                     if (!res.ok) throw new Error(showApiError(res, data, t("settings.deleteProfileFailed")));
+                    await flushNativeSessionCookies(); // persist the cleared cookie
                     // The business — and this session's own user row — no
                     // longer exist server-side once this response arrives.
                     // Reuse the SAME comprehensive sign-out cleanup every
@@ -20482,6 +20485,7 @@
                 const data = await response.json();
                 if (response.ok) {
                     authToken = data.access_token; rememberSignedInSession();
+                    await flushNativeSessionCookies();
                     currentUserProfile = {
                         id: data.id || null,
                         username: username,
@@ -20731,6 +20735,7 @@
             }
             if (!data.access_token) { showAuthError("The sign-in response was incomplete. Please try again."); return; }
             authToken = data.access_token; rememberSignedInSession();
+            await flushNativeSessionCookies();
             try {
                 currentUserProfile = {
                     id: data.id || null,
@@ -20827,6 +20832,8 @@
                 return;
             }
             if (data.access_token) authToken = data.access_token;
+            // Every earlier session was just revoked; persist the new refresh cookie.
+            await flushNativeSessionCookies();
             if (currentUserProfile) currentUserProfile.must_change_password = false;
             // PLAN-006: the mandatory path opens this dialog with an inline
             // display:flex, which the "hidden" class alone cannot override, so a
@@ -27361,10 +27368,12 @@
                 refreshAccessTokenLastOutcome = "error";
                 try {
                     const res = await fetchWithTimeout(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include", headers: { "Accept": "application/json" } }, 6500);
-                    if (res.status === 204 || res.status === 401) { refreshAccessTokenLastOutcome = "no-session"; return false; }
+                    if (res.status === 204 || res.status === 401) { refreshAccessTokenLastOutcome = "no-session"; await flushNativeSessionCookies(); return false; }
                     if (!res.ok) return false;
                     const data = await res.json();
                     if (!data.access_token) return false;
+                    // The rotation just revoked the cookie on disk; persist its successor.
+                    await flushNativeSessionCookies();
                     refreshAccessTokenLastOutcome = "ok";
                     rememberSignedInSession();
                     authToken = data.access_token;
@@ -27709,6 +27718,21 @@
         }
         function hadSignedInSessionBefore() {
             try { return localStorage.getItem(SIGNED_IN_MARKER_KEY) === "1"; } catch (_) { return false; }
+        }
+
+        // NATIVE-SESSION-001: on Android, write a refresh cookie the server just
+        // set, rotated or cleared to disk now instead of in the WebView's ~30 s
+        // batch. Otherwise a process death in that window left the revoked
+        // predecessor on disk and the next launch signed the user out. Web: no-op.
+        // Never fails or delays authentication by more than the 2 s cap.
+        async function flushNativeSessionCookies() {
+            try {
+                const capacitor = window.Capacitor;
+                if (!capacitor?.isNativePlatform?.()) return;
+                const plugin = capacitor.Plugins?.CauldraSession;
+                if (typeof plugin?.flushCookies !== "function") return;
+                await Promise.race([plugin.flushCookies(), new Promise(resolve => setTimeout(resolve, 2000))]);
+            } catch (_) {}
         }
 
         function showSessionEndedNotice(message) {

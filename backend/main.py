@@ -4588,7 +4588,14 @@ def set_refresh_cookie(response: Response, raw: str):
         max_age=REFRESH_TOKEN_EXPIRE_DAYS*86400, path="/")
 
 def clear_refresh_cookie(response: Response):
-    response.delete_cookie(REFRESH_COOKIE_NAME, path="/")
+    # NATIVE-SESSION-001: the deletion carries the attributes the cookie was set
+    # with. Starlette's default (SameSite=lax, no Secure) is refused on the
+    # Android app's cross-site response, so sign-out and a rejected refresh
+    # never removed the device's dead cookie.
+    native = _native_cookie_request.get()
+    response.delete_cookie(REFRESH_COOKIE_NAME, path="/", httponly=True,
+        secure=True if native else REFRESH_COOKIE_SECURE,
+        samesite="none" if native else REFRESH_COOKIE_SAMESITE)
 
 def token_from_payload(token: str) -> tuple[dict, str]:
     try:
